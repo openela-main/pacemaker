@@ -1,0 +1,2429 @@
+From de05f6b52c667155d262ceeb541dc1041d079d71 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Thu, 8 Sep 2022 11:36:58 -0400
+Subject: [PATCH 01/26] Refactor: tools: Use a uint32_t for attr_options.
+
+---
+ tools/attrd_updater.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/tools/attrd_updater.c b/tools/attrd_updater.c
+index d90567a..b85a281 100644
+--- a/tools/attrd_updater.c
++++ b/tools/attrd_updater.c
+@@ -47,7 +47,7 @@ struct {
+     gchar *attr_node;
+     gchar *attr_set;
+     char *attr_value;
+-    int attr_options;
++    uint32_t attr_options;
+     gboolean query_all;
+     gboolean quiet;
+ } options = {
+-- 
+2.31.1
+
+From c6637520b474d44553ade52c0dbe9e36e873135f Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Fri, 21 Oct 2022 14:31:16 -0400
+Subject: [PATCH 02/26] Refactor: libcrmcommon: Make pcmk__xe_match more
+ broadly useful.
+
+If attr_v is NULL, simply return the first node with a matching name.
+---
+ lib/common/xml.c | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/lib/common/xml.c b/lib/common/xml.c
+index 036dd87..ac6f46a 100644
+--- a/lib/common/xml.c
++++ b/lib/common/xml.c
+@@ -510,7 +510,7 @@ find_xml_node(const xmlNode *root, const char *search_path, gboolean must_find)
+  * \param[in] parent     XML element to search
+  * \param[in] node_name  If not NULL, only match children of this type
+  * \param[in] attr_n     If not NULL, only match children with an attribute
+- *                       of this name and a value of \p attr_v
++ *                       of this name.
+  * \param[in] attr_v     If \p attr_n and this are not NULL, only match children
+  *                       with an attribute named \p attr_n and this value
+  *
+@@ -520,14 +520,16 @@ xmlNode *
+ pcmk__xe_match(const xmlNode *parent, const char *node_name,
+                const char *attr_n, const char *attr_v)
+ {
+-    /* ensure attr_v specified when attr_n is */
+-    CRM_CHECK(attr_n == NULL || attr_v != NULL, return NULL);
++    CRM_CHECK(parent != NULL, return NULL);
++    CRM_CHECK(attr_v == NULL || attr_n != NULL, return NULL);
+ 
+     for (xmlNode *child = pcmk__xml_first_child(parent); child != NULL;
+          child = pcmk__xml_next(child)) {
+         if (pcmk__str_eq(node_name, (const char *) (child->name),
+                          pcmk__str_null_matches)
+-            && ((attr_n == NULL) || attr_matches(child, attr_n, attr_v))) {
++            && ((attr_n == NULL) ||
++                (attr_v == NULL && xmlHasProp(child, (pcmkXmlStr) attr_n)) ||
++                (attr_v != NULL && attr_matches(child, attr_n, attr_v)))) {
+             return child;
+         }
+     }
+-- 
+2.31.1
+
+From dd520579484c6ec091f7fbb550347941302dad0e Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Fri, 21 Oct 2022 14:32:46 -0400
+Subject: [PATCH 03/26] Tests: libcrmcommon: Add tests for pcmk__xe_match.
+
+---
+ lib/common/tests/xml/Makefile.am           |   3 +-
+ lib/common/tests/xml/pcmk__xe_match_test.c | 105 +++++++++++++++++++++
+ 2 files changed, 107 insertions(+), 1 deletion(-)
+ create mode 100644 lib/common/tests/xml/pcmk__xe_match_test.c
+
+diff --git a/lib/common/tests/xml/Makefile.am b/lib/common/tests/xml/Makefile.am
+index 342ca07..0ccdcc3 100644
+--- a/lib/common/tests/xml/Makefile.am
++++ b/lib/common/tests/xml/Makefile.am
+@@ -11,6 +11,7 @@ include $(top_srcdir)/mk/tap.mk
+ include $(top_srcdir)/mk/unittest.mk
+ 
+ # Add "_test" to the end of all test program names to simplify .gitignore.
+-check_PROGRAMS =	pcmk__xe_foreach_child_test
++check_PROGRAMS =	pcmk__xe_foreach_child_test \
++					pcmk__xe_match_test
+ 
+ TESTS = $(check_PROGRAMS)
+diff --git a/lib/common/tests/xml/pcmk__xe_match_test.c b/lib/common/tests/xml/pcmk__xe_match_test.c
+new file mode 100644
+index 0000000..fd529ba
+--- /dev/null
++++ b/lib/common/tests/xml/pcmk__xe_match_test.c
+@@ -0,0 +1,105 @@
++/*
++ * Copyright 2022 the Pacemaker project contributors
++ *
++ * The version control history for this file may have further details.
++ *
++ * This source code is licensed under the GNU Lesser General Public License
++ * version 2.1 or later (LGPLv2.1+) WITHOUT ANY WARRANTY.
++ */
++
++#include <crm_internal.h>
++
++#include <crm/common/unittest_internal.h>
++#include <crm/common/xml_internal.h>
++
++const char *str1 =
++    "<xml>\n"
++    "  <!-- This is an A node -->\n"
++    "  <nodeA attrA=\"123\" id=\"1\">\n"
++    "    content\n"
++    "  </nodeA>\n"
++    "  <!-- This is an A node -->\n"
++    "  <nodeA attrA=\"456\" id=\"2\">\n"
++    "    content\n"
++    "  </nodeA>\n"
++    "  <!-- This is an A node -->\n"
++    "  <nodeA attrB=\"XYZ\" id=\"3\">\n"
++    "    content\n"
++    "  </nodeA>\n"
++    "  <!-- This is a B node -->\n"
++    "  <nodeB attrA=\"123\" id=\"4\">\n"
++    "    content\n"
++    "  </nodeA>\n"
++    "  <!-- This is a B node -->\n"
++    "  <nodeB attrB=\"ABC\" id=\"5\">\n"
++    "    content\n"
++    "  </nodeA>\n"
++    "</xml>";
++
++static void
++bad_input(void **state) {
++    xmlNode *xml = string2xml(str1);
++
++    assert_null(pcmk__xe_match(NULL, NULL, NULL, NULL));
++    assert_null(pcmk__xe_match(NULL, NULL, NULL, "attrX"));
++
++    free_xml(xml);
++}
++
++static void
++not_found(void **state) {
++    xmlNode *xml = string2xml(str1);
++
++    /* No node with an attrX attribute */
++    assert_null(pcmk__xe_match(xml, NULL, "attrX", NULL));
++    /* No nodeX node */
++    assert_null(pcmk__xe_match(xml, "nodeX", NULL, NULL));
++    /* No nodeA node with attrX */
++    assert_null(pcmk__xe_match(xml, "nodeA", "attrX", NULL));
++    /* No nodeA node with attrA=XYZ */
++    assert_null(pcmk__xe_match(xml, "nodeA", "attrA", "XYZ"));
++
++    free_xml(xml);
++}
++
++static void
++find_attrB(void **state) {
++    xmlNode *xml = string2xml(str1);
++    xmlNode *result = NULL;
++
++    /* Find the first node with attrB */
++    result = pcmk__xe_match(xml, NULL, "attrB", NULL);
++    assert_non_null(result);
++    assert_string_equal(crm_element_value(result, "id"), "3");
++
++    /* Find the first nodeB with attrB */
++    result = pcmk__xe_match(xml, "nodeB", "attrB", NULL);
++    assert_non_null(result);
++    assert_string_equal(crm_element_value(result, "id"), "5");
++
++    free_xml(xml);
++}
++
++static void
++find_attrA_matching(void **state) {
++    xmlNode *xml = string2xml(str1);
++    xmlNode *result = NULL;
++
++    /* Find attrA=456 */
++    result = pcmk__xe_match(xml, NULL, "attrA", "456");
++    assert_non_null(result);
++    assert_string_equal(crm_element_value(result, "id"), "2");
++
++    /* Find a nodeB with attrA=123 */
++    result = pcmk__xe_match(xml, "nodeB", "attrA", "123");
++    assert_non_null(result);
++    assert_string_equal(crm_element_value(result, "id"), "4");
++
++    free_xml(xml);
++}
++
++PCMK__UNIT_TEST(NULL, NULL,
++                cmocka_unit_test(bad_input),
++                cmocka_unit_test(not_found),
++                cmocka_unit_test(find_attrB),
++                cmocka_unit_test(find_attrA_matching));
+-- 
+2.31.1
+
+From 03af8498d8aaf21c509cec9b0ec4b78475da41d7 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Thu, 8 Sep 2022 12:22:26 -0400
+Subject: [PATCH 04/26] Feature: libcrmcommon: Add attrd options for specifying
+ a sync point.
+
+---
+ include/crm/common/attrd_internal.h | 16 +++++++++-------
+ 1 file changed, 9 insertions(+), 7 deletions(-)
+
+diff --git a/include/crm/common/attrd_internal.h b/include/crm/common/attrd_internal.h
+index f7033ad..389be48 100644
+--- a/include/crm/common/attrd_internal.h
++++ b/include/crm/common/attrd_internal.h
+@@ -16,13 +16,15 @@ extern "C" {
+ 
+ // Options for clients to use with functions below
+ enum pcmk__node_attr_opts {
+-    pcmk__node_attr_none    = 0,
+-    pcmk__node_attr_remote  = (1 << 0),
+-    pcmk__node_attr_private = (1 << 1),
+-    pcmk__node_attr_pattern = (1 << 2),
+-    pcmk__node_attr_value   = (1 << 3),
+-    pcmk__node_attr_delay   = (1 << 4),
+-    pcmk__node_attr_perm    = (1 << 5),
++    pcmk__node_attr_none           = 0,
++    pcmk__node_attr_remote         = (1 << 0),
++    pcmk__node_attr_private        = (1 << 1),
++    pcmk__node_attr_pattern        = (1 << 2),
++    pcmk__node_attr_value          = (1 << 3),
++    pcmk__node_attr_delay          = (1 << 4),
++    pcmk__node_attr_perm           = (1 << 5),
++    pcmk__node_attr_sync_local     = (1 << 6),
++    pcmk__node_attr_sync_cluster   = (1 << 7),
+ };
+ 
+ #define pcmk__set_node_attr_flags(node_attr_flags, flags_to_set) do {   \
+-- 
+2.31.1
+
+From 5c8825293ee21d3823bdcd01b0df9c7d39739940 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Thu, 8 Sep 2022 12:23:09 -0400
+Subject: [PATCH 05/26] Feature: libcrmcommon: Add sync point to IPC request
+ XML.
+
+If one of the pcmk__node_attr_sync_* options is provided, add an
+attribute to the request XML.  This will later be inspected by the
+server to determine when to send the reply to the client.
+---
+ include/crm/common/options_internal.h | 2 ++
+ include/crm_internal.h                | 1 +
+ lib/common/ipc_attrd.c                | 6 ++++++
+ 3 files changed, 9 insertions(+)
+
+diff --git a/include/crm/common/options_internal.h b/include/crm/common/options_internal.h
+index b153c67..f29ba3f 100644
+--- a/include/crm/common/options_internal.h
++++ b/include/crm/common/options_internal.h
+@@ -145,9 +145,11 @@ bool pcmk__valid_sbd_timeout(const char *value);
+ #define PCMK__META_ALLOW_UNHEALTHY_NODES    "allow-unhealthy-nodes"
+ 
+ // Constants for enumerated values for various options
++#define PCMK__VALUE_CLUSTER                 "cluster"
+ #define PCMK__VALUE_CUSTOM                  "custom"
+ #define PCMK__VALUE_FENCING                 "fencing"
+ #define PCMK__VALUE_GREEN                   "green"
++#define PCMK__VALUE_LOCAL                   "local"
+ #define PCMK__VALUE_MIGRATE_ON_RED          "migrate-on-red"
+ #define PCMK__VALUE_NONE                    "none"
+ #define PCMK__VALUE_NOTHING                 "nothing"
+diff --git a/include/crm_internal.h b/include/crm_internal.h
+index e6e2e96..08193c3 100644
+--- a/include/crm_internal.h
++++ b/include/crm_internal.h
+@@ -71,6 +71,7 @@
+ #define PCMK__XA_ATTR_RESOURCE          "attr_resource"
+ #define PCMK__XA_ATTR_SECTION           "attr_section"
+ #define PCMK__XA_ATTR_SET               "attr_set"
++#define PCMK__XA_ATTR_SYNC_POINT        "attr_sync_point"
+ #define PCMK__XA_ATTR_USER              "attr_user"
+ #define PCMK__XA_ATTR_UUID              "attr_key"
+ #define PCMK__XA_ATTR_VALUE             "attr_value"
+diff --git a/lib/common/ipc_attrd.c b/lib/common/ipc_attrd.c
+index f6cfbc4..4606509 100644
+--- a/lib/common/ipc_attrd.c
++++ b/lib/common/ipc_attrd.c
+@@ -431,6 +431,12 @@ populate_update_op(xmlNode *op, const char *node, const char *name, const char *
+                     pcmk_is_set(options, pcmk__node_attr_remote));
+     crm_xml_add_int(op, PCMK__XA_ATTR_IS_PRIVATE,
+                     pcmk_is_set(options, pcmk__node_attr_private));
++
++    if (pcmk_is_set(options, pcmk__node_attr_sync_local)) {
++        crm_xml_add(op, PCMK__XA_ATTR_SYNC_POINT, PCMK__VALUE_LOCAL);
++    } else if (pcmk_is_set(options, pcmk__node_attr_sync_cluster)) {
++        crm_xml_add(op, PCMK__XA_ATTR_SYNC_POINT, PCMK__VALUE_CLUSTER);
++    }
+ }
+ 
+ int
+-- 
+2.31.1
+
+From e2b3fee630caf0846ca8bbffcef4d6d2acfd32a5 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Thu, 8 Sep 2022 12:26:28 -0400
+Subject: [PATCH 06/26] Feature: tools: Add --wait= parameter to attrd_updater.
+
+This command line option is used to specify the sync point to use.  For
+the moment, it has no effect.
+---
+ tools/attrd_updater.c | 24 ++++++++++++++++++++++++
+ 1 file changed, 24 insertions(+)
+
+diff --git a/tools/attrd_updater.c b/tools/attrd_updater.c
+index b85a281..c4779a6 100644
+--- a/tools/attrd_updater.c
++++ b/tools/attrd_updater.c
+@@ -97,6 +97,22 @@ section_cb (const gchar *option_name, const gchar *optarg, gpointer data, GError
+     return TRUE;
+ }
+ 
++static gboolean
++wait_cb (const gchar *option_name, const gchar *optarg, gpointer data, GError **err) {
++    if (pcmk__str_eq(optarg, "no", pcmk__str_none)) {
++        pcmk__clear_node_attr_flags(options.attr_options, pcmk__node_attr_sync_local | pcmk__node_attr_sync_cluster);
++        return TRUE;
++    } else if (pcmk__str_eq(optarg, PCMK__VALUE_LOCAL, pcmk__str_none)) {
++        pcmk__clear_node_attr_flags(options.attr_options, pcmk__node_attr_sync_local | pcmk__node_attr_sync_cluster);
++        pcmk__set_node_attr_flags(options.attr_options, pcmk__node_attr_sync_local);
++        return TRUE;
++    } else {
++        g_set_error(err, PCMK__EXITC_ERROR, CRM_EX_USAGE,
++                    "--wait= must be one of 'no', 'local', 'cluster'");
++        return FALSE;
++    }
++}
++
+ #define INDENT "                              "
+ 
+ static GOptionEntry required_entries[] = {
+@@ -175,6 +191,14 @@ static GOptionEntry addl_entries[] = {
+       "If this creates a new attribute, never write the attribute to CIB",
+       NULL },
+ 
++    { "wait", 'W', 0, G_OPTION_ARG_CALLBACK, wait_cb,
++      "Wait for some event to occur before returning.  Values are 'no' (wait\n"
++      INDENT "only for the attribute daemon to acknowledge the request) or\n"
++      INDENT "'local' (wait until the change has propagated to where a local\n"
++      INDENT "query will return the request value, or the value set by a\n"
++      INDENT "later request).  Default is 'no'.",
++      "UNTIL" },
++
+     { NULL }
+ };
+ 
+-- 
+2.31.1
+
+From 52d51ab41b2f00e72724ab39835b3db86605a96b Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Thu, 20 Oct 2022 14:40:13 -0400
+Subject: [PATCH 07/26] Feature: daemons: Add functions for checking a request
+ for a sync point.
+
+---
+ daemons/attrd/Makefile.am       |  1 +
+ daemons/attrd/attrd_sync.c      | 38 +++++++++++++++++++++++++++++++++
+ daemons/attrd/pacemaker-attrd.h |  3 +++
+ 3 files changed, 42 insertions(+)
+ create mode 100644 daemons/attrd/attrd_sync.c
+
+diff --git a/daemons/attrd/Makefile.am b/daemons/attrd/Makefile.am
+index 1a3d360..6bb81c4 100644
+--- a/daemons/attrd/Makefile.am
++++ b/daemons/attrd/Makefile.am
+@@ -32,6 +32,7 @@ pacemaker_attrd_SOURCES	= attrd_alerts.c 	\
+ 						  attrd_elections.c \
+ 						  attrd_ipc.c 		\
+ 						  attrd_messages.c 		\
++						  attrd_sync.c 		\
+ 						  attrd_utils.c 	\
+ 						  pacemaker-attrd.c
+ 
+diff --git a/daemons/attrd/attrd_sync.c b/daemons/attrd/attrd_sync.c
+new file mode 100644
+index 0000000..92759d2
+--- /dev/null
++++ b/daemons/attrd/attrd_sync.c
+@@ -0,0 +1,38 @@
++/*
++ * Copyright 2022 the Pacemaker project contributors
++ *
++ * The version control history for this file may have further details.
++ *
++ * This source code is licensed under the GNU General Public License version 2
++ * or later (GPLv2+) WITHOUT ANY WARRANTY.
++ */
++
++#include <crm_internal.h>
++
++#include <crm/msg_xml.h>
++#include <crm/common/attrd_internal.h>
++
++#include "pacemaker-attrd.h"
++
++const char *
++attrd_request_sync_point(xmlNode *xml)
++{
++    if (xml_has_children(xml)) {
++        xmlNode *child = pcmk__xe_match(xml, XML_ATTR_OP, PCMK__XA_ATTR_SYNC_POINT, NULL);
++
++        if (child) {
++            return crm_element_value(child, PCMK__XA_ATTR_SYNC_POINT);
++        } else {
++            return NULL;
++        }
++
++    } else {
++        return crm_element_value(xml, PCMK__XA_ATTR_SYNC_POINT);
++    }
++}
++
++bool
++attrd_request_has_sync_point(xmlNode *xml)
++{
++    return attrd_request_sync_point(xml) != NULL;
++}
+diff --git a/daemons/attrd/pacemaker-attrd.h b/daemons/attrd/pacemaker-attrd.h
+index 71ce90a..ff850bb 100644
+--- a/daemons/attrd/pacemaker-attrd.h
++++ b/daemons/attrd/pacemaker-attrd.h
+@@ -182,4 +182,7 @@ mainloop_timer_t *attrd_add_timer(const char *id, int timeout_ms, attribute_t *a
+ void attrd_unregister_handlers(void);
+ void attrd_handle_request(pcmk__request_t *request);
+ 
++const char *attrd_request_sync_point(xmlNode *xml);
++bool attrd_request_has_sync_point(xmlNode *xml);
++
+ #endif /* PACEMAKER_ATTRD__H */
+-- 
+2.31.1
+
+From 2e0509a12ee7d4a612133ee65b75245eea7d271d Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Thu, 20 Oct 2022 14:42:04 -0400
+Subject: [PATCH 08/26] Refactor: daemons: Don't ACK update requests that give
+ a sync point.
+
+The ACK is the only response from the server for update messages.  If
+the message specified that it wanted to wait for a sync point, we need
+to delay sending that response until the sync point is reached.
+Therefore, do not always immediately send the ACK.
+---
+ daemons/attrd/attrd_messages.c | 19 ++++++++++++++-----
+ 1 file changed, 14 insertions(+), 5 deletions(-)
+
+diff --git a/daemons/attrd/attrd_messages.c b/daemons/attrd/attrd_messages.c
+index de4a28a..9e8ae40 100644
+--- a/daemons/attrd/attrd_messages.c
++++ b/daemons/attrd/attrd_messages.c
+@@ -137,12 +137,21 @@ handle_update_request(pcmk__request_t *request)
+         attrd_peer_update(peer, request->xml, host, false);
+         pcmk__set_result(&request->result, CRM_EX_OK, PCMK_EXEC_DONE, NULL);
+         return NULL;
++
+     } else {
+-        /* Because attrd_client_update can be called recursively, we send the ACK
+-         * here to ensure that the client only ever receives one.
+-         */
+-        attrd_send_ack(request->ipc_client, request->ipc_id,
+-                       request->flags|crm_ipc_client_response);
++        if (!attrd_request_has_sync_point(request->xml)) {
++            /* If the client doesn't want to wait for a sync point, go ahead and send
++             * the ACK immediately.  Otherwise, we'll send the ACK when the appropriate
++             * sync point is reached.
++             *
++             * In the normal case, attrd_client_update can be called recursively which
++             * makes where to send the ACK tricky.  Doing it here ensures the client
++             * only ever receives one.
++             */
++            attrd_send_ack(request->ipc_client, request->ipc_id,
++                           request->flags|crm_ipc_client_response);
++        }
++
+         return attrd_client_update(request);
+     }
+ }
+-- 
+2.31.1
+
+From 2a0ff66cdf0085c4c8ab1992ef7e785a4facc8c7 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Thu, 20 Oct 2022 14:48:48 -0400
+Subject: [PATCH 09/26] Feature: daemons: Add support for local sync points on
+ updates.
+
+In the IPC dispatcher for attrd, add the client to a wait list if its
+request specifies a sync point.  When the attribute's value is changed
+on the local attrd, alert any clients waiting on a local sync point by
+then sending the previously delayed ACK.
+
+Sync points for other requests and the global sync point are not yet
+supported.
+
+Fixes T35.
+---
+ daemons/attrd/attrd_corosync.c  |  18 +++++
+ daemons/attrd/attrd_messages.c  |  12 ++-
+ daemons/attrd/attrd_sync.c      | 137 ++++++++++++++++++++++++++++++++
+ daemons/attrd/pacemaker-attrd.h |   7 ++
+ 4 files changed, 173 insertions(+), 1 deletion(-)
+
+diff --git a/daemons/attrd/attrd_corosync.c b/daemons/attrd/attrd_corosync.c
+index 539e5bf..4337280 100644
+--- a/daemons/attrd/attrd_corosync.c
++++ b/daemons/attrd/attrd_corosync.c
+@@ -568,14 +568,32 @@ void
+ attrd_peer_update(const crm_node_t *peer, xmlNode *xml, const char *host,
+                   bool filter)
+ {
++    bool handle_sync_point = false;
++
+     if (xml_has_children(xml)) {
+         for (xmlNode *child = first_named_child(xml, XML_ATTR_OP); child != NULL;
+              child = crm_next_same_xml(child)) {
+             copy_attrs(xml, child);
+             attrd_peer_update_one(peer, child, filter);
++
++            if (attrd_request_has_sync_point(child)) {
++                handle_sync_point = true;
++            }
+         }
+ 
+     } else {
+         attrd_peer_update_one(peer, xml, filter);
++
++        if (attrd_request_has_sync_point(xml)) {
++            handle_sync_point = true;
++        }
++    }
++
++    /* If the update XML specified that the client wanted to wait for a sync
++     * point, process that now.
++     */
++    if (handle_sync_point) {
++        crm_debug("Hit local sync point for attribute update");
++        attrd_ack_waitlist_clients(attrd_sync_point_local, xml);
+     }
+ }
+diff --git a/daemons/attrd/attrd_messages.c b/daemons/attrd/attrd_messages.c
+index 9e8ae40..c96700f 100644
+--- a/daemons/attrd/attrd_messages.c
++++ b/daemons/attrd/attrd_messages.c
+@@ -139,7 +139,17 @@ handle_update_request(pcmk__request_t *request)
+         return NULL;
+ 
+     } else {
+-        if (!attrd_request_has_sync_point(request->xml)) {
++        if (attrd_request_has_sync_point(request->xml)) {
++            /* If this client supplied a sync point it wants to wait for, add it to
++             * the wait list.  Clients on this list will not receive an ACK until
++             * their sync point is hit which will result in the client stalled there
++             * until it receives a response.
++             *
++             * All other clients will receive the expected response as normal.
++             */
++            attrd_add_client_to_waitlist(request);
++
++        } else {
+             /* If the client doesn't want to wait for a sync point, go ahead and send
+              * the ACK immediately.  Otherwise, we'll send the ACK when the appropriate
+              * sync point is reached.
+diff --git a/daemons/attrd/attrd_sync.c b/daemons/attrd/attrd_sync.c
+index 92759d2..2981bd0 100644
+--- a/daemons/attrd/attrd_sync.c
++++ b/daemons/attrd/attrd_sync.c
+@@ -14,6 +14,143 @@
+ 
+ #include "pacemaker-attrd.h"
+ 
++/* A hash table storing clients that are waiting on a sync point to be reached.
++ * The key is waitlist_client - just a plain int.  The obvious key would be
++ * the IPC client's ID, but this is not guaranteed to be unique.  A single client
++ * could be waiting on a sync point for multiple attributes at the same time.
++ *
++ * It is not expected that this hash table will ever be especially large.
++ */
++static GHashTable *waitlist = NULL;
++static int waitlist_client = 0;
++
++struct waitlist_node {
++    /* What kind of sync point does this node describe? */
++    enum attrd_sync_point sync_point;
++
++    /* Information required to construct and send a reply to the client. */
++    char *client_id;
++    uint32_t ipc_id;
++    uint32_t flags;
++};
++
++static void
++next_key(void)
++{
++    do {
++        waitlist_client++;
++        if (waitlist_client < 0) {
++            waitlist_client = 1;
++        }
++    } while (g_hash_table_contains(waitlist, GINT_TO_POINTER(waitlist_client)));
++}
++
++static void
++free_waitlist_node(gpointer data)
++{
++    struct waitlist_node *wl = (struct waitlist_node *) data;
++
++    free(wl->client_id);
++    free(wl);
++}
++
++static const char *
++sync_point_str(enum attrd_sync_point sync_point)
++{
++    if (sync_point == attrd_sync_point_local) {
++        return PCMK__VALUE_LOCAL;
++    } else if  (sync_point == attrd_sync_point_cluster) {
++        return PCMK__VALUE_CLUSTER;
++    } else {
++        return "unknown";
++    }
++}
++
++void
++attrd_add_client_to_waitlist(pcmk__request_t *request)
++{
++    const char *sync_point = attrd_request_sync_point(request->xml);
++    struct waitlist_node *wl = NULL;
++
++    if (sync_point == NULL) {
++        return;
++    }
++
++    if (waitlist == NULL) {
++        waitlist = pcmk__intkey_table(free_waitlist_node);
++    }
++
++    wl = calloc(sizeof(struct waitlist_node), 1);
++
++    CRM_ASSERT(wl != NULL);
++
++    wl->client_id = strdup(request->ipc_client->id);
++
++    CRM_ASSERT(wl->client_id);
++
++    if (pcmk__str_eq(sync_point, PCMK__VALUE_LOCAL, pcmk__str_none)) {
++        wl->sync_point = attrd_sync_point_local;
++    } else if (pcmk__str_eq(sync_point, PCMK__VALUE_CLUSTER, pcmk__str_none)) {
++        wl->sync_point = attrd_sync_point_cluster;
++    } else {
++        free_waitlist_node(wl);
++        return;
++    }
++
++    wl->ipc_id = request->ipc_id;
++    wl->flags = request->flags;
++
++    crm_debug("Added client %s to waitlist for %s sync point",
++              wl->client_id, sync_point_str(wl->sync_point));
++
++    next_key();
++    pcmk__intkey_table_insert(waitlist, waitlist_client, wl);
++
++    /* And then add the key to the request XML so we can uniquely identify
++     * it when it comes time to issue the ACK.
++     */
++    crm_xml_add_int(request->xml, XML_LRM_ATTR_CALLID, waitlist_client);
++}
++
++void
++attrd_ack_waitlist_clients(enum attrd_sync_point sync_point, const xmlNode *xml)
++{
++    int callid;
++    gpointer value;
++
++    if (waitlist == NULL) {
++        return;
++    }
++
++    if (crm_element_value_int(xml, XML_LRM_ATTR_CALLID, &callid) == -1) {
++        crm_warn("Could not get callid from request XML");
++        return;
++    }
++
++    value = pcmk__intkey_table_lookup(waitlist, callid);
++    if (value != NULL) {
++        struct waitlist_node *wl = (struct waitlist_node *) value;
++        pcmk__client_t *client = NULL;
++
++        if (wl->sync_point != sync_point) {
++            return;
++        }
++
++        crm_debug("Alerting client %s for reached %s sync point",
++                  wl->client_id, sync_point_str(wl->sync_point));
++
++        client = pcmk__find_client_by_id(wl->client_id);
++        if (client == NULL) {
++            return;
++        }
++
++        attrd_send_ack(client, wl->ipc_id, wl->flags | crm_ipc_client_response);
++
++        /* And then remove the client so it doesn't get alerted again. */
++        pcmk__intkey_table_remove(waitlist, callid);
++    }
++}
++
+ const char *
+ attrd_request_sync_point(xmlNode *xml)
+ {
+diff --git a/daemons/attrd/pacemaker-attrd.h b/daemons/attrd/pacemaker-attrd.h
+index ff850bb..9dd8320 100644
+--- a/daemons/attrd/pacemaker-attrd.h
++++ b/daemons/attrd/pacemaker-attrd.h
+@@ -182,6 +182,13 @@ mainloop_timer_t *attrd_add_timer(const char *id, int timeout_ms, attribute_t *a
+ void attrd_unregister_handlers(void);
+ void attrd_handle_request(pcmk__request_t *request);
+ 
++enum attrd_sync_point {
++    attrd_sync_point_local,
++    attrd_sync_point_cluster,
++};
++
++void attrd_add_client_to_waitlist(pcmk__request_t *request);
++void attrd_ack_waitlist_clients(enum attrd_sync_point sync_point, const xmlNode *xml);
+ const char *attrd_request_sync_point(xmlNode *xml);
+ bool attrd_request_has_sync_point(xmlNode *xml);
+ 
+-- 
+2.31.1
+
+From 59caaf1682191a91d6062358b770f8b9457ba3eb Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Thu, 20 Oct 2022 14:56:58 -0400
+Subject: [PATCH 10/26] Feature: daemons: If a client disconnects, remove it
+ from the waitlist.
+
+---
+ daemons/attrd/attrd_ipc.c       |  5 +++++
+ daemons/attrd/attrd_sync.c      | 21 +++++++++++++++++++++
+ daemons/attrd/pacemaker-attrd.h |  1 +
+ 3 files changed, 27 insertions(+)
+
+diff --git a/daemons/attrd/attrd_ipc.c b/daemons/attrd/attrd_ipc.c
+index 7e4a1c0..8aa39c2 100644
+--- a/daemons/attrd/attrd_ipc.c
++++ b/daemons/attrd/attrd_ipc.c
+@@ -438,8 +438,13 @@ attrd_ipc_closed(qb_ipcs_connection_t *c)
+         crm_trace("Ignoring request to clean up unknown connection %p", c);
+     } else {
+         crm_trace("Cleaning up closed client connection %p", c);
++
++        /* Remove the client from the sync point waitlist if it's present. */
++        attrd_remove_client_from_waitlist(client);
++
+         pcmk__free_client(client);
+     }
++
+     return FALSE;
+ }
+ 
+diff --git a/daemons/attrd/attrd_sync.c b/daemons/attrd/attrd_sync.c
+index 2981bd0..7293318 100644
+--- a/daemons/attrd/attrd_sync.c
++++ b/daemons/attrd/attrd_sync.c
+@@ -112,6 +112,27 @@ attrd_add_client_to_waitlist(pcmk__request_t *request)
+     crm_xml_add_int(request->xml, XML_LRM_ATTR_CALLID, waitlist_client);
+ }
+ 
++void
++attrd_remove_client_from_waitlist(pcmk__client_t *client)
++{
++    GHashTableIter iter;
++    gpointer value;
++
++    if (waitlist == NULL) {
++        return;
++    }
++
++    g_hash_table_iter_init(&iter, waitlist);
++
++    while (g_hash_table_iter_next(&iter, NULL, &value)) {
++        struct waitlist_node *wl = (struct waitlist_node *) value;
++
++        if (wl->client_id == client->id) {
++            g_hash_table_iter_remove(&iter);
++        }
++    }
++}
++
+ void
+ attrd_ack_waitlist_clients(enum attrd_sync_point sync_point, const xmlNode *xml)
+ {
+diff --git a/daemons/attrd/pacemaker-attrd.h b/daemons/attrd/pacemaker-attrd.h
+index 9dd8320..b6ecb75 100644
+--- a/daemons/attrd/pacemaker-attrd.h
++++ b/daemons/attrd/pacemaker-attrd.h
+@@ -189,6 +189,7 @@ enum attrd_sync_point {
+ 
+ void attrd_add_client_to_waitlist(pcmk__request_t *request);
+ void attrd_ack_waitlist_clients(enum attrd_sync_point sync_point, const xmlNode *xml);
++void attrd_remove_client_from_waitlist(pcmk__client_t *client);
+ const char *attrd_request_sync_point(xmlNode *xml);
+ bool attrd_request_has_sync_point(xmlNode *xml);
+ 
+-- 
+2.31.1
+
+From b28042e1d64b48c96dbd9da1e9ee3ff481bbf620 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Mon, 10 Oct 2022 11:00:20 -0400
+Subject: [PATCH 11/26] Feature: daemons: Add support for local sync points on
+ clearing failures.
+
+attrd_clear_client_failure just calls attrd_client_update underneath, so
+that function will handle all the rest of the sync point functionality
+for us.
+---
+ daemons/attrd/attrd_ipc.c      |  2 --
+ daemons/attrd/attrd_messages.c | 19 +++++++++++++++++++
+ 2 files changed, 19 insertions(+), 2 deletions(-)
+
+diff --git a/daemons/attrd/attrd_ipc.c b/daemons/attrd/attrd_ipc.c
+index 8aa39c2..2e614e8 100644
+--- a/daemons/attrd/attrd_ipc.c
++++ b/daemons/attrd/attrd_ipc.c
+@@ -101,8 +101,6 @@ attrd_client_clear_failure(pcmk__request_t *request)
+     xmlNode *xml = request->xml;
+     const char *rsc, *op, *interval_spec;
+ 
+-    attrd_send_ack(request->ipc_client, request->ipc_id, request->ipc_flags);
+-
+     if (minimum_protocol_version >= 2) {
+         /* Propagate to all peers (including ourselves).
+          * This ends up at attrd_peer_message().
+diff --git a/daemons/attrd/attrd_messages.c b/daemons/attrd/attrd_messages.c
+index c96700f..3ba14a6 100644
+--- a/daemons/attrd/attrd_messages.c
++++ b/daemons/attrd/attrd_messages.c
+@@ -42,6 +42,25 @@ handle_clear_failure_request(pcmk__request_t *request)
+         pcmk__set_result(&request->result, CRM_EX_OK, PCMK_EXEC_DONE, NULL);
+         return NULL;
+     } else {
++        if (attrd_request_has_sync_point(request->xml)) {
++            /* If this client supplied a sync point it wants to wait for, add it to
++             * the wait list.  Clients on this list will not receive an ACK until
++             * their sync point is hit which will result in the client stalled there
++             * until it receives a response.
++             *
++             * All other clients will receive the expected response as normal.
++             */
++            attrd_add_client_to_waitlist(request);
++
++        } else {
++            /* If the client doesn't want to wait for a sync point, go ahead and send
++             * the ACK immediately.  Otherwise, we'll send the ACK when the appropriate
++             * sync point is reached.
++             */
++            attrd_send_ack(request->ipc_client, request->ipc_id,
++                           request->ipc_flags);
++        }
++
+         return attrd_client_clear_failure(request);
+     }
+ }
+-- 
+2.31.1
+
+From 291dc3b91e57f2584bbf88cfbe3a360e0332e814 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Mon, 10 Oct 2022 13:17:24 -0400
+Subject: [PATCH 12/26] Refactor: daemons: Free the waitlist on attrd exit.
+
+---
+ daemons/attrd/attrd_sync.c      | 11 +++++++++++
+ daemons/attrd/attrd_utils.c     |  2 ++
+ daemons/attrd/pacemaker-attrd.c |  1 +
+ daemons/attrd/pacemaker-attrd.h |  1 +
+ 4 files changed, 15 insertions(+)
+
+diff --git a/daemons/attrd/attrd_sync.c b/daemons/attrd/attrd_sync.c
+index 7293318..557e49a 100644
+--- a/daemons/attrd/attrd_sync.c
++++ b/daemons/attrd/attrd_sync.c
+@@ -112,6 +112,17 @@ attrd_add_client_to_waitlist(pcmk__request_t *request)
+     crm_xml_add_int(request->xml, XML_LRM_ATTR_CALLID, waitlist_client);
+ }
+ 
++void
++attrd_free_waitlist(void)
++{
++    if (waitlist == NULL) {
++        return;
++    }
++
++    g_hash_table_destroy(waitlist);
++    waitlist = NULL;
++}
++
+ void
+ attrd_remove_client_from_waitlist(pcmk__client_t *client)
+ {
+diff --git a/daemons/attrd/attrd_utils.c b/daemons/attrd/attrd_utils.c
+index 6a19009..00b879b 100644
+--- a/daemons/attrd/attrd_utils.c
++++ b/daemons/attrd/attrd_utils.c
+@@ -93,6 +93,8 @@ attrd_shutdown(int nsig)
+     mainloop_destroy_signal(SIGUSR2);
+     mainloop_destroy_signal(SIGTRAP);
+ 
++    attrd_free_waitlist();
++
+     if ((mloop == NULL) || !g_main_loop_is_running(mloop)) {
+         /* If there's no main loop active, just exit. This should be possible
+          * only if we get SIGTERM in brief windows at start-up and shutdown.
+diff --git a/daemons/attrd/pacemaker-attrd.c b/daemons/attrd/pacemaker-attrd.c
+index 2100db4..1336542 100644
+--- a/daemons/attrd/pacemaker-attrd.c
++++ b/daemons/attrd/pacemaker-attrd.c
+@@ -300,6 +300,7 @@ main(int argc, char **argv)
+         attrd_ipc_fini();
+         attrd_lrmd_disconnect();
+         attrd_cib_disconnect();
++        attrd_free_waitlist();
+         g_hash_table_destroy(attributes);
+     }
+ 
+diff --git a/daemons/attrd/pacemaker-attrd.h b/daemons/attrd/pacemaker-attrd.h
+index b6ecb75..537bf85 100644
+--- a/daemons/attrd/pacemaker-attrd.h
++++ b/daemons/attrd/pacemaker-attrd.h
+@@ -52,6 +52,7 @@ void attrd_run_mainloop(void);
+ 
+ void attrd_set_requesting_shutdown(void);
+ void attrd_clear_requesting_shutdown(void);
++void attrd_free_waitlist(void);
+ bool attrd_requesting_shutdown(void);
+ bool attrd_shutting_down(void);
+ void attrd_shutdown(int nsig);
+-- 
+2.31.1
+
+From 7715ce617c520e14687a82e11ff794c93cd7f64a Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Mon, 10 Oct 2022 13:21:16 -0400
+Subject: [PATCH 13/26] Feature: includes: Bump CRM_FEATURE_SET for local sync
+ points.
+
+---
+ include/crm/crm.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/include/crm/crm.h b/include/crm/crm.h
+index 5710e4b..7c5c602 100644
+--- a/include/crm/crm.h
++++ b/include/crm/crm.h
+@@ -66,7 +66,7 @@ extern "C" {
+  * >=3.0.13: Fail counts include operation name and interval
+  * >=3.2.0:  DC supports PCMK_EXEC_INVALID and PCMK_EXEC_NOT_CONNECTED
+  */
+-#  define CRM_FEATURE_SET		"3.16.1"
++#  define CRM_FEATURE_SET		"3.16.2"
+ 
+ /* Pacemaker's CPG protocols use fixed-width binary fields for the sender and
+  * recipient of a CPG message. This imposes an arbitrary limit on cluster node
+-- 
+2.31.1
+
+From b9054425a76d03f538cd0b3ae27490b1874eee8a Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Fri, 28 Oct 2022 14:23:49 -0400
+Subject: [PATCH 14/26] Refactor: daemons: Add comments for previously added
+ sync point code.
+
+---
+ daemons/attrd/attrd_sync.c | 63 ++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 63 insertions(+)
+
+diff --git a/daemons/attrd/attrd_sync.c b/daemons/attrd/attrd_sync.c
+index 557e49a..e9690b5 100644
+--- a/daemons/attrd/attrd_sync.c
++++ b/daemons/attrd/attrd_sync.c
+@@ -66,6 +66,20 @@ sync_point_str(enum attrd_sync_point sync_point)
+     }
+ }
+ 
++/*!
++ * \internal
++ * \brief Add a client to the attrd waitlist
++ *
++ * Typically, a client receives an ACK for its XML IPC request immediately.  However,
++ * some clients want to wait until their request has been processed and taken effect.
++ * This is called a sync point.  Any client placed on this waitlist will have its
++ * ACK message delayed until either its requested sync point is hit, or until it
++ * times out.
++ *
++ * The XML IPC request must specify the type of sync point it wants to wait for.
++ *
++ * \param[in,out] request   The request describing the client to place on the waitlist.
++ */
+ void
+ attrd_add_client_to_waitlist(pcmk__request_t *request)
+ {
+@@ -112,6 +126,11 @@ attrd_add_client_to_waitlist(pcmk__request_t *request)
+     crm_xml_add_int(request->xml, XML_LRM_ATTR_CALLID, waitlist_client);
+ }
+ 
++/*!
++ * \internal
++ * \brief Free all memory associated with the waitlist.  This is most typically
++ *        used when attrd shuts down.
++ */
+ void
+ attrd_free_waitlist(void)
+ {
+@@ -123,6 +142,13 @@ attrd_free_waitlist(void)
+     waitlist = NULL;
+ }
+ 
++/*!
++ * \internal
++ * \brief Unconditionally remove a client from the waitlist, such as when the client
++ *        node disconnects from the cluster
++ *
++ * \param[in] client    The client to remove
++ */
+ void
+ attrd_remove_client_from_waitlist(pcmk__client_t *client)
+ {
+@@ -144,6 +170,18 @@ attrd_remove_client_from_waitlist(pcmk__client_t *client)
+     }
+ }
+ 
++/*!
++ * \internal
++ * \brief Send an IPC ACK message to all awaiting clients
++ *
++ * This function will search the waitlist for all clients that are currently awaiting
++ * an ACK indicating their attrd operation is complete.  Only those clients with a
++ * matching sync point type and callid from their original XML IPC request will be
++ * ACKed.  Once they have received an ACK, they will be removed from the waitlist.
++ *
++ * \param[in] sync_point What kind of sync point have we hit?
++ * \param[in] xml        The original XML IPC request.
++ */
+ void
+ attrd_ack_waitlist_clients(enum attrd_sync_point sync_point, const xmlNode *xml)
+ {
+@@ -183,6 +221,23 @@ attrd_ack_waitlist_clients(enum attrd_sync_point sync_point, const xmlNode *xml)
+     }
+ }
+ 
++/*!
++ * \internal
++ * \brief Return the sync point attribute for an IPC request
++ *
++ * This function will check both the top-level element of \p xml for a sync
++ * point attribute, as well as all of its \p op children, if any.  The latter
++ * is useful for newer versions of attrd that can put multiple IPC requests
++ * into a single message.
++ *
++ * \param[in] xml   An XML IPC request
++ *
++ * \note It is assumed that if one child element has a sync point attribute,
++ *       all will have a sync point attribute and they will all be the same
++ *       sync point.  No other configuration is supported.
++ *
++ * \return The sync point attribute of \p xml, or NULL if none.
++ */
+ const char *
+ attrd_request_sync_point(xmlNode *xml)
+ {
+@@ -200,6 +255,14 @@ attrd_request_sync_point(xmlNode *xml)
+     }
+ }
+ 
++/*!
++ * \internal
++ * \brief Does an IPC request contain any sync point attribute?
++ *
++ * \param[in] xml   An XML IPC request
++ *
++ * \return true if there's a sync point attribute, false otherwise
++ */
+ bool
+ attrd_request_has_sync_point(xmlNode *xml)
+ {
+-- 
+2.31.1
+
+From 64219fb7075ee58d29f94f077a3b8f94174bb32a Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Wed, 26 Oct 2022 12:43:05 -0400
+Subject: [PATCH 15/26] Feature: tools: Add --wait=cluster option to
+ attrd_updater.
+
+---
+ tools/attrd_updater.c | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/tools/attrd_updater.c b/tools/attrd_updater.c
+index c4779a6..3cd766d 100644
+--- a/tools/attrd_updater.c
++++ b/tools/attrd_updater.c
+@@ -106,6 +106,10 @@ wait_cb (const gchar *option_name, const gchar *optarg, gpointer data, GError **
+         pcmk__clear_node_attr_flags(options.attr_options, pcmk__node_attr_sync_local | pcmk__node_attr_sync_cluster);
+         pcmk__set_node_attr_flags(options.attr_options, pcmk__node_attr_sync_local);
+         return TRUE;
++    } else if (pcmk__str_eq(optarg, PCMK__VALUE_CLUSTER, pcmk__str_none)) {
++        pcmk__clear_node_attr_flags(options.attr_options, pcmk__node_attr_sync_local | pcmk__node_attr_sync_cluster);
++        pcmk__set_node_attr_flags(options.attr_options, pcmk__node_attr_sync_cluster);
++        return TRUE;
+     } else {
+         g_set_error(err, PCMK__EXITC_ERROR, CRM_EX_USAGE,
+                     "--wait= must be one of 'no', 'local', 'cluster'");
+@@ -193,10 +197,12 @@ static GOptionEntry addl_entries[] = {
+ 
+     { "wait", 'W', 0, G_OPTION_ARG_CALLBACK, wait_cb,
+       "Wait for some event to occur before returning.  Values are 'no' (wait\n"
+-      INDENT "only for the attribute daemon to acknowledge the request) or\n"
++      INDENT "only for the attribute daemon to acknowledge the request),\n"
+       INDENT "'local' (wait until the change has propagated to where a local\n"
+       INDENT "query will return the request value, or the value set by a\n"
+-      INDENT "later request).  Default is 'no'.",
++      INDENT "later request), or 'cluster' (wait until the change has propagated\n"
++      INDENT "to where a query anywhere on the cluster will return the requested\n"
++      INDENT "value, or the value set by a later request).  Default is 'no'.",
+       "UNTIL" },
+ 
+     { NULL }
+-- 
+2.31.1
+
+From 1bc5511fadf6ad670508bd3a2a55129bde16f774 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Fri, 16 Sep 2022 14:55:06 -0400
+Subject: [PATCH 16/26] Refactor: daemons: Add a confirm= attribute to attrd
+ messages.
+
+This allows informing the originator of a message that the message has
+been received and processed.  As yet, there is no mechanism for handling
+and returning the confirmation, only for requesting it.
+---
+ daemons/attrd/attrd_corosync.c  |  6 +++---
+ daemons/attrd/attrd_ipc.c       | 26 +++++++++++++++++++++-----
+ daemons/attrd/attrd_messages.c  | 11 +++++++++--
+ daemons/attrd/pacemaker-attrd.h |  7 ++++---
+ include/crm_internal.h          |  1 +
+ 5 files changed, 38 insertions(+), 13 deletions(-)
+
+diff --git a/daemons/attrd/attrd_corosync.c b/daemons/attrd/attrd_corosync.c
+index 4337280..e86ca07 100644
+--- a/daemons/attrd/attrd_corosync.c
++++ b/daemons/attrd/attrd_corosync.c
+@@ -124,7 +124,7 @@ broadcast_local_value(const attribute_t *a)
+ 
+     crm_xml_add(sync, PCMK__XA_TASK, PCMK__ATTRD_CMD_SYNC_RESPONSE);
+     attrd_add_value_xml(sync, a, v, false);
+-    attrd_send_message(NULL, sync);
++    attrd_send_message(NULL, sync, false);
+     free_xml(sync);
+     return v;
+ }
+@@ -387,7 +387,7 @@ broadcast_unseen_local_values(void)
+ 
+     if (sync != NULL) {
+         crm_debug("Broadcasting local-only values");
+-        attrd_send_message(NULL, sync);
++        attrd_send_message(NULL, sync, false);
+         free_xml(sync);
+     }
+ }
+@@ -539,7 +539,7 @@ attrd_peer_sync(crm_node_t *peer, xmlNode *xml)
+     }
+ 
+     crm_debug("Syncing values to %s", peer?peer->uname:"everyone");
+-    attrd_send_message(peer, sync);
++    attrd_send_message(peer, sync, false);
+     free_xml(sync);
+ }
+ 
+diff --git a/daemons/attrd/attrd_ipc.c b/daemons/attrd/attrd_ipc.c
+index 2e614e8..0fc5e93 100644
+--- a/daemons/attrd/attrd_ipc.c
++++ b/daemons/attrd/attrd_ipc.c
+@@ -105,7 +105,7 @@ attrd_client_clear_failure(pcmk__request_t *request)
+         /* Propagate to all peers (including ourselves).
+          * This ends up at attrd_peer_message().
+          */
+-        attrd_send_message(NULL, xml);
++        attrd_send_message(NULL, xml, false);
+         pcmk__set_result(&request->result, CRM_EX_OK, PCMK_EXEC_DONE, NULL);
+         return NULL;
+     }
+@@ -184,7 +184,7 @@ attrd_client_peer_remove(pcmk__request_t *request)
+     if (host) {
+         crm_info("Client %s is requesting all values for %s be removed",
+                  pcmk__client_name(request->ipc_client), host);
+-        attrd_send_message(NULL, xml); /* ends up at attrd_peer_message() */
++        attrd_send_message(NULL, xml, false); /* ends up at attrd_peer_message() */
+         free(host_alloc);
+     } else {
+         crm_info("Ignoring request by client %s to remove all peer values without specifying peer",
+@@ -314,7 +314,7 @@ attrd_client_update(pcmk__request_t *request)
+                 }
+             }
+ 
+-            attrd_send_message(NULL, xml);
++            attrd_send_message(NULL, xml, false);
+             pcmk__set_result(&request->result, CRM_EX_OK, PCMK_EXEC_DONE, NULL);
+ 
+         } else {
+@@ -358,7 +358,7 @@ attrd_client_update(pcmk__request_t *request)
+                 if (status == 0) {
+                     crm_trace("Matched %s with %s", attr, regex);
+                     crm_xml_add(xml, PCMK__XA_ATTR_NAME, attr);
+-                    attrd_send_message(NULL, xml);
++                    attrd_send_message(NULL, xml, false);
+                 }
+             }
+ 
+@@ -388,7 +388,23 @@ attrd_client_update(pcmk__request_t *request)
+     crm_debug("Broadcasting %s[%s]=%s%s", attr, crm_element_value(xml, PCMK__XA_ATTR_NODE_NAME),
+               value, (attrd_election_won()? " (writer)" : ""));
+ 
+-    attrd_send_message(NULL, xml); /* ends up at attrd_peer_message() */
++    if (pcmk__str_eq(attrd_request_sync_point(xml), PCMK__VALUE_CLUSTER, pcmk__str_none)) {
++        /* The client is waiting on the cluster-wide sync point.  In this case,
++         * the response ACK is not sent until this attrd broadcasts the update
++         * and receives its own confirmation back from all peers.
++         */
++        attrd_send_message(NULL, xml, true); /* ends up at attrd_peer_message() */
++
++    } else {
++        /* The client is either waiting on the local sync point or was not
++         * waiting on any sync point at all.  For the local sync point, the
++         * response ACK is sent in attrd_peer_update.  For clients not
++         * waiting on any sync point, the response ACK is sent in
++         * handle_update_request immediately before this function was called.
++         */
++        attrd_send_message(NULL, xml, false); /* ends up at attrd_peer_message() */
++    }
++
+     pcmk__set_result(&request->result, CRM_EX_OK, PCMK_EXEC_DONE, NULL);
+     return NULL;
+ }
+diff --git a/daemons/attrd/attrd_messages.c b/daemons/attrd/attrd_messages.c
+index 3ba14a6..78df0d0 100644
+--- a/daemons/attrd/attrd_messages.c
++++ b/daemons/attrd/attrd_messages.c
+@@ -279,16 +279,23 @@ attrd_broadcast_protocol(void)
+     crm_debug("Broadcasting attrd protocol version %s for node %s",
+               ATTRD_PROTOCOL_VERSION, attrd_cluster->uname);
+ 
+-    attrd_send_message(NULL, attrd_op); /* ends up at attrd_peer_message() */
++    attrd_send_message(NULL, attrd_op, false); /* ends up at attrd_peer_message() */
+ 
+     free_xml(attrd_op);
+ }
+ 
+ gboolean
+-attrd_send_message(crm_node_t * node, xmlNode * data)
++attrd_send_message(crm_node_t *node, xmlNode *data, bool confirm)
+ {
+     crm_xml_add(data, F_TYPE, T_ATTRD);
+     crm_xml_add(data, PCMK__XA_ATTR_VERSION, ATTRD_PROTOCOL_VERSION);
++
++    /* Request a confirmation from the destination peer node (which could
++     * be all if node is NULL) that the message has been received and
++     * acted upon.
++     */
++    pcmk__xe_set_bool_attr(data, PCMK__XA_CONFIRM, confirm);
++
+     attrd_xml_add_writer(data);
+     return send_cluster_message(node, crm_msg_attrd, data, TRUE);
+ }
+diff --git a/daemons/attrd/pacemaker-attrd.h b/daemons/attrd/pacemaker-attrd.h
+index 537bf85..25f7c8a 100644
+--- a/daemons/attrd/pacemaker-attrd.h
++++ b/daemons/attrd/pacemaker-attrd.h
+@@ -39,10 +39,11 @@
+  *                      PCMK__ATTRD_CMD_UPDATE_DELAY
+  *     2       1.1.17   PCMK__ATTRD_CMD_CLEAR_FAILURE
+  *     3       2.1.1    PCMK__ATTRD_CMD_SYNC_RESPONSE indicates remote nodes
+- *     4       2.2.0    Multiple attributes can be updated in a single IPC
++ *     4       2.1.5    Multiple attributes can be updated in a single IPC
+  *                      message
++ *     5       2.1.5    Peers can request confirmation of a sent message
+  */
+-#define ATTRD_PROTOCOL_VERSION "4"
++#define ATTRD_PROTOCOL_VERSION "5"
+ 
+ #define attrd_send_ack(client, id, flags) \
+     pcmk__ipc_send_ack((client), (id), (flags), "ack", ATTRD_PROTOCOL_VERSION, CRM_EX_INDETERMINATE)
+@@ -162,7 +163,7 @@ xmlNode *attrd_client_clear_failure(pcmk__request_t *request);
+ xmlNode *attrd_client_update(pcmk__request_t *request);
+ xmlNode *attrd_client_refresh(pcmk__request_t *request);
+ xmlNode *attrd_client_query(pcmk__request_t *request);
+-gboolean attrd_send_message(crm_node_t * node, xmlNode * data);
++gboolean attrd_send_message(crm_node_t *node, xmlNode *data, bool confirm);
+ 
+ xmlNode *attrd_add_value_xml(xmlNode *parent, const attribute_t *a,
+                              const attribute_value_t *v, bool force_write);
+diff --git a/include/crm_internal.h b/include/crm_internal.h
+index 08193c3..63a1726 100644
+--- a/include/crm_internal.h
++++ b/include/crm_internal.h
+@@ -79,6 +79,7 @@
+ #define PCMK__XA_ATTR_WRITER            "attr_writer"
+ #define PCMK__XA_CONFIG_ERRORS          "config-errors"
+ #define PCMK__XA_CONFIG_WARNINGS        "config-warnings"
++#define PCMK__XA_CONFIRM                "confirm"
+ #define PCMK__XA_GRAPH_ERRORS           "graph-errors"
+ #define PCMK__XA_GRAPH_WARNINGS         "graph-warnings"
+ #define PCMK__XA_MODE                   "mode"
+-- 
+2.31.1
+
+From 6f389038fc0b11f6291c022c99f188666c65f530 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Wed, 26 Oct 2022 14:44:42 -0400
+Subject: [PATCH 17/26] Feature: daemons: Respond to received attrd
+ confirmation requests.
+
+On the receiving peer side, if the XML request contains confirm="true",
+construct a confirmation message after handling the request completes
+and send it back to the originating peer.
+
+On the originating peer side, add a skeleton handler for confirmation
+messages.  This does nothing at the moment except log it.
+---
+ daemons/attrd/attrd_corosync.c | 38 ++++++++++++++++++++++++++++++++++
+ daemons/attrd/attrd_messages.c | 13 ++++++++++++
+ include/crm_internal.h         |  1 +
+ 3 files changed, 52 insertions(+)
+
+diff --git a/daemons/attrd/attrd_corosync.c b/daemons/attrd/attrd_corosync.c
+index e86ca07..1245d9c 100644
+--- a/daemons/attrd/attrd_corosync.c
++++ b/daemons/attrd/attrd_corosync.c
+@@ -25,6 +25,19 @@
+ 
+ extern crm_exit_t attrd_exit_status;
+ 
++static xmlNode *
++attrd_confirmation(int callid)
++{
++    xmlNode *node = create_xml_node(NULL, __func__);
++
++    crm_xml_add(node, F_TYPE, T_ATTRD);
++    crm_xml_add(node, F_ORIG, get_local_node_name());
++    crm_xml_add(node, PCMK__XA_TASK, PCMK__ATTRD_CMD_CONFIRM);
++    crm_xml_add_int(node, XML_LRM_ATTR_CALLID, callid);
++
++    return node;
++}
++
+ static void
+ attrd_peer_message(crm_node_t *peer, xmlNode *xml)
+ {
+@@ -57,6 +70,31 @@ attrd_peer_message(crm_node_t *peer, xmlNode *xml)
+         CRM_CHECK(request.op != NULL, return);
+ 
+         attrd_handle_request(&request);
++
++        /* Having finished handling the request, check to see if the originating
++         * peer requested confirmation.  If so, send that confirmation back now.
++         */
++        if (pcmk__xe_attr_is_true(xml, PCMK__XA_CONFIRM)) {
++            int callid = 0;
++            xmlNode *reply = NULL;
++
++            /* Add the confirmation ID for the message we are confirming to the
++             * response so the originating peer knows what they're a confirmation
++             * for.
++             */
++            crm_element_value_int(xml, XML_LRM_ATTR_CALLID, &callid);
++            reply = attrd_confirmation(callid);
++
++            /* And then send the confirmation back to the originating peer.  This
++             * ends up right back in this same function (attrd_peer_message) on the
++             * peer where it will have to do something with a PCMK__XA_CONFIRM type
++             * message.
++             */
++            crm_debug("Sending %s a confirmation", peer->uname);
++            attrd_send_message(peer, reply, false);
++            free_xml(reply);
++        }
++
+         pcmk__reset_request(&request);
+     }
+ }
+diff --git a/daemons/attrd/attrd_messages.c b/daemons/attrd/attrd_messages.c
+index 78df0d0..9c792b2 100644
+--- a/daemons/attrd/attrd_messages.c
++++ b/daemons/attrd/attrd_messages.c
+@@ -65,6 +65,18 @@ handle_clear_failure_request(pcmk__request_t *request)
+     }
+ }
+ 
++static xmlNode *
++handle_confirm_request(pcmk__request_t *request)
++{
++    if (request->peer != NULL) {
++        crm_debug("Received confirmation from %s", request->peer);
++        pcmk__set_result(&request->result, CRM_EX_OK, PCMK_EXEC_DONE, NULL);
++        return NULL;
++    } else {
++        return handle_unknown_request(request);
++    }
++}
++
+ static xmlNode *
+ handle_flush_request(pcmk__request_t *request)
+ {
+@@ -190,6 +202,7 @@ attrd_register_handlers(void)
+ {
+     pcmk__server_command_t handlers[] = {
+         { PCMK__ATTRD_CMD_CLEAR_FAILURE, handle_clear_failure_request },
++        { PCMK__ATTRD_CMD_CONFIRM, handle_confirm_request },
+         { PCMK__ATTRD_CMD_FLUSH, handle_flush_request },
+         { PCMK__ATTRD_CMD_PEER_REMOVE, handle_remove_request },
+         { PCMK__ATTRD_CMD_QUERY, handle_query_request },
+diff --git a/include/crm_internal.h b/include/crm_internal.h
+index 63a1726..f60e7b4 100644
+--- a/include/crm_internal.h
++++ b/include/crm_internal.h
+@@ -108,6 +108,7 @@
+ #define PCMK__ATTRD_CMD_SYNC            "sync"
+ #define PCMK__ATTRD_CMD_SYNC_RESPONSE   "sync-response"
+ #define PCMK__ATTRD_CMD_CLEAR_FAILURE   "clear-failure"
++#define PCMK__ATTRD_CMD_CONFIRM         "confirm"
+ 
+ #define PCMK__CONTROLD_CMD_NODES        "list-nodes"
+ 
+-- 
+2.31.1
+
+From dfb730e9ced9dc75886fda9452c584860573fe30 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Wed, 26 Oct 2022 15:58:00 -0400
+Subject: [PATCH 18/26] Feature: daemons: Keep track of #attrd-protocol from
+ each peer.
+
+This information can be used in the future when dealing with
+cluster-wide sync points to know which peers we are waiting on a reply
+from.
+---
+ daemons/attrd/attrd_corosync.c  |  3 +-
+ daemons/attrd/attrd_utils.c     | 60 ++++++++++++++++++++++++++++++---
+ daemons/attrd/pacemaker-attrd.h |  4 ++-
+ 3 files changed, 60 insertions(+), 7 deletions(-)
+
+diff --git a/daemons/attrd/attrd_corosync.c b/daemons/attrd/attrd_corosync.c
+index 1245d9c..6f88ab6 100644
+--- a/daemons/attrd/attrd_corosync.c
++++ b/daemons/attrd/attrd_corosync.c
+@@ -268,6 +268,7 @@ attrd_peer_change_cb(enum crm_status_type kind, crm_node_t *peer, const void *da
+     // Remove votes from cluster nodes that leave, in case election in progress
+     if (gone && !is_remote) {
+         attrd_remove_voter(peer);
++        attrd_remove_peer_protocol_ver(peer->uname);
+ 
+     // Ensure remote nodes that come up are in the remote node cache
+     } else if (!gone && is_remote) {
+@@ -395,7 +396,7 @@ attrd_peer_update_one(const crm_node_t *peer, xmlNode *xml, bool filter)
+      * version, check to see if it's a new minimum version.
+      */
+     if (pcmk__str_eq(attr, CRM_ATTR_PROTOCOL, pcmk__str_none)) {
+-        attrd_update_minimum_protocol_ver(value);
++        attrd_update_minimum_protocol_ver(peer->uname, value);
+     }
+ }
+ 
+diff --git a/daemons/attrd/attrd_utils.c b/daemons/attrd/attrd_utils.c
+index 00b879b..421faed 100644
+--- a/daemons/attrd/attrd_utils.c
++++ b/daemons/attrd/attrd_utils.c
+@@ -29,6 +29,11 @@ static bool requesting_shutdown = false;
+ static bool shutting_down = false;
+ static GMainLoop *mloop = NULL;
+ 
++/* A hash table storing information on the protocol version of each peer attrd.
++ * The key is the peer's uname, and the value is the protocol version number.
++ */
++GHashTable *peer_protocol_vers = NULL;
++
+ /*!
+  * \internal
+  * \brief  Set requesting_shutdown state
+@@ -94,6 +99,10 @@ attrd_shutdown(int nsig)
+     mainloop_destroy_signal(SIGTRAP);
+ 
+     attrd_free_waitlist();
++    if (peer_protocol_vers != NULL) {
++        g_hash_table_destroy(peer_protocol_vers);
++        peer_protocol_vers = NULL;
++    }
+ 
+     if ((mloop == NULL) || !g_main_loop_is_running(mloop)) {
+         /* If there's no main loop active, just exit. This should be possible
+@@ -273,16 +282,57 @@ attrd_free_attribute(gpointer data)
+     }
+ }
+ 
++/*!
++ * \internal
++ * \brief When a peer node leaves the cluster, stop tracking its protocol version.
++ *
++ * \param[in] host  The peer node's uname to be removed
++ */
++void
++attrd_remove_peer_protocol_ver(const char *host)
++{
++    if (peer_protocol_vers != NULL) {
++        g_hash_table_remove(peer_protocol_vers, host);
++    }
++}
++
++/*!
++ * \internal
++ * \brief When a peer node broadcasts a message with its protocol version, keep
++ *        track of that information.
++ *
++ * We keep track of each peer's protocol version so we know which peers to
++ * expect confirmation messages from when handling cluster-wide sync points.
++ * We additionally keep track of the lowest protocol version supported by all
++ * peers so we know when we can send IPC messages containing more than one
++ * request.
++ *
++ * \param[in] host  The peer node's uname to be tracked
++ * \param[in] value The peer node's protocol version
++ */
+ void
+-attrd_update_minimum_protocol_ver(const char *value)
++attrd_update_minimum_protocol_ver(const char *host, const char *value)
+ {
+     int ver;
+ 
++    if (peer_protocol_vers == NULL) {
++        peer_protocol_vers = pcmk__strkey_table(free, NULL);
++    }
++
+     pcmk__scan_min_int(value, &ver, 0);
+ 
+-    if (ver > 0 && (minimum_protocol_version == -1 || ver < minimum_protocol_version)) {
+-        minimum_protocol_version = ver;
+-        crm_trace("Set minimum attrd protocol version to %d",
+-                  minimum_protocol_version);
++    if (ver > 0) {
++        char *host_name = strdup(host);
++
++        /* Record the peer attrd's protocol version. */
++        CRM_ASSERT(host_name != NULL);
++        g_hash_table_insert(peer_protocol_vers, host_name, GINT_TO_POINTER(ver));
++
++        /* If the protocol version is a new minimum, record it as such. */
++        if (minimum_protocol_version == -1 || ver < minimum_protocol_version) {
++            minimum_protocol_version = ver;
++            crm_trace("Set minimum attrd protocol version to %d",
++                      minimum_protocol_version);
++        }
+     }
+ }
+diff --git a/daemons/attrd/pacemaker-attrd.h b/daemons/attrd/pacemaker-attrd.h
+index 25f7c8a..302ef63 100644
+--- a/daemons/attrd/pacemaker-attrd.h
++++ b/daemons/attrd/pacemaker-attrd.h
+@@ -145,6 +145,7 @@ typedef struct attribute_value_s {
+ 
+ extern crm_cluster_t *attrd_cluster;
+ extern GHashTable *attributes;
++extern GHashTable *peer_protocol_vers;
+ 
+ #define CIB_OP_TIMEOUT_S 120
+ 
+@@ -177,7 +178,8 @@ void attrd_write_attributes(bool all, bool ignore_delay);
+ void attrd_write_or_elect_attribute(attribute_t *a);
+ 
+ extern int minimum_protocol_version;
+-void attrd_update_minimum_protocol_ver(const char *value);
++void attrd_remove_peer_protocol_ver(const char *host);
++void attrd_update_minimum_protocol_ver(const char *host, const char *value);
+ 
+ mainloop_timer_t *attrd_add_timer(const char *id, int timeout_ms, attribute_t *attr);
+ 
+-- 
+2.31.1
+
+From 945f0fe51d3bf69c2cb1258b394f2f11b8996525 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Thu, 27 Oct 2022 14:42:59 -0400
+Subject: [PATCH 19/26] Feature: daemons: Handle cluster-wide sync points in
+ attrd.
+
+When an attrd receives an IPC request to update some value, record the
+protocol versions of all peer attrds.  Additionally register a function
+that will be called when all confirmations are received.
+
+The originating IPC cilent (attrd_updater for instance) will sit there
+waiting for an ACK until its timeout is hit.
+
+As each confirmation message comes back to attrd, mark it off the list
+of peers we are waiting on.  When no more peers are expected, call the
+previously registered function.
+
+For attribute updates, this function just sends an ack back to
+attrd_updater.
+
+Fixes T35
+---
+ daemons/attrd/attrd_corosync.c  |   1 +
+ daemons/attrd/attrd_ipc.c       |   4 +
+ daemons/attrd/attrd_messages.c  |  10 ++
+ daemons/attrd/attrd_sync.c      | 260 +++++++++++++++++++++++++++++++-
+ daemons/attrd/attrd_utils.c     |   2 +
+ daemons/attrd/pacemaker-attrd.h |   8 +
+ 6 files changed, 281 insertions(+), 4 deletions(-)
+
+diff --git a/daemons/attrd/attrd_corosync.c b/daemons/attrd/attrd_corosync.c
+index 6f88ab6..37701aa 100644
+--- a/daemons/attrd/attrd_corosync.c
++++ b/daemons/attrd/attrd_corosync.c
+@@ -269,6 +269,7 @@ attrd_peer_change_cb(enum crm_status_type kind, crm_node_t *peer, const void *da
+     if (gone && !is_remote) {
+         attrd_remove_voter(peer);
+         attrd_remove_peer_protocol_ver(peer->uname);
++        attrd_do_not_expect_from_peer(peer->uname);
+ 
+     // Ensure remote nodes that come up are in the remote node cache
+     } else if (!gone && is_remote) {
+diff --git a/daemons/attrd/attrd_ipc.c b/daemons/attrd/attrd_ipc.c
+index 0fc5e93..c70aa1b 100644
+--- a/daemons/attrd/attrd_ipc.c
++++ b/daemons/attrd/attrd_ipc.c
+@@ -393,6 +393,7 @@ attrd_client_update(pcmk__request_t *request)
+          * the response ACK is not sent until this attrd broadcasts the update
+          * and receives its own confirmation back from all peers.
+          */
++        attrd_expect_confirmations(request, attrd_cluster_sync_point_update);
+         attrd_send_message(NULL, xml, true); /* ends up at attrd_peer_message() */
+ 
+     } else {
+@@ -456,6 +457,9 @@ attrd_ipc_closed(qb_ipcs_connection_t *c)
+         /* Remove the client from the sync point waitlist if it's present. */
+         attrd_remove_client_from_waitlist(client);
+ 
++        /* And no longer wait for confirmations from any peers. */
++        attrd_do_not_wait_for_client(client);
++
+         pcmk__free_client(client);
+     }
+ 
+diff --git a/daemons/attrd/attrd_messages.c b/daemons/attrd/attrd_messages.c
+index 9c792b2..f7b9c7c 100644
+--- a/daemons/attrd/attrd_messages.c
++++ b/daemons/attrd/attrd_messages.c
+@@ -69,7 +69,17 @@ static xmlNode *
+ handle_confirm_request(pcmk__request_t *request)
+ {
+     if (request->peer != NULL) {
++        int callid;
++
+         crm_debug("Received confirmation from %s", request->peer);
++
++        if (crm_element_value_int(request->xml, XML_LRM_ATTR_CALLID, &callid) == -1) {
++            pcmk__set_result(&request->result, CRM_EX_PROTOCOL, PCMK_EXEC_INVALID,
++                             "Could not get callid from XML");
++        } else {
++            attrd_handle_confirmation(callid, request->peer);
++        }
++
+         pcmk__set_result(&request->result, CRM_EX_OK, PCMK_EXEC_DONE, NULL);
+         return NULL;
+     } else {
+diff --git a/daemons/attrd/attrd_sync.c b/daemons/attrd/attrd_sync.c
+index e9690b5..d3d7108 100644
+--- a/daemons/attrd/attrd_sync.c
++++ b/daemons/attrd/attrd_sync.c
+@@ -34,6 +34,51 @@ struct waitlist_node {
+     uint32_t flags;
+ };
+ 
++/* A hash table storing information on in-progress IPC requests that are awaiting
++ * confirmations.  These requests are currently being processed by peer attrds and
++ * we are waiting to receive confirmation messages from each peer indicating that
++ * processing is complete.
++ *
++ * Multiple requests could be waiting on confirmations at the same time.
++ *
++ * The key is the unique callid for the IPC request, and the value is a
++ * confirmation_action struct.
++ */
++static GHashTable *expected_confirmations = NULL;
++
++/*!
++ * \internal
++ * \brief A structure describing a single IPC request that is awaiting confirmations
++ */
++struct confirmation_action {
++    /*!
++     * \brief A list of peer attrds that we are waiting to receive confirmation
++     *        messages from
++     *
++     * This list is dynamic - as confirmations arrive from peer attrds, they will
++     * be removed from this list.  When the list is empty, all peers have processed
++     * the request and the associated confirmation action will be taken.
++     */
++    GList *respondents;
++
++    /*!
++     * \brief A function to run when all confirmations have been received
++     */
++    attrd_confirmation_action_fn fn;
++
++    /*!
++     * \brief Information required to construct and send a reply to the client
++     */
++    char *client_id;
++    uint32_t ipc_id;
++    uint32_t flags;
++
++    /*!
++     * \brief The XML request containing the callid associated with this action
++     */
++    void *xml;
++};
++
+ static void
+ next_key(void)
+ {
+@@ -114,12 +159,13 @@ attrd_add_client_to_waitlist(pcmk__request_t *request)
+     wl->ipc_id = request->ipc_id;
+     wl->flags = request->flags;
+ 
+-    crm_debug("Added client %s to waitlist for %s sync point",
+-              wl->client_id, sync_point_str(wl->sync_point));
+-
+     next_key();
+     pcmk__intkey_table_insert(waitlist, waitlist_client, wl);
+ 
++    crm_trace("Added client %s to waitlist for %s sync point",
++              wl->client_id, sync_point_str(wl->sync_point));
++    crm_trace("%d clients now on waitlist", g_hash_table_size(waitlist));
++
+     /* And then add the key to the request XML so we can uniquely identify
+      * it when it comes time to issue the ACK.
+      */
+@@ -166,6 +212,7 @@ attrd_remove_client_from_waitlist(pcmk__client_t *client)
+ 
+         if (wl->client_id == client->id) {
+             g_hash_table_iter_remove(&iter);
++            crm_trace("%d clients now on waitlist", g_hash_table_size(waitlist));
+         }
+     }
+ }
+@@ -206,7 +253,7 @@ attrd_ack_waitlist_clients(enum attrd_sync_point sync_point, const xmlNode *xml)
+             return;
+         }
+ 
+-        crm_debug("Alerting client %s for reached %s sync point",
++        crm_trace("Alerting client %s for reached %s sync point",
+                   wl->client_id, sync_point_str(wl->sync_point));
+ 
+         client = pcmk__find_client_by_id(wl->client_id);
+@@ -218,9 +265,28 @@ attrd_ack_waitlist_clients(enum attrd_sync_point sync_point, const xmlNode *xml)
+ 
+         /* And then remove the client so it doesn't get alerted again. */
+         pcmk__intkey_table_remove(waitlist, callid);
++
++        crm_trace("%d clients now on waitlist", g_hash_table_size(waitlist));
+     }
+ }
+ 
++/*!
++ * \internal
++ * \brief Action to take when a cluster sync point is hit for a
++ *        PCMK__ATTRD_CMD_UPDATE* message.
++ *
++ * \param[in] xml  The request that should be passed along to
++ *                 attrd_ack_waitlist_clients.  This should be the original
++ *                 IPC request containing the callid for this update message.
++ */
++int
++attrd_cluster_sync_point_update(xmlNode *xml)
++{
++    crm_trace("Hit cluster sync point for attribute update");
++    attrd_ack_waitlist_clients(attrd_sync_point_cluster, xml);
++    return pcmk_rc_ok;
++}
++
+ /*!
+  * \internal
+  * \brief Return the sync point attribute for an IPC request
+@@ -268,3 +334,189 @@ attrd_request_has_sync_point(xmlNode *xml)
+ {
+     return attrd_request_sync_point(xml) != NULL;
+ }
++
++static void
++free_action(gpointer data)
++{
++    struct confirmation_action *action = (struct confirmation_action *) data;
++    g_list_free_full(action->respondents, free);
++    free_xml(action->xml);
++    free(action->client_id);
++    free(action);
++}
++
++/*!
++ * \internal
++ * \brief When a peer disconnects from the cluster, no longer wait for its confirmation
++ *        for any IPC action.  If this peer is the last one being waited on, this will
++ *        trigger the confirmation action.
++ *
++ * \param[in] host   The disconnecting peer attrd's uname
++ */
++void
++attrd_do_not_expect_from_peer(const char *host)
++{
++    GList *keys = g_hash_table_get_keys(expected_confirmations);
++
++    crm_trace("Removing peer %s from expected confirmations", host);
++
++    for (GList *node = keys; node != NULL; node = node->next) {
++        int callid = *(int *) node->data;
++        attrd_handle_confirmation(callid, host);
++    }
++
++    g_list_free(keys);
++}
++
++/*!
++ * \internal
++ * \brief When a client disconnects from the cluster, no longer wait on confirmations
++ *        for it.  Because the peer attrds may still be processing the original IPC
++ *        message, they may still send us confirmations.  However, we will take no
++ *        action on them.
++ *
++ * \param[in] client    The disconnecting client
++ */
++void
++attrd_do_not_wait_for_client(pcmk__client_t *client)
++{
++    GHashTableIter iter;
++    gpointer value;
++
++    if (expected_confirmations == NULL) {
++        return;
++    }
++
++    g_hash_table_iter_init(&iter, expected_confirmations);
++
++    while (g_hash_table_iter_next(&iter, NULL, &value)) {
++        struct confirmation_action *action = (struct confirmation_action *) value;
++
++        if (pcmk__str_eq(action->client_id, client->id, pcmk__str_none)) {
++            crm_trace("Removing client %s from expected confirmations", client->id);
++            g_hash_table_iter_remove(&iter);
++            crm_trace("%d requests now in expected confirmations table", g_hash_table_size(expected_confirmations));
++            break;
++        }
++    }
++}
++
++/*!
++ * \internal
++ * \brief Register some action to be taken when IPC request confirmations are
++ *        received
++ *
++ * When this function is called, a list of all peer attrds that support confirming
++ * requests is generated.  As confirmations from these peer attrds are received,
++ * they are removed from this list.  When the list is empty, the registered action
++ * will be called.
++ *
++ * \note This function should always be called before attrd_send_message is called
++ *       to broadcast to the peers to ensure that we know what replies we are
++ *       waiting on.  Otherwise, it is possible the peer could finish and confirm
++ *       before we know to expect it.
++ *
++ * \param[in] request The request that is awaiting confirmations
++ * \param[in] fn      A function to be run after all confirmations are received
++ */
++void
++attrd_expect_confirmations(pcmk__request_t *request, attrd_confirmation_action_fn fn)
++{
++    struct confirmation_action *action = NULL;
++    GHashTableIter iter;
++    gpointer host, ver;
++    GList *respondents = NULL;
++    int callid;
++
++    if (expected_confirmations == NULL) {
++        expected_confirmations = pcmk__intkey_table((GDestroyNotify) free_action);
++    }
++
++    if (crm_element_value_int(request->xml, XML_LRM_ATTR_CALLID, &callid) == -1) {
++        crm_err("Could not get callid from xml");
++        return;
++    }
++
++    if (pcmk__intkey_table_lookup(expected_confirmations, callid)) {
++        crm_err("Already waiting on confirmations for call id %d", callid);
++        return;
++    }
++
++    g_hash_table_iter_init(&iter, peer_protocol_vers);
++    while (g_hash_table_iter_next(&iter, &host, &ver)) {
++        if (GPOINTER_TO_INT(ver) >= 5) {
++            char *s = strdup((char *) host);
++
++            CRM_ASSERT(s != NULL);
++            respondents = g_list_prepend(respondents, s);
++        }
++    }
++
++    action = calloc(1, sizeof(struct confirmation_action));
++    CRM_ASSERT(action != NULL);
++
++    action->respondents = respondents;
++    action->fn = fn;
++    action->xml = copy_xml(request->xml);
++
++    action->client_id = strdup(request->ipc_client->id);
++    CRM_ASSERT(action->client_id != NULL);
++
++    action->ipc_id = request->ipc_id;
++    action->flags = request->flags;
++
++    pcmk__intkey_table_insert(expected_confirmations, callid, action);
++    crm_trace("Callid %d now waiting on %d confirmations", callid, g_list_length(respondents));
++    crm_trace("%d requests now in expected confirmations table", g_hash_table_size(expected_confirmations));
++}
++
++void
++attrd_free_confirmations(void)
++{
++    if (expected_confirmations != NULL) {
++        g_hash_table_destroy(expected_confirmations);
++        expected_confirmations = NULL;
++    }
++}
++
++/*!
++ * \internal
++ * \brief Process a confirmation message from a peer attrd
++ *
++ * This function is called every time a PCMK__ATTRD_CMD_CONFIRM message is
++ * received from a peer attrd.  If this is the last confirmation we are waiting
++ * on for a given operation, the registered action will be called.
++ *
++ * \param[in] callid The unique callid for the XML IPC request
++ * \param[in] host   The confirming peer attrd's uname
++ */
++void
++attrd_handle_confirmation(int callid, const char *host)
++{
++    struct confirmation_action *action = NULL;
++    GList *node = NULL;
++
++    if (expected_confirmations == NULL) {
++        return;
++    }
++
++    action = pcmk__intkey_table_lookup(expected_confirmations, callid);
++    if (action == NULL) {
++        return;
++    }
++
++    node = g_list_find_custom(action->respondents, host, (GCompareFunc) strcasecmp);
++
++    if (node == NULL) {
++        return;
++    }
++
++    action->respondents = g_list_remove(action->respondents, node->data);
++    crm_trace("Callid %d now waiting on %d confirmations", callid, g_list_length(action->respondents));
++
++    if (action->respondents == NULL) {
++        action->fn(action->xml);
++        pcmk__intkey_table_remove(expected_confirmations, callid);
++        crm_trace("%d requests now in expected confirmations table", g_hash_table_size(expected_confirmations));
++    }
++}
+diff --git a/daemons/attrd/attrd_utils.c b/daemons/attrd/attrd_utils.c
+index 421faed..f3a2059 100644
+--- a/daemons/attrd/attrd_utils.c
++++ b/daemons/attrd/attrd_utils.c
+@@ -99,6 +99,8 @@ attrd_shutdown(int nsig)
+     mainloop_destroy_signal(SIGTRAP);
+ 
+     attrd_free_waitlist();
++    attrd_free_confirmations();
++
+     if (peer_protocol_vers != NULL) {
+         g_hash_table_destroy(peer_protocol_vers);
+         peer_protocol_vers = NULL;
+diff --git a/daemons/attrd/pacemaker-attrd.h b/daemons/attrd/pacemaker-attrd.h
+index 302ef63..bcc329d 100644
+--- a/daemons/attrd/pacemaker-attrd.h
++++ b/daemons/attrd/pacemaker-attrd.h
+@@ -191,8 +191,16 @@ enum attrd_sync_point {
+     attrd_sync_point_cluster,
+ };
+ 
++typedef int (*attrd_confirmation_action_fn)(xmlNode *);
++
+ void attrd_add_client_to_waitlist(pcmk__request_t *request);
+ void attrd_ack_waitlist_clients(enum attrd_sync_point sync_point, const xmlNode *xml);
++int attrd_cluster_sync_point_update(xmlNode *xml);
++void attrd_do_not_expect_from_peer(const char *host);
++void attrd_do_not_wait_for_client(pcmk__client_t *client);
++void attrd_expect_confirmations(pcmk__request_t *request, attrd_confirmation_action_fn fn);
++void attrd_free_confirmations(void);
++void attrd_handle_confirmation(int callid, const char *host);
+ void attrd_remove_client_from_waitlist(pcmk__client_t *client);
+ const char *attrd_request_sync_point(xmlNode *xml);
+ bool attrd_request_has_sync_point(xmlNode *xml);
+-- 
+2.31.1
+
+From 07a032a7eb2f03dce18a7c94c56b8c837dedda15 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Fri, 28 Oct 2022 14:54:15 -0400
+Subject: [PATCH 20/26] Refactor: daemons: Add some attrd version checking
+ macros.
+
+These are just to make it a little more obvious what is actually being
+asked in the code, instead of having magic numbers sprinkled around.
+---
+ daemons/attrd/attrd_ipc.c       | 2 +-
+ daemons/attrd/attrd_sync.c      | 2 +-
+ daemons/attrd/pacemaker-attrd.h | 3 +++
+ 3 files changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/daemons/attrd/attrd_ipc.c b/daemons/attrd/attrd_ipc.c
+index c70aa1b..16bfff4 100644
+--- a/daemons/attrd/attrd_ipc.c
++++ b/daemons/attrd/attrd_ipc.c
+@@ -294,7 +294,7 @@ attrd_client_update(pcmk__request_t *request)
+      * two ways we can handle that.
+      */
+     if (xml_has_children(xml)) {
+-        if (minimum_protocol_version >= 4) {
++        if (ATTRD_SUPPORTS_MULTI_MESSAGE(minimum_protocol_version)) {
+             /* First, if all peers support a certain protocol version, we can
+              * just broadcast the big message and they'll handle it.  However,
+              * we also need to apply all the transformations in this function
+diff --git a/daemons/attrd/attrd_sync.c b/daemons/attrd/attrd_sync.c
+index d3d7108..e48f82e 100644
+--- a/daemons/attrd/attrd_sync.c
++++ b/daemons/attrd/attrd_sync.c
+@@ -444,7 +444,7 @@ attrd_expect_confirmations(pcmk__request_t *request, attrd_confirmation_action_f
+ 
+     g_hash_table_iter_init(&iter, peer_protocol_vers);
+     while (g_hash_table_iter_next(&iter, &host, &ver)) {
+-        if (GPOINTER_TO_INT(ver) >= 5) {
++        if (ATTRD_SUPPORTS_CONFIRMATION(GPOINTER_TO_INT(ver))) {
+             char *s = strdup((char *) host);
+ 
+             CRM_ASSERT(s != NULL);
+diff --git a/daemons/attrd/pacemaker-attrd.h b/daemons/attrd/pacemaker-attrd.h
+index bcc329d..83d7c6b 100644
+--- a/daemons/attrd/pacemaker-attrd.h
++++ b/daemons/attrd/pacemaker-attrd.h
+@@ -45,6 +45,9 @@
+  */
+ #define ATTRD_PROTOCOL_VERSION "5"
+ 
++#define ATTRD_SUPPORTS_MULTI_MESSAGE(x) ((x) >= 4)
++#define ATTRD_SUPPORTS_CONFIRMATION(x)  ((x) >= 5)
++
+ #define attrd_send_ack(client, id, flags) \
+     pcmk__ipc_send_ack((client), (id), (flags), "ack", ATTRD_PROTOCOL_VERSION, CRM_EX_INDETERMINATE)
+ 
+-- 
+2.31.1
+
+From 811361b96c6f26a1f5eccc54b6e8bf6e6fd003be Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Mon, 31 Oct 2022 12:53:22 -0400
+Subject: [PATCH 21/26] Low: attrd: Fix removing clients from the waitlist when
+ they disconnect.
+
+The client ID is a string, so it must be compared like a string.
+---
+ daemons/attrd/attrd_sync.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/daemons/attrd/attrd_sync.c b/daemons/attrd/attrd_sync.c
+index e48f82e..c9b4784 100644
+--- a/daemons/attrd/attrd_sync.c
++++ b/daemons/attrd/attrd_sync.c
+@@ -210,7 +210,7 @@ attrd_remove_client_from_waitlist(pcmk__client_t *client)
+     while (g_hash_table_iter_next(&iter, NULL, &value)) {
+         struct waitlist_node *wl = (struct waitlist_node *) value;
+ 
+-        if (wl->client_id == client->id) {
++        if (pcmk__str_eq(wl->client_id, client->id, pcmk__str_none)) {
+             g_hash_table_iter_remove(&iter);
+             crm_trace("%d clients now on waitlist", g_hash_table_size(waitlist));
+         }
+-- 
+2.31.1
+
+From 4e933ad14456af85c60701410c3b23b4eab03f86 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Tue, 1 Nov 2022 12:35:12 -0400
+Subject: [PATCH 22/26] Feature: daemons: Handle an attrd client timing out.
+
+If the update confirmations do not come back in time, use a main loop
+timer to remove the client from the table.
+---
+ daemons/attrd/attrd_sync.c | 49 ++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 49 insertions(+)
+
+diff --git a/daemons/attrd/attrd_sync.c b/daemons/attrd/attrd_sync.c
+index c9b4784..9d07796 100644
+--- a/daemons/attrd/attrd_sync.c
++++ b/daemons/attrd/attrd_sync.c
+@@ -61,6 +61,12 @@ struct confirmation_action {
+      */
+     GList *respondents;
+ 
++    /*!
++     * \brief A timer that will be used to remove the client should it time out
++     *        before receiving all confirmations
++     */
++    mainloop_timer_t *timer;
++
+     /*!
+      * \brief A function to run when all confirmations have been received
+      */
+@@ -340,11 +346,51 @@ free_action(gpointer data)
+ {
+     struct confirmation_action *action = (struct confirmation_action *) data;
+     g_list_free_full(action->respondents, free);
++    mainloop_timer_del(action->timer);
+     free_xml(action->xml);
+     free(action->client_id);
+     free(action);
+ }
+ 
++/* Remove an IPC request from the expected_confirmations table if the peer attrds
++ * don't respond before the timeout is hit.  We set the timeout to 15s.  The exact
++ * number isn't critical - we just want to make sure that the table eventually gets
++ * cleared of things that didn't complete.
++ */
++static gboolean
++confirmation_timeout_cb(gpointer data)
++{
++    struct confirmation_action *action = (struct confirmation_action *) data;
++
++    GHashTableIter iter;
++    gpointer value;
++
++    if (expected_confirmations == NULL) {
++        return G_SOURCE_REMOVE;
++    }
++
++    g_hash_table_iter_init(&iter, expected_confirmations);
++
++    while (g_hash_table_iter_next(&iter, NULL, &value)) {
++        if (value == action) {
++            pcmk__client_t *client = pcmk__find_client_by_id(action->client_id);
++            if (client == NULL) {
++                return G_SOURCE_REMOVE;
++            }
++
++            crm_trace("Timed out waiting for confirmations for client %s", client->id);
++            pcmk__ipc_send_ack(client, action->ipc_id, action->flags | crm_ipc_client_response,
++                               "ack", ATTRD_PROTOCOL_VERSION, CRM_EX_TIMEOUT);
++
++            g_hash_table_iter_remove(&iter);
++            crm_trace("%d requests now in expected confirmations table", g_hash_table_size(expected_confirmations));
++            break;
++        }
++    }
++
++    return G_SOURCE_REMOVE;
++}
++
+ /*!
+  * \internal
+  * \brief When a peer disconnects from the cluster, no longer wait for its confirmation
+@@ -465,6 +511,9 @@ attrd_expect_confirmations(pcmk__request_t *request, attrd_confirmation_action_f
+     action->ipc_id = request->ipc_id;
+     action->flags = request->flags;
+ 
++    action->timer = mainloop_timer_add(NULL, 15000, FALSE, confirmation_timeout_cb, action);
++    mainloop_timer_start(action->timer);
++
+     pcmk__intkey_table_insert(expected_confirmations, callid, action);
+     crm_trace("Callid %d now waiting on %d confirmations", callid, g_list_length(respondents));
+     crm_trace("%d requests now in expected confirmations table", g_hash_table_size(expected_confirmations));
+-- 
+2.31.1
+
+From 101896383cbe0103c98078e46540c076af08f040 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Wed, 2 Nov 2022 14:40:30 -0400
+Subject: [PATCH 23/26] Refactor: Demote a sync point related message to trace.
+
+---
+ daemons/attrd/attrd_corosync.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/daemons/attrd/attrd_corosync.c b/daemons/attrd/attrd_corosync.c
+index 37701aa..5cbed7e 100644
+--- a/daemons/attrd/attrd_corosync.c
++++ b/daemons/attrd/attrd_corosync.c
+@@ -633,7 +633,7 @@ attrd_peer_update(const crm_node_t *peer, xmlNode *xml, const char *host,
+      * point, process that now.
+      */
+     if (handle_sync_point) {
+-        crm_debug("Hit local sync point for attribute update");
++        crm_trace("Hit local sync point for attribute update");
+         attrd_ack_waitlist_clients(attrd_sync_point_local, xml);
+     }
+ }
+-- 
+2.31.1
+
+From acd13246d4c2bef7982ca103e34896efcad22348 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Thu, 3 Nov 2022 10:29:20 -0400
+Subject: [PATCH 24/26] Low: daemons: Avoid infinite confirm loops in attrd.
+
+On the sending side, do not add confirm="yes" to a message with
+op="confirm".  On the receiving side, do not confirm a message with
+op="confirm" even if confirm="yes" is set.
+---
+ daemons/attrd/attrd_corosync.c | 3 ++-
+ daemons/attrd/attrd_messages.c | 6 +++++-
+ 2 files changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/daemons/attrd/attrd_corosync.c b/daemons/attrd/attrd_corosync.c
+index 5cbed7e..88c1ecc 100644
+--- a/daemons/attrd/attrd_corosync.c
++++ b/daemons/attrd/attrd_corosync.c
+@@ -74,7 +74,8 @@ attrd_peer_message(crm_node_t *peer, xmlNode *xml)
+         /* Having finished handling the request, check to see if the originating
+          * peer requested confirmation.  If so, send that confirmation back now.
+          */
+-        if (pcmk__xe_attr_is_true(xml, PCMK__XA_CONFIRM)) {
++        if (pcmk__xe_attr_is_true(xml, PCMK__XA_CONFIRM) &&
++            !pcmk__str_eq(request.op, PCMK__ATTRD_CMD_CONFIRM, pcmk__str_none)) {
+             int callid = 0;
+             xmlNode *reply = NULL;
+ 
+diff --git a/daemons/attrd/attrd_messages.c b/daemons/attrd/attrd_messages.c
+index f7b9c7c..184176a 100644
+--- a/daemons/attrd/attrd_messages.c
++++ b/daemons/attrd/attrd_messages.c
+@@ -310,6 +310,8 @@ attrd_broadcast_protocol(void)
+ gboolean
+ attrd_send_message(crm_node_t *node, xmlNode *data, bool confirm)
+ {
++    const char *op = crm_element_value(data, PCMK__XA_TASK);
++
+     crm_xml_add(data, F_TYPE, T_ATTRD);
+     crm_xml_add(data, PCMK__XA_ATTR_VERSION, ATTRD_PROTOCOL_VERSION);
+ 
+@@ -317,7 +319,9 @@ attrd_send_message(crm_node_t *node, xmlNode *data, bool confirm)
+      * be all if node is NULL) that the message has been received and
+      * acted upon.
+      */
+-    pcmk__xe_set_bool_attr(data, PCMK__XA_CONFIRM, confirm);
++    if (!pcmk__str_eq(op, PCMK__ATTRD_CMD_CONFIRM, pcmk__str_none)) {
++        pcmk__xe_set_bool_attr(data, PCMK__XA_CONFIRM, confirm);
++    }
+ 
+     attrd_xml_add_writer(data);
+     return send_cluster_message(node, crm_msg_attrd, data, TRUE);
+-- 
+2.31.1
+
+From 115e6c3a0d8db4df3eccf6da1c344168799f890d Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Tue, 15 Nov 2022 09:35:28 -0500
+Subject: [PATCH 25/26] Fix: daemons: Check for NULL in
+ attrd_do_not_expect_from_peer.
+
+---
+ daemons/attrd/attrd_sync.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/daemons/attrd/attrd_sync.c b/daemons/attrd/attrd_sync.c
+index 9d07796..6936771 100644
+--- a/daemons/attrd/attrd_sync.c
++++ b/daemons/attrd/attrd_sync.c
+@@ -402,7 +402,13 @@ confirmation_timeout_cb(gpointer data)
+ void
+ attrd_do_not_expect_from_peer(const char *host)
+ {
+-    GList *keys = g_hash_table_get_keys(expected_confirmations);
++    GList *keys = NULL;
++
++    if (expected_confirmations == NULL) {
++        return;
++    }
++
++    keys = g_hash_table_get_keys(expected_confirmations);
+ 
+     crm_trace("Removing peer %s from expected confirmations", host);
+ 
+-- 
+2.31.1
+
+From 05da14f97ccd4f63f53801acc107ad661e5fd0c8 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Wed, 16 Nov 2022 17:37:44 -0500
+Subject: [PATCH 26/26] Low: daemons: Support cluster-wide sync points for
+ multi IPC messages.
+
+Supporting cluster-wide sync points means attrd_expect_confirmations
+needs to be called, and then attrd_send_message needs "true" as a third
+argument.  This indicates attrd wants confirmations back from all its
+peers when they have applied the update.
+
+We're already doing this at the end of attrd_client_update for
+single-update IPC messages, and handling it for multi-update messages is
+a simple matter of breaking that code out into a function and making
+sure it's called.
+
+Note that this leaves two other spots where sync points still need to be
+dealt with:
+
+* An update message that uses a regex.  See
+  https://projects.clusterlabs.org/T600 for details.
+
+* A multi-update IPC message in a cluster where that is not supported.
+  See https://projects.clusterlabs.org/T601 for details.
+---
+ daemons/attrd/attrd_ipc.c | 43 ++++++++++++++++++++++-----------------
+ 1 file changed, 24 insertions(+), 19 deletions(-)
+
+diff --git a/daemons/attrd/attrd_ipc.c b/daemons/attrd/attrd_ipc.c
+index 16bfff4..8c5660d 100644
+--- a/daemons/attrd/attrd_ipc.c
++++ b/daemons/attrd/attrd_ipc.c
+@@ -283,6 +283,28 @@ handle_value_expansion(const char **value, xmlNode *xml, const char *op,
+     return pcmk_rc_ok;
+ }
+ 
++static void
++send_update_msg_to_cluster(pcmk__request_t *request, xmlNode *xml)
++{
++    if (pcmk__str_eq(attrd_request_sync_point(xml), PCMK__VALUE_CLUSTER, pcmk__str_none)) {
++        /* The client is waiting on the cluster-wide sync point.  In this case,
++         * the response ACK is not sent until this attrd broadcasts the update
++         * and receives its own confirmation back from all peers.
++         */
++        attrd_expect_confirmations(request, attrd_cluster_sync_point_update);
++        attrd_send_message(NULL, xml, true); /* ends up at attrd_peer_message() */
++
++    } else {
++        /* The client is either waiting on the local sync point or was not
++         * waiting on any sync point at all.  For the local sync point, the
++         * response ACK is sent in attrd_peer_update.  For clients not
++         * waiting on any sync point, the response ACK is sent in
++         * handle_update_request immediately before this function was called.
++         */
++        attrd_send_message(NULL, xml, false); /* ends up at attrd_peer_message() */
++    }
++}
++
+ xmlNode *
+ attrd_client_update(pcmk__request_t *request)
+ {
+@@ -314,7 +336,7 @@ attrd_client_update(pcmk__request_t *request)
+                 }
+             }
+ 
+-            attrd_send_message(NULL, xml, false);
++            send_update_msg_to_cluster(request, xml);
+             pcmk__set_result(&request->result, CRM_EX_OK, PCMK_EXEC_DONE, NULL);
+ 
+         } else {
+@@ -388,24 +410,7 @@ attrd_client_update(pcmk__request_t *request)
+     crm_debug("Broadcasting %s[%s]=%s%s", attr, crm_element_value(xml, PCMK__XA_ATTR_NODE_NAME),
+               value, (attrd_election_won()? " (writer)" : ""));
+ 
+-    if (pcmk__str_eq(attrd_request_sync_point(xml), PCMK__VALUE_CLUSTER, pcmk__str_none)) {
+-        /* The client is waiting on the cluster-wide sync point.  In this case,
+-         * the response ACK is not sent until this attrd broadcasts the update
+-         * and receives its own confirmation back from all peers.
+-         */
+-        attrd_expect_confirmations(request, attrd_cluster_sync_point_update);
+-        attrd_send_message(NULL, xml, true); /* ends up at attrd_peer_message() */
+-
+-    } else {
+-        /* The client is either waiting on the local sync point or was not
+-         * waiting on any sync point at all.  For the local sync point, the
+-         * response ACK is sent in attrd_peer_update.  For clients not
+-         * waiting on any sync point, the response ACK is sent in
+-         * handle_update_request immediately before this function was called.
+-         */
+-        attrd_send_message(NULL, xml, false); /* ends up at attrd_peer_message() */
+-    }
+-
++    send_update_msg_to_cluster(request, xml);
+     pcmk__set_result(&request->result, CRM_EX_OK, PCMK_EXEC_DONE, NULL);
+     return NULL;
+ }
+-- 
+2.31.1
+

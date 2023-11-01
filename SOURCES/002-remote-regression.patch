@@ -1,0 +1,98 @@
+From d8e08729ad5e3dc62f774172f992210902fc0ed4 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Mon, 23 Jan 2023 14:25:56 -0600
+Subject: [PATCH] High: executor: fix regression in remote node shutdown
+
+This reverts the essential part of d61494347, which was based on misdiagnosing
+a remote node shutdown issue. Initially, it was thought that a "TLS server
+session ended" log just after a remote node requested shutdown indicated that
+the proxy connection coincidentally dropped at that moment. It actually is the
+routine stopping of accepting new proxy connections, and existing when that
+happens makes the remote node exit immediately without waiting for the
+all-clear from the cluster.
+
+Fixes T361
+---
+ daemons/execd/pacemaker-execd.c | 19 +------------------
+ daemons/execd/pacemaker-execd.h |  3 +--
+ daemons/execd/remoted_tls.c     |  6 +-----
+ 3 files changed, 3 insertions(+), 25 deletions(-)
+
+diff --git a/daemons/execd/pacemaker-execd.c b/daemons/execd/pacemaker-execd.c
+index db12674f13..491808974a 100644
+--- a/daemons/execd/pacemaker-execd.c
++++ b/daemons/execd/pacemaker-execd.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2012-2022 the Pacemaker project contributors
++ * Copyright 2012-2023 the Pacemaker project contributors
+  *
+  * The version control history for this file may have further details.
+  *
+@@ -305,23 +305,6 @@ lrmd_exit(gpointer data)
+     return FALSE;
+ }
+ 
+-/*!
+- * \internal
+- * \brief Clean up and exit if shutdown has started
+- *
+- * \return Doesn't return
+- */
+-void
+-execd_exit_if_shutting_down(void)
+-{
+-#ifdef PCMK__COMPILE_REMOTE
+-    if (shutting_down) {
+-        crm_warn("exit because TLS connection was closed and 'shutting_down' set");
+-        lrmd_exit(NULL);
+-    }
+-#endif
+-}
+-
+ /*!
+  * \internal
+  * \brief Request cluster shutdown if appropriate, otherwise exit immediately
+diff --git a/daemons/execd/pacemaker-execd.h b/daemons/execd/pacemaker-execd.h
+index 6646ae29e3..f78e8dcdde 100644
+--- a/daemons/execd/pacemaker-execd.h
++++ b/daemons/execd/pacemaker-execd.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2012-2022 the Pacemaker project contributors
++ * Copyright 2012-2023 the Pacemaker project contributors
+  *
+  * The version control history for this file may have further details.
+  *
+@@ -105,6 +105,5 @@ void remoted_spawn_pidone(int argc, char **argv, char **envp);
+ int process_lrmd_alert_exec(pcmk__client_t *client, uint32_t id,
+                             xmlNode *request);
+ void lrmd_drain_alerts(GMainLoop *mloop);
+-void execd_exit_if_shutting_down(void);
+ 
+ #endif // PACEMAKER_EXECD__H
+diff --git a/daemons/execd/remoted_tls.c b/daemons/execd/remoted_tls.c
+index 6f4b2d0062..c65e3f394d 100644
+--- a/daemons/execd/remoted_tls.c
++++ b/daemons/execd/remoted_tls.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2012-2022 the Pacemaker project contributors
++ * Copyright 2012-2023 the Pacemaker project contributors
+  *
+  * The version control history for this file may have further details.
+  *
+@@ -250,10 +250,6 @@ static void
+ tls_server_dropped(gpointer user_data)
+ {
+     crm_notice("TLS server session ended");
+-    /* If we are in the process of shutting down, then we should actually exit.
+-     * bz#1804259
+-     */
+-    execd_exit_if_shutting_down();
+     return;
+ }
+ 
+-- 
+2.31.1
+

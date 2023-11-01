@@ -1,0 +1,151 @@
+From 0d15568a538349ac41028db6b506d13dd23e8732 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Tue, 14 Feb 2023 14:00:37 -0500
+Subject: [PATCH] High: libcrmcommon: Fix handling node=NULL in
+ pcmk__attrd_api_query.
+
+According to the header file, if node is NULL, pcmk__attrd_api_query
+should query the value of the given attribute on all cluster nodes.
+This is also what the server expects and how attrd_updater is supposed
+to work.
+
+However, pcmk__attrd_api_query has no way of letting callers decide
+whether they want to query all nodes or whether they want to use the
+local node.  We were passing NULL for the node name, which it took to
+mean it should look up the local node name.  This calls
+pcmk__node_attr_target, which probes the local cluster name and returns
+that to pcmk__attrd_api_query.  If it returns non-NULL, that value will
+then be put into the XML IPC call which means the server will only
+return the value for that node.
+
+In testing this was usually fine.  However, in pratice, the methods
+pcmk__node_attr_target uses to figure out the local cluster node name
+involves checking the OCF_RESKEY_CRM_meta_on_node environment variable
+among others.
+
+This variable was never set in testing, but can be set in the real
+world.  This leads to circumstances where the user did "attrd_updater -QA"
+expecting to get the values on all nodes, but instead only got the value
+on the local cluster node.
+
+In pacemaker-2.1.4 and prior, pcmk__node_attr_target was simply never
+called if the node was NULL but was called otherwise.
+
+The fix is to modify pcmk__attrd_api_query to take an option for
+querying all nodes.  If that's present, we'll query all nodes.  If it's
+not present, we'll look at the given node name - NULL means look it up,
+anything else means just that node.
+
+Regression in 2.1.5 introduced by eb20a65577
+---
+ include/crm/common/attrd_internal.h     |  6 +++++-
+ include/crm/common/ipc_attrd_internal.h |  7 +++++--
+ lib/common/ipc_attrd.c                  | 12 ++++++++----
+ tools/attrd_updater.c                   |  5 +++--
+ 4 files changed, 21 insertions(+), 9 deletions(-)
+
+diff --git a/include/crm/common/attrd_internal.h b/include/crm/common/attrd_internal.h
+index 389be48..7337c38 100644
+--- a/include/crm/common/attrd_internal.h
++++ b/include/crm/common/attrd_internal.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2004-2022 the Pacemaker project contributors
++ * Copyright 2004-2023 the Pacemaker project contributors
+  *
+  * The version control history for this file may have further details.
+  *
+@@ -25,6 +25,10 @@ enum pcmk__node_attr_opts {
+     pcmk__node_attr_perm           = (1 << 5),
+     pcmk__node_attr_sync_local     = (1 << 6),
+     pcmk__node_attr_sync_cluster   = (1 << 7),
++    // pcmk__node_attr_utilization is 8, but that has not been backported.
++    // I'm leaving the gap here in case we backport that in the future and
++    // also to avoid problems on mixed-version clusters.
++    pcmk__node_attr_query_all      = (1 << 9),
+ };
+ 
+ #define pcmk__set_node_attr_flags(node_attr_flags, flags_to_set) do {   \
+diff --git a/include/crm/common/ipc_attrd_internal.h b/include/crm/common/ipc_attrd_internal.h
+index 2c6713f..b1b7584 100644
+--- a/include/crm/common/ipc_attrd_internal.h
++++ b/include/crm/common/ipc_attrd_internal.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2022 the Pacemaker project contributors
++ * Copyright 2022-2023 the Pacemaker project contributors
+  *
+  * The version control history for this file may have further details.
+  *
+@@ -110,10 +110,13 @@ int pcmk__attrd_api_purge(pcmk_ipc_api_t *api, const char *node);
+  *
+  * \param[in,out] api           Connection to pacemaker-attrd
+  * \param[in]     node          Look up the attribute for this node
+- *                              (or NULL for all nodes)
++ *                              (or NULL for the local node)
+  * \param[in]     name          Attribute name
+  * \param[in]     options       Bitmask of pcmk__node_attr_opts
+  *
++ * \note Passing pcmk__node_attr_query_all will cause the function to query
++ *       the value of \p name on all nodes, regardless of the value of \p node.
++ *
+  * \return Standard Pacemaker return code
+  */
+ int pcmk__attrd_api_query(pcmk_ipc_api_t *api, const char *node, const char *name,
+diff --git a/lib/common/ipc_attrd.c b/lib/common/ipc_attrd.c
+index 4606509..dece49b 100644
+--- a/lib/common/ipc_attrd.c
++++ b/lib/common/ipc_attrd.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2011-2022 the Pacemaker project contributors
++ * Copyright 2011-2023 the Pacemaker project contributors
+  *
+  * The version control history for this file may have further details.
+  *
+@@ -332,10 +332,14 @@ pcmk__attrd_api_query(pcmk_ipc_api_t *api, const char *node, const char *name,
+         return EINVAL;
+     }
+ 
+-    target = pcmk__node_attr_target(node);
++    if (pcmk_is_set(options, pcmk__node_attr_query_all)) {
++        node = NULL;
++    } else {
++        target = pcmk__node_attr_target(node);
+ 
+-    if (target != NULL) {
+-        node = target;
++        if (target != NULL) {
++            node = target;
++        }
+     }
+ 
+     request = create_attrd_op(NULL);
+diff --git a/tools/attrd_updater.c b/tools/attrd_updater.c
+index 3cd766d..cbd341d 100644
+--- a/tools/attrd_updater.c
++++ b/tools/attrd_updater.c
+@@ -376,6 +376,7 @@ attrd_event_cb(pcmk_ipc_api_t *attrd_api, enum pcmk_ipc_event event_type,
+ static int
+ send_attrd_query(pcmk__output_t *out, const char *attr_name, const char *attr_node, gboolean query_all)
+ {
++    uint32_t options = pcmk__node_attr_none;
+     pcmk_ipc_api_t *attrd_api = NULL;
+     int rc = pcmk_rc_ok;
+ 
+@@ -400,10 +401,10 @@ send_attrd_query(pcmk__output_t *out, const char *attr_name, const char *attr_no
+ 
+     /* Decide which node(s) to query */
+     if (query_all == TRUE) {
+-        attr_node = NULL;
++        options |= pcmk__node_attr_query_all;
+     }
+ 
+-    rc = pcmk__attrd_api_query(attrd_api, attr_node, attr_name, 0);
++    rc = pcmk__attrd_api_query(attrd_api, attr_node, attr_name, options);
+ 
+     if (rc != pcmk_rc_ok) {
+         g_set_error(&error, PCMK__RC_ERROR, rc, "Could not query value of %s: %s (%d)",
+-- 
+2.31.1
+
