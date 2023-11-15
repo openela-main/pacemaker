@@ -1,0 +1,26 @@
+From ebac530c815a62f7c3a1c24f64e9a530d9753dbe Mon Sep 17 00:00:00 2001
+From: Hideo Yamauchi <renayama19661014@ybb.ne.jp>
+Date: Wed, 19 Jul 2023 18:21:07 +0900
+Subject: [PATCH] High: tools: The dampen parameter is disabled when setting
+ values with attrd_updater.
+
+---
+ tools/attrd_updater.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/tools/attrd_updater.c b/tools/attrd_updater.c
+index b615a3575..4688b9ff6 100644
+--- a/tools/attrd_updater.c
++++ b/tools/attrd_updater.c
+@@ -501,7 +501,7 @@ send_attrd_update(char command, const char *attr_node, const char *attr_name,
+ 
+         case 'U':
+             rc = pcmk__attrd_api_update(NULL, attr_node, attr_name, attr_value,
+-                                        NULL, attr_set, NULL,
++                                        attr_dampen, attr_set, NULL,
+                                         attr_options | pcmk__node_attr_value);
+             break;
+ 
+-- 
+2.41.0
+

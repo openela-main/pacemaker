@@ -1,0 +1,402 @@
+From cf53f523e691295879cd75cff1a86bc15664fa51 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Tue, 2 May 2023 09:59:13 -0400
+Subject: [PATCH 1/7] Feature: daemons: Add start state to LRMD handshake XML
+
+This gets read out of /etc/sysconfig/pacemaker and set into the
+environment.  The remote node executor will then add that to the XML
+that it sends to the controller upon startup.
+
+Ref T183
+---
+ daemons/execd/execd_commands.c | 5 +++++
+ include/crm_internal.h         | 1 +
+ 2 files changed, 6 insertions(+)
+
+diff --git a/daemons/execd/execd_commands.c b/daemons/execd/execd_commands.c
+index fa2761e..9a783a5 100644
+--- a/daemons/execd/execd_commands.c
++++ b/daemons/execd/execd_commands.c
+@@ -1474,6 +1474,7 @@ process_lrmd_signon(pcmk__client_t *client, xmlNode *request, int call_id,
+     int rc = pcmk_ok;
+     time_t now = time(NULL);
+     const char *protocol_version = crm_element_value(request, F_LRMD_PROTOCOL_VERSION);
++    const char *start_state = pcmk__env_option(PCMK__ENV_NODE_START_STATE);
+ 
+     if (compare_version(protocol_version, LRMD_MIN_PROTOCOL_VERSION) < 0) {
+         crm_err("Cluster API version must be greater than or equal to %s, not %s",
+@@ -1503,6 +1504,10 @@ process_lrmd_signon(pcmk__client_t *client, xmlNode *request, int call_id,
+     crm_xml_add(*reply, F_LRMD_PROTOCOL_VERSION, LRMD_PROTOCOL_VERSION);
+     crm_xml_add_ll(*reply, PCMK__XA_UPTIME, now - start_time);
+ 
++    if (start_state) {
++        crm_xml_add(*reply, PCMK__XA_NODE_START_STATE, start_state);
++    }
++
+     return rc;
+ }
+ 
+diff --git a/include/crm_internal.h b/include/crm_internal.h
+index 5f6531f..771bd26 100644
+--- a/include/crm_internal.h
++++ b/include/crm_internal.h
+@@ -84,6 +84,7 @@
+ #define PCMK__XA_GRAPH_ERRORS           "graph-errors"
+ #define PCMK__XA_GRAPH_WARNINGS         "graph-warnings"
+ #define PCMK__XA_MODE                   "mode"
++#define PCMK__XA_NODE_START_STATE       "node_start_state"
+ #define PCMK__XA_TASK                   "task"
+ #define PCMK__XA_UPTIME                 "uptime"
+ #define PCMK__XA_CONN_HOST              "connection_host"
+-- 
+2.31.1
+
+From c950291742711b5c4c8986adc8e938fe6fef861c Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Tue, 2 May 2023 10:04:32 -0400
+Subject: [PATCH 2/7] Feature: liblrmd: Save a remote node's requested start
+ state
+
+Ref T183
+---
+ include/crm/common/ipc_internal.h | 1 +
+ lib/lrmd/lrmd_client.c            | 7 +++++++
+ 2 files changed, 8 insertions(+)
+
+diff --git a/include/crm/common/ipc_internal.h b/include/crm/common/ipc_internal.h
+index 5099dda..d203924 100644
+--- a/include/crm/common/ipc_internal.h
++++ b/include/crm/common/ipc_internal.h
+@@ -112,6 +112,7 @@ struct pcmk__remote_s {
+     int tcp_socket;
+     mainloop_io_t *source;
+     time_t uptime;
++    char *start_state;
+ 
+     /* CIB-only */
+     char *token;
+diff --git a/lib/lrmd/lrmd_client.c b/lib/lrmd/lrmd_client.c
+index c565728..4239105 100644
+--- a/lib/lrmd/lrmd_client.c
++++ b/lib/lrmd/lrmd_client.c
+@@ -588,7 +588,9 @@ lrmd_tls_connection_destroy(gpointer userdata)
+     }
+ 
+     free(native->remote->buffer);
++    free(native->remote->start_state);
+     native->remote->buffer = NULL;
++    native->remote->start_state = NULL;
+     native->source = 0;
+     native->sock = 0;
+     native->psk_cred_c = NULL;
+@@ -980,6 +982,7 @@ lrmd_handshake(lrmd_t * lrmd, const char *name)
+         const char *version = crm_element_value(reply, F_LRMD_PROTOCOL_VERSION);
+         const char *msg_type = crm_element_value(reply, F_LRMD_OPERATION);
+         const char *tmp_ticket = crm_element_value(reply, F_LRMD_CLIENTID);
++        const char *start_state = crm_element_value(reply, PCMK__XA_NODE_START_STATE);
+         long long uptime = -1;
+ 
+         crm_element_value_int(reply, F_LRMD_RC, &rc);
+@@ -992,6 +995,10 @@ lrmd_handshake(lrmd_t * lrmd, const char *name)
+         crm_element_value_ll(reply, PCMK__XA_UPTIME, &uptime);
+         native->remote->uptime = uptime;
+ 
++        if (start_state) {
++            native->remote->start_state = strdup(start_state);
++        }
++
+         if (rc == -EPROTO) {
+             crm_err("Executor protocol version mismatch between client (%s) and server (%s)",
+                 LRMD_PROTOCOL_VERSION, version);
+-- 
+2.31.1
+
+From 7302014c7b7296be31b1f542b3f107d55b1fb2a0 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Tue, 2 May 2023 10:05:13 -0400
+Subject: [PATCH 3/7] Feature: liblrmd: Add lrmd__node_start_state.
+
+This function is used to get the start state out of an lrmd_private_t
+structure.
+
+Ref T183
+---
+ include/crm/lrmd_internal.h |  1 +
+ lib/lrmd/lrmd_client.c      | 12 ++++++++++++
+ 2 files changed, 13 insertions(+)
+
+diff --git a/include/crm/lrmd_internal.h b/include/crm/lrmd_internal.h
+index 5810554..d1cd25d 100644
+--- a/include/crm/lrmd_internal.h
++++ b/include/crm/lrmd_internal.h
+@@ -47,6 +47,7 @@ void lrmd__set_result(lrmd_event_data_t *event, enum ocf_exitcode rc,
+ void lrmd__reset_result(lrmd_event_data_t *event);
+ 
+ time_t lrmd__uptime(lrmd_t *lrmd);
++const char *lrmd__node_start_state(lrmd_t *lrmd);
+ 
+ /* Shared functions for IPC proxy back end */
+ 
+diff --git a/lib/lrmd/lrmd_client.c b/lib/lrmd/lrmd_client.c
+index 4239105..82434b9 100644
+--- a/lib/lrmd/lrmd_client.c
++++ b/lib/lrmd/lrmd_client.c
+@@ -2538,3 +2538,15 @@ lrmd__uptime(lrmd_t *lrmd)
+         return native->remote->uptime;
+     }
+ }
++
++const char *
++lrmd__node_start_state(lrmd_t *lrmd)
++{
++    lrmd_private_t *native = lrmd->lrmd_private;
++
++    if (native->remote == NULL) {
++        return NULL;
++    } else {
++        return native->remote->start_state;
++    }
++}
+-- 
+2.31.1
+
+From e5e4d43f847da0930bae12f63c7e9d9c44c07cdf Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Tue, 2 May 2023 10:07:58 -0400
+Subject: [PATCH 4/7] Refactor: controller: Make set_join_state a public
+ function.
+
+This already does all the work of setting a node's start state.  It just
+needs to be made public and given arguments for what node to set instead
+of reading globals.
+
+Ref T183
+---
+ daemons/controld/controld_join_client.c | 20 ++++++++++----------
+ daemons/controld/pacemaker-controld.h   |  3 +++
+ 2 files changed, 13 insertions(+), 10 deletions(-)
+
+diff --git a/daemons/controld/controld_join_client.c b/daemons/controld/controld_join_client.c
+index da6a9d6..07e2a27 100644
+--- a/daemons/controld/controld_join_client.c
++++ b/daemons/controld/controld_join_client.c
+@@ -195,32 +195,31 @@ join_query_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, void *
+     free_xml(generation);
+ }
+ 
+-static void
+-set_join_state(const char * start_state)
++void
++set_join_state(const char *start_state, const char *node_name, const char *node_uuid)
+ {
+     if (pcmk__str_eq(start_state, "standby", pcmk__str_casei)) {
+         crm_notice("Forcing node %s to join in %s state per configured "
+-                   "environment", controld_globals.our_nodename, start_state);
++                   "environment", node_name, start_state);
+         cib__update_node_attr(controld_globals.logger_out,
+                               controld_globals.cib_conn, cib_sync_call,
+-                              XML_CIB_TAG_NODES, controld_globals.our_uuid,
++                              XML_CIB_TAG_NODES, node_uuid,
+                               NULL, NULL, NULL, "standby", "on", NULL, NULL);
+ 
+     } else if (pcmk__str_eq(start_state, "online", pcmk__str_casei)) {
+         crm_notice("Forcing node %s to join in %s state per configured "
+-                   "environment", controld_globals.our_nodename, start_state);
++                   "environment", node_name, start_state);
+         cib__update_node_attr(controld_globals.logger_out,
+                               controld_globals.cib_conn, cib_sync_call,
+-                              XML_CIB_TAG_NODES, controld_globals.our_uuid,
++                              XML_CIB_TAG_NODES, node_uuid,
+                               NULL, NULL, NULL, "standby", "off", NULL, NULL);
+ 
+     } else if (pcmk__str_eq(start_state, "default", pcmk__str_casei)) {
+-        crm_debug("Not forcing a starting state on node %s",
+-                  controld_globals.our_nodename);
++        crm_debug("Not forcing a starting state on node %s", node_name);
+ 
+     } else {
+         crm_warn("Unrecognized start state '%s', using 'default' (%s)",
+-                 start_state, controld_globals.our_nodename);
++                 start_state, node_name);
+     }
+ }
+ 
+@@ -335,7 +334,8 @@ do_cl_join_finalize_respond(long long action,
+ 
+             first_join = FALSE;
+             if (start_state) {
+-                set_join_state(start_state);
++                set_join_state(start_state, controld_globals.our_nodename,
++                               controld_globals.our_uuid);
+             }
+         }
+ 
+diff --git a/daemons/controld/pacemaker-controld.h b/daemons/controld/pacemaker-controld.h
+index 1484a00..d8c2ddd 100644
+--- a/daemons/controld/pacemaker-controld.h
++++ b/daemons/controld/pacemaker-controld.h
+@@ -36,4 +36,7 @@ void controld_remove_voter(const char *uname);
+ void controld_election_fini(void);
+ void controld_stop_current_election_timeout(void);
+ 
++void set_join_state(const char *start_state, const char *node_name,
++                    const char *node_uuid);
++
+ #endif
+-- 
+2.31.1
+
+From 63d069adb344bba2c982013226f87dfd95afaff3 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Tue, 2 May 2023 13:38:03 -0400
+Subject: [PATCH 5/7] Refactor: controller: set_join_state needs to take a
+ remote parameter.
+
+Without this parameter, we won't know what to pass to as node_type to
+cib__update_node_attr.  And without that, that function will not know to
+update a remote node - it'll try to update a regular node by the same
+name, which either doesn't exist or is not what we were hoping would
+happen.
+
+Ref T138
+---
+ daemons/controld/controld_join_client.c | 11 +++++++----
+ daemons/controld/pacemaker-controld.h   |  2 +-
+ 2 files changed, 8 insertions(+), 5 deletions(-)
+
+diff --git a/daemons/controld/controld_join_client.c b/daemons/controld/controld_join_client.c
+index 07e2a27..799d1b4 100644
+--- a/daemons/controld/controld_join_client.c
++++ b/daemons/controld/controld_join_client.c
+@@ -196,7 +196,8 @@ join_query_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, void *
+ }
+ 
+ void
+-set_join_state(const char *start_state, const char *node_name, const char *node_uuid)
++set_join_state(const char *start_state, const char *node_name, const char *node_uuid,
++               bool remote)
+ {
+     if (pcmk__str_eq(start_state, "standby", pcmk__str_casei)) {
+         crm_notice("Forcing node %s to join in %s state per configured "
+@@ -204,7 +205,8 @@ set_join_state(const char *start_state, const char *node_name, const char *node_
+         cib__update_node_attr(controld_globals.logger_out,
+                               controld_globals.cib_conn, cib_sync_call,
+                               XML_CIB_TAG_NODES, node_uuid,
+-                              NULL, NULL, NULL, "standby", "on", NULL, NULL);
++                              NULL, NULL, NULL, "standby", "on", NULL,
++                              remote ? "remote" : NULL);
+ 
+     } else if (pcmk__str_eq(start_state, "online", pcmk__str_casei)) {
+         crm_notice("Forcing node %s to join in %s state per configured "
+@@ -212,7 +214,8 @@ set_join_state(const char *start_state, const char *node_name, const char *node_
+         cib__update_node_attr(controld_globals.logger_out,
+                               controld_globals.cib_conn, cib_sync_call,
+                               XML_CIB_TAG_NODES, node_uuid,
+-                              NULL, NULL, NULL, "standby", "off", NULL, NULL);
++                              NULL, NULL, NULL, "standby", "off", NULL,
++                              remote ? "remote" : NULL);
+ 
+     } else if (pcmk__str_eq(start_state, "default", pcmk__str_casei)) {
+         crm_debug("Not forcing a starting state on node %s", node_name);
+@@ -335,7 +338,7 @@ do_cl_join_finalize_respond(long long action,
+             first_join = FALSE;
+             if (start_state) {
+                 set_join_state(start_state, controld_globals.our_nodename,
+-                               controld_globals.our_uuid);
++                               controld_globals.our_uuid, false);
+             }
+         }
+ 
+diff --git a/daemons/controld/pacemaker-controld.h b/daemons/controld/pacemaker-controld.h
+index d8c2ddd..2334cce 100644
+--- a/daemons/controld/pacemaker-controld.h
++++ b/daemons/controld/pacemaker-controld.h
+@@ -37,6 +37,6 @@ void controld_election_fini(void);
+ void controld_stop_current_election_timeout(void);
+ 
+ void set_join_state(const char *start_state, const char *node_name,
+-                    const char *node_uuid);
++                    const char *node_uuid, bool remote);
+ 
+ #endif
+-- 
+2.31.1
+
+From 67274787898355065315f8c06d62458e2c2b0afe Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Tue, 2 May 2023 10:09:02 -0400
+Subject: [PATCH 6/7] Feature: controller: When a remote node starts, apply any
+ start state.
+
+If we were given a start state in the handshake XML, that is now stored
+in the remote node cache's private data.  Extract it and set the state
+on the node with set_node_state.
+
+Fixes T183
+---
+ daemons/controld/controld_remote_ra.c | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/daemons/controld/controld_remote_ra.c b/daemons/controld/controld_remote_ra.c
+index f24b755..8ab1e46 100644
+--- a/daemons/controld/controld_remote_ra.c
++++ b/daemons/controld/controld_remote_ra.c
+@@ -280,6 +280,7 @@ remote_node_up(const char *node_name)
+     int call_opt;
+     xmlNode *update, *state;
+     crm_node_t *node;
++    lrm_state_t *connection_rsc = NULL;
+ 
+     CRM_CHECK(node_name != NULL, return);
+     crm_info("Announcing Pacemaker Remote node %s", node_name);
+@@ -301,6 +302,20 @@ remote_node_up(const char *node_name)
+     purge_remote_node_attrs(call_opt, node);
+     pcmk__update_peer_state(__func__, node, CRM_NODE_MEMBER, 0);
+ 
++    /* Apply any start state that we were given from the environment on the
++     * remote node.
++     */
++    connection_rsc = lrm_state_find(node->uname);
++
++    if (connection_rsc != NULL) {
++        lrmd_t *lrm = connection_rsc->conn;
++        const char *start_state = lrmd__node_start_state(lrm);
++
++        if (start_state) {
++            set_join_state(start_state, node->uname, node->uuid, true);
++        }
++    }
++
+     /* pacemaker_remote nodes don't participate in the membership layer,
+      * so cluster nodes don't automatically get notified when they come and go.
+      * We send a cluster message to the DC, and update the CIB node state entry,
+-- 
+2.31.1
+
+From 91cdda7056c9b9254a0d7e7a016b30f788e3e3ff Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Tue, 2 May 2023 10:16:30 -0400
+Subject: [PATCH 7/7] Doc: sysconfig: Remote nodes now respect start state.
+
+Ref T183
+---
+ etc/sysconfig/pacemaker.in | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/etc/sysconfig/pacemaker.in b/etc/sysconfig/pacemaker.in
+index 3b03ad6..041da71 100644
+--- a/etc/sysconfig/pacemaker.in
++++ b/etc/sysconfig/pacemaker.in
+@@ -144,8 +144,7 @@
+ # By default, the local host will join the cluster in an online or standby
+ # state when Pacemaker first starts depending on whether it was previously put
+ # into standby mode. If this variable is set to "standby" or "online", it will
+-# force the local host to join in the specified state. This has no effect on
+-# Pacemaker Remote nodes.
++# force the local host to join in the specified state.
+ #
+ # Default: PCMK_node_start_state="default"
+ 
+-- 
+2.31.1
+

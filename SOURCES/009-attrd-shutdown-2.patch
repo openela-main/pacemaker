@@ -1,0 +1,210 @@
+From 83e547cc64f2586031a007ab58e91fc22cd1a68a Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Thu, 24 Aug 2023 12:18:23 -0500
+Subject: [PATCH] Refactor: attrd: use enum instead of bools for
+ attrd_write_attributes()
+
+---
+ daemons/attrd/attrd_cib.c       | 24 ++++++++++++++++++------
+ daemons/attrd/attrd_corosync.c  |  2 +-
+ daemons/attrd/attrd_elections.c |  2 +-
+ daemons/attrd/attrd_ipc.c       |  2 +-
+ daemons/attrd/attrd_utils.c     |  2 +-
+ daemons/attrd/pacemaker-attrd.h |  8 +++++++-
+ 6 files changed, 29 insertions(+), 11 deletions(-)
+
+diff --git a/daemons/attrd/attrd_cib.c b/daemons/attrd/attrd_cib.c
+index 928c0133745..9c787fe1024 100644
+--- a/daemons/attrd/attrd_cib.c
++++ b/daemons/attrd/attrd_cib.c
+@@ -343,16 +343,23 @@ attrd_write_attribute(attribute_t *a, bool ignore_delay)
+     free_xml(xml_top);
+ }
+ 
++/*!
++ * \internal
++ * \brief Write out attributes
++ *
++ * \param[in] options  Group of enum attrd_write_options
++ */
+ void
+-attrd_write_attributes(bool all, bool ignore_delay)
++attrd_write_attributes(uint32_t options)
+ {
+     GHashTableIter iter;
+     attribute_t *a = NULL;
+ 
+-    crm_debug("Writing out %s attributes", all? "all" : "changed");
++    crm_debug("Writing out %s attributes",
++              pcmk_is_set(options, attrd_write_all)? "all" : "changed");
+     g_hash_table_iter_init(&iter, attributes);
+     while (g_hash_table_iter_next(&iter, NULL, (gpointer *) & a)) {
+-        if (!all && a->unknown_peer_uuids) {
++        if (!pcmk_is_set(options, attrd_write_all) && a->unknown_peer_uuids) {
+             // Try writing this attribute again, in case peer ID was learned
+             a->changed = true;
+         } else if (a->force_write) {
+@@ -360,9 +367,14 @@ attrd_write_attributes(bool all, bool ignore_delay)
+             a->changed = true;
+         }
+ 
+-        if(all || a->changed) {
+-            /* When forced write flag is set, ignore delay. */
+-            attrd_write_attribute(a, (a->force_write ? true : ignore_delay));
++        if (pcmk_is_set(options, attrd_write_all) || a->changed) {
++            bool ignore_delay = pcmk_is_set(options, attrd_write_no_delay);
++
++            if (a->force_write) {
++                // Always ignore delay when forced write flag is set
++                ignore_delay = true;
++            }
++            attrd_write_attribute(a, ignore_delay);
+         } else {
+             crm_trace("Skipping unchanged attribute %s", a->id);
+         }
+diff --git a/daemons/attrd/attrd_corosync.c b/daemons/attrd/attrd_corosync.c
+index 1aec35a054e..49631df6e44 100644
+--- a/daemons/attrd/attrd_corosync.c
++++ b/daemons/attrd/attrd_corosync.c
+@@ -285,7 +285,7 @@ record_peer_nodeid(attribute_value_t *v, const char *host)
+ 
+     crm_trace("Learned %s has node id %s", known_peer->uname, known_peer->uuid);
+     if (attrd_election_won()) {
+-        attrd_write_attributes(false, false);
++        attrd_write_attributes(attrd_write_changed);
+     }
+ }
+ 
+diff --git a/daemons/attrd/attrd_elections.c b/daemons/attrd/attrd_elections.c
+index c25a41a4492..01341db18e4 100644
+--- a/daemons/attrd/attrd_elections.c
++++ b/daemons/attrd/attrd_elections.c
+@@ -34,7 +34,7 @@ attrd_election_cb(gpointer user_data)
+     attrd_peer_sync(NULL, NULL);
+ 
+     /* Update the CIB after an election */
+-    attrd_write_attributes(true, false);
++    attrd_write_attributes(attrd_write_all);
+     return G_SOURCE_REMOVE;
+ }
+ 
+diff --git a/daemons/attrd/attrd_ipc.c b/daemons/attrd/attrd_ipc.c
+index 4be789de7f9..05c4a696a19 100644
+--- a/daemons/attrd/attrd_ipc.c
++++ b/daemons/attrd/attrd_ipc.c
+@@ -232,7 +232,7 @@ attrd_client_refresh(pcmk__request_t *request)
+     crm_info("Updating all attributes");
+ 
+     attrd_send_ack(request->ipc_client, request->ipc_id, request->ipc_flags);
+-    attrd_write_attributes(true, true);
++    attrd_write_attributes(attrd_write_all|attrd_write_no_delay);
+ 
+     pcmk__set_result(&request->result, CRM_EX_OK, PCMK_EXEC_DONE, NULL);
+     return NULL;
+diff --git a/daemons/attrd/attrd_utils.c b/daemons/attrd/attrd_utils.c
+index c43eac1695a..bfd51368890 100644
+--- a/daemons/attrd/attrd_utils.c
++++ b/daemons/attrd/attrd_utils.c
+@@ -156,7 +156,7 @@ attrd_cib_replaced_cb(const char *event, xmlNode * msg)
+     if (attrd_election_won()) {
+         if (change_section & (cib_change_section_nodes | cib_change_section_status)) {
+             crm_notice("Updating all attributes after %s event", event);
+-            attrd_write_attributes(true, false);
++            attrd_write_attributes(attrd_write_all);
+         }
+     }
+ 
+diff --git a/daemons/attrd/pacemaker-attrd.h b/daemons/attrd/pacemaker-attrd.h
+index 41f31d97b3b..2d781d11394 100644
+--- a/daemons/attrd/pacemaker-attrd.h
++++ b/daemons/attrd/pacemaker-attrd.h
+@@ -176,8 +176,14 @@ void attrd_free_attribute(gpointer data);
+ void attrd_free_attribute_value(gpointer data);
+ attribute_t *attrd_populate_attribute(xmlNode *xml, const char *attr);
+ 
++enum attrd_write_options {
++    attrd_write_changed         = 0,
++    attrd_write_all             = (1 << 0),
++    attrd_write_no_delay        = (1 << 1),
++};
++
+ void attrd_write_attribute(attribute_t *a, bool ignore_delay);
+-void attrd_write_attributes(bool all, bool ignore_delay);
++void attrd_write_attributes(uint32_t options);
+ void attrd_write_or_elect_attribute(attribute_t *a);
+ 
+ extern int minimum_protocol_version;
+From 58400e272cfc51f02eec69cdd0ed0d27a30e78a3 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Thu, 24 Aug 2023 12:27:53 -0500
+Subject: [PATCH] Fix: attrd: avoid race condition at writer election
+
+f5263c94 was not a complete fix. The issue may also occur if a remaining node
+(not the original DC or writer) wins the attribute writer election after the
+original DC's controller has exited but before its attribute manger has exited.
+
+The long-term solution will be to have the attribute manager (instead of the
+controller) be in control of erasing transient attributes from the CIB when a
+node leaves. This short-term workaround simply has new attribute writers skip
+shutdown attributes when writing out all attributes.
+
+Fixes T138
+---
+ daemons/attrd/attrd_cib.c       |  5 +++++
+ daemons/attrd/attrd_elections.c | 14 ++++++++++++--
+ daemons/attrd/pacemaker-attrd.h |  1 +
+ 3 files changed, 18 insertions(+), 2 deletions(-)
+
+diff --git a/daemons/attrd/attrd_cib.c b/daemons/attrd/attrd_cib.c
+index 9c787fe102..2c910b4c64 100644
+--- a/daemons/attrd/attrd_cib.c
++++ b/daemons/attrd/attrd_cib.c
+@@ -359,6 +359,11 @@ attrd_write_attributes(uint32_t options)
+               pcmk_is_set(options, attrd_write_all)? "all" : "changed");
+     g_hash_table_iter_init(&iter, attributes);
+     while (g_hash_table_iter_next(&iter, NULL, (gpointer *) & a)) {
++        if (pcmk_is_set(options, attrd_write_skip_shutdown)
++            && pcmk__str_eq(a->id, XML_CIB_ATTR_SHUTDOWN, pcmk__str_none)) {
++            continue;
++        }
++
+         if (!pcmk_is_set(options, attrd_write_all) && a->unknown_peer_uuids) {
+             // Try writing this attribute again, in case peer ID was learned
+             a->changed = true;
+diff --git a/daemons/attrd/attrd_elections.c b/daemons/attrd/attrd_elections.c
+index 01341db18e..a95cd44cbd 100644
+--- a/daemons/attrd/attrd_elections.c
++++ b/daemons/attrd/attrd_elections.c
+@@ -33,8 +33,18 @@ attrd_election_cb(gpointer user_data)
+     /* Update the peers after an election */
+     attrd_peer_sync(NULL, NULL);
+ 
+-    /* Update the CIB after an election */
+-    attrd_write_attributes(attrd_write_all);
++    /* After winning an election, update the CIB with the values of all
++     * attributes as the winner knows them.
++     *
++     * However, do not write out any "shutdown" attributes. A node that is
++     * shutting down will have all its transient attributes removed from the CIB
++     * when its controller exits, and from the attribute manager's memory (on
++     * remaining nodes) when its attribute manager exits; if an election is won
++     * between when those two things happen, we don't want to write the shutdown
++     * attribute back out, which would cause the node to immediately shut down
++     * the next time it rejoins.
++     */
++    attrd_write_attributes(attrd_write_all|attrd_write_skip_shutdown);
+     return G_SOURCE_REMOVE;
+ }
+ 
+diff --git a/daemons/attrd/pacemaker-attrd.h b/daemons/attrd/pacemaker-attrd.h
+index 2d781d1139..2e35bd7ec5 100644
+--- a/daemons/attrd/pacemaker-attrd.h
++++ b/daemons/attrd/pacemaker-attrd.h
+@@ -180,6 +180,7 @@ enum attrd_write_options {
+     attrd_write_changed         = 0,
+     attrd_write_all             = (1 << 0),
+     attrd_write_no_delay        = (1 << 1),
++    attrd_write_skip_shutdown   = (1 << 2),
+ };
+ 
+ void attrd_write_attribute(attribute_t *a, bool ignore_delay);

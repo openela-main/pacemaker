@@ -1,0 +1,163 @@
+From 63f4bd4d5a324e6eb279340a42c7c36c8902ada7 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Wed, 2 Aug 2023 15:55:26 -0500
+Subject: [PATCH 1/4] Fix: controller: don't try to execute agent action at
+ shutdown
+
+Normally, agent execution is not possible at shutdown. However, when metadata
+is needed for some action, the agent can be called asynchronously, and when the
+metadata action returns, the original action is performed. If the metadata is
+initiated before shutdown, but completes after shutdown has begun, do not try
+to attempt the original action, so we avoid unnecessary error logs.
+---
+ daemons/controld/controld_execd.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/daemons/controld/controld_execd.c b/daemons/controld/controld_execd.c
+index 530e4346c8..a90e8d833e 100644
+--- a/daemons/controld/controld_execd.c
++++ b/daemons/controld/controld_execd.c
+@@ -1400,7 +1400,9 @@ metadata_complete(int pid, const pcmk__action_result_t *result, void *user_data)
+         md = controld_cache_metadata(lrm_state->metadata_cache, data->rsc,
+                                      result->action_stdout);
+     }
+-    do_lrm_rsc_op(lrm_state, data->rsc, data->input_xml, md);
++    if (!pcmk_is_set(controld_globals.fsa_input_register, R_HA_DISCONNECTED)) {
++        do_lrm_rsc_op(lrm_state, data->rsc, data->input_xml, md);
++    }
+     free_metadata_cb_data(data);
+ }
+ 
+
+From 247d9534f36f690c1474e36cedaadb3934022a05 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Wed, 2 Aug 2023 16:16:31 -0500
+Subject: [PATCH 2/4] Refactor: controller: de-functionize lrm_state_destroy()
+
+It was a one-liner called once
+---
+ daemons/controld/controld_execd_state.c | 8 +-------
+ daemons/controld/controld_lrm.h         | 5 -----
+ 2 files changed, 1 insertion(+), 12 deletions(-)
+
+diff --git a/daemons/controld/controld_execd_state.c b/daemons/controld/controld_execd_state.c
+index 8c68bfca08..4a87a9b332 100644
+--- a/daemons/controld/controld_execd_state.c
++++ b/daemons/controld/controld_execd_state.c
+@@ -132,12 +132,6 @@ lrm_state_create(const char *node_name)
+     return state;
+ }
+ 
+-void
+-lrm_state_destroy(const char *node_name)
+-{
+-    g_hash_table_remove(lrm_state_table, node_name);
+-}
+-
+ static gboolean
+ remote_proxy_remove_by_node(gpointer key, gpointer value, gpointer user_data)
+ {
+@@ -799,7 +793,7 @@ lrm_state_unregister_rsc(lrm_state_t * lrm_state,
+     }
+ 
+     if (is_remote_lrmd_ra(NULL, NULL, rsc_id)) {
+-        lrm_state_destroy(rsc_id);
++        g_hash_table_remove(lrm_state_table, rsc_id);
+         return pcmk_ok;
+     }
+ 
+diff --git a/daemons/controld/controld_lrm.h b/daemons/controld/controld_lrm.h
+index 25f3db3316..c3113e49c3 100644
+--- a/daemons/controld/controld_lrm.h
++++ b/daemons/controld/controld_lrm.h
+@@ -108,11 +108,6 @@ gboolean lrm_state_init_local(void);
+  */
+ void lrm_state_destroy_all(void);
+ 
+-/*!
+- * \brief Destroy executor connection by node name
+- */
+-void lrm_state_destroy(const char *node_name);
+-
+ /*!
+  * \brief Find lrm_state data by node name
+  */
+
+From 1b915f1ce38756431f7faa142565e3e07aade194 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Wed, 2 Aug 2023 15:58:09 -0500
+Subject: [PATCH 3/4] Low: controller: guard lrm_state_table usage with NULL
+ check
+
+It is NULL while draining the mainloop during the shutdown sequence.
+---
+ daemons/controld/controld_execd_state.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/daemons/controld/controld_execd_state.c b/daemons/controld/controld_execd_state.c
+index 4a87a9b332..b90cc5e635 100644
+--- a/daemons/controld/controld_execd_state.c
++++ b/daemons/controld/controld_execd_state.c
+@@ -301,7 +301,7 @@ lrm_state_destroy_all(void)
+ lrm_state_t *
+ lrm_state_find(const char *node_name)
+ {
+-    if (!node_name) {
++    if ((node_name == NULL) || (lrm_state_table == NULL)) {
+         return NULL;
+     }
+     return g_hash_table_lookup(lrm_state_table, node_name);
+@@ -312,6 +312,8 @@ lrm_state_find_or_create(const char *node_name)
+ {
+     lrm_state_t *lrm_state;
+ 
++    CRM_CHECK(lrm_state_table != NULL, return NULL);
++
+     lrm_state = g_hash_table_lookup(lrm_state_table, node_name);
+     if (!lrm_state) {
+         lrm_state = lrm_state_create(node_name);
+@@ -323,6 +325,9 @@ lrm_state_find_or_create(const char *node_name)
+ GList *
+ lrm_state_get_list(void)
+ {
++    if (lrm_state_table == NULL) {
++        return NULL;
++    }
+     return g_hash_table_get_values(lrm_state_table);
+ }
+ 
+
+From 78581213ed3bf4183b0ec1f391b720d5d91f3f68 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Wed, 2 Aug 2023 15:48:36 -0500
+Subject: [PATCH 4/4] Log: controller: improve messages for resource history
+ updates
+
+---
+ daemons/controld/controld_cib.c | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/daemons/controld/controld_cib.c b/daemons/controld/controld_cib.c
+index 22ac42486f..c9dde0b748 100644
+--- a/daemons/controld/controld_cib.c
++++ b/daemons/controld/controld_cib.c
+@@ -861,10 +861,17 @@ cib_rsc_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, void *use
+         case pcmk_ok:
+         case -pcmk_err_diff_failed:
+         case -pcmk_err_diff_resync:
+-            crm_trace("Resource update %d complete: rc=%d", call_id, rc);
++            crm_trace("Resource history update completed (call=%d rc=%d)",
++                      call_id, rc);
+             break;
+         default:
+-            crm_warn("Resource update %d failed: (rc=%d) %s", call_id, rc, pcmk_strerror(rc));
++            if (call_id > 0) {
++                crm_warn("Resource history update %d failed: %s "
++                         CRM_XS " rc=%d", call_id, pcmk_strerror(rc), rc);
++            } else {
++                crm_warn("Resource history update failed: %s " CRM_XS " rc=%d",
++                         pcmk_strerror(rc), rc);
++            }
+     }
+ 
+     if (call_id == pending_rsc_update) {
