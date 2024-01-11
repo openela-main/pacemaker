@@ -1,0 +1,107 @@
+From 45617b727e280cac384a28ae3d96145e066e6197 Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Fri, 3 Feb 2023 12:08:57 -0800
+Subject: [PATCH 01/02] Fix: fencer: Prevent double g_source_remove of op_timer_one
+
+QE observed a rarely reproducible core dump in the fencer during
+Pacemaker shutdown, in which we try to g_source_remove() an op timer
+that's already been removed.
+
+free_stonith_remote_op_list()
+-> g_hash_table_destroy()
+-> g_hash_table_remove_all_nodes()
+-> clear_remote_op_timers()
+-> g_source_remove()
+-> crm_glib_handler()
+-> "Source ID 190 was not found when attempting to remove it"
+
+The likely cause is that request_peer_fencing() doesn't set
+op->op_timer_one to 0 after calling g_source_remove() on it, so if that
+op is still in the stonith_remote_op_list at shutdown with the same
+timer, clear_remote_op_timers() tries to remove the source for
+op_timer_one again.
+
+There are only five locations that call g_source_remove() on a
+remote_fencing_op_t timer.
+* Three of them are in clear_remote_op_timers(), which first 0-checks
+  the timer and then sets it to 0 after g_source_remove().
+* One is in remote_op_query_timeout(), which does the same.
+* The last is the one we fix here in request_peer_fencing().
+
+I don't know all the conditions of QE's test scenario at this point.
+What I do know:
+* have-watchdog=true
+* stonith-watchdog-timeout=10
+* no explicit topology
+* fence agent script is missing for the configured fence device
+* requested fencing of one node
+* cluster shutdown
+
+Fixes RHBZ2166967
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ daemons/fenced/fenced_remote.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/daemons/fenced/fenced_remote.c b/daemons/fenced/fenced_remote.c
+index d61b5bd..b7426ff 100644
+--- a/daemons/fenced/fenced_remote.c
++++ b/daemons/fenced/fenced_remote.c
+@@ -1825,6 +1825,7 @@ request_peer_fencing(remote_fencing_op_t *op, peer_device_info_t *peer)
+         op->state = st_exec;
+         if (op->op_timer_one) {
+             g_source_remove(op->op_timer_one);
++            op->op_timer_one = 0;
+         }
+ 
+         if (!((stonith_watchdog_timeout_ms > 0)
+-- 
+2.31.1
+
+From 0291db4750322ec7f01ae6a4a2a30abca9d8e19e Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Wed, 15 Feb 2023 22:30:27 -0800
+Subject: [PATCH 02/02] Fix: fencer: Avoid double source remove of op_timer_total
+
+remote_op_timeout() returns G_SOURCE_REMOVE, which tells GLib to remove
+the source from the main loop after returning. Currently this function
+is used as the callback only when creating op->op_timer_total.
+
+If we don't set op->op_timer_total to 0 before returning from
+remote_op_timeout(), then we can get an assertion and core dump from
+GLib when the op's timers are being cleared (either during op
+finalization or during fencer shutdown). This is because
+clear_remote_op_timers() sees that op->op_timer_total != 0 and tries to
+remove the source, but the source has already been removed.
+
+Note that we're already (correctly) zeroing op->op_timer_one and
+op->query_timeout as appropriate in their respective callback functions.
+
+Fortunately, GLib doesn't care whether the source has already been
+removed before we return G_SOURCE_REMOVE from a callback. So it's safe
+to call finalize_op() (which removes all the op's timer sources) from
+within a callback.
+
+Fixes RHBZ#2166967
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ daemons/fenced/fenced_remote.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/daemons/fenced/fenced_remote.c b/daemons/fenced/fenced_remote.c
+index b7426ff88..adea3d7d8 100644
+--- a/daemons/fenced/fenced_remote.c
++++ b/daemons/fenced/fenced_remote.c
+@@ -718,6 +718,8 @@ remote_op_timeout(gpointer userdata)
+ {
+     remote_fencing_op_t *op = userdata;
+ 
++    op->op_timer_total = 0;
++
+     if (op->state == st_done) {
+         crm_debug("Action '%s' targeting %s for client %s already completed "
+                   CRM_XS " id=%.8s",
+-- 
+2.39.0

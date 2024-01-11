@@ -1,0 +1,2829 @@
+From e953591a9796edebd4796c344df0eddcbc7a2dff Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Mon, 30 Jan 2023 16:34:32 -0600
+Subject: [PATCH 01/14] Refactor: scheduler: drop unneeded arguments from
+ process_rsc_state()
+
+migrate_op has been unused since at least 2011
+---
+ lib/pengine/unpack.c | 36 +++++++++++++++---------------------
+ 1 file changed, 15 insertions(+), 21 deletions(-)
+
+diff --git a/lib/pengine/unpack.c b/lib/pengine/unpack.c
+index 5fcba3b..9524def 100644
+--- a/lib/pengine/unpack.c
++++ b/lib/pengine/unpack.c
+@@ -1963,8 +1963,7 @@ process_orphan_resource(xmlNode * rsc_entry, pe_node_t * node, pe_working_set_t
+ 
+ static void
+ process_rsc_state(pe_resource_t * rsc, pe_node_t * node,
+-                  enum action_fail_response on_fail,
+-                  xmlNode * migrate_op, pe_working_set_t * data_set)
++                  enum action_fail_response on_fail)
+ {
+     pe_node_t *tmpnode = NULL;
+     char *reason = NULL;
+@@ -2016,7 +2015,7 @@ process_rsc_state(pe_resource_t * rsc, pe_node_t * node,
+             pe__set_resource_flags(rsc, pe_rsc_failed|pe_rsc_stop);
+             should_fence = TRUE;
+ 
+-        } else if (pcmk_is_set(data_set->flags, pe_flag_stonith_enabled)) {
++        } else if (pcmk_is_set(rsc->cluster->flags, pe_flag_stonith_enabled)) {
+             if (pe__is_remote_node(node) && node->details->remote_rsc
+                 && !pcmk_is_set(node->details->remote_rsc->flags, pe_rsc_failed)) {
+ 
+@@ -2039,7 +2038,7 @@ process_rsc_state(pe_resource_t * rsc, pe_node_t * node,
+             if (reason == NULL) {
+                reason = crm_strdup_printf("%s is thought to be active there", rsc->id);
+             }
+-            pe_fence_node(data_set, node, reason, FALSE);
++            pe_fence_node(rsc->cluster, node, reason, FALSE);
+         }
+         free(reason);
+     }
+@@ -2069,7 +2068,7 @@ process_rsc_state(pe_resource_t * rsc, pe_node_t * node,
+              * but also mark the node as unclean
+              */
+             reason = crm_strdup_printf("%s failed there", rsc->id);
+-            pe_fence_node(data_set, node, reason, FALSE);
++            pe_fence_node(rsc->cluster, node, reason, FALSE);
+             free(reason);
+             break;
+ 
+@@ -2090,7 +2089,8 @@ process_rsc_state(pe_resource_t * rsc, pe_node_t * node,
+             /* make sure it comes up somewhere else
+              * or not at all
+              */
+-            resource_location(rsc, node, -INFINITY, "__action_migration_auto__", data_set);
++            resource_location(rsc, node, -INFINITY, "__action_migration_auto__",
++                              rsc->cluster);
+             break;
+ 
+         case action_fail_stop:
+@@ -2112,8 +2112,8 @@ process_rsc_state(pe_resource_t * rsc, pe_node_t * node,
+                  * container is running yet, so remember it and add a stop
+                  * action for it later.
+                  */
+-                data_set->stop_needed = g_list_prepend(data_set->stop_needed,
+-                                                       rsc->container);
++                rsc->cluster->stop_needed =
++                    g_list_prepend(rsc->cluster->stop_needed, rsc->container);
+             } else if (rsc->container) {
+                 stop_action(rsc->container, node, FALSE);
+             } else if (rsc->role != RSC_ROLE_STOPPED && rsc->role != RSC_ROLE_UNKNOWN) {
+@@ -2123,10 +2123,10 @@ process_rsc_state(pe_resource_t * rsc, pe_node_t * node,
+ 
+         case action_fail_reset_remote:
+             pe__set_resource_flags(rsc, pe_rsc_failed|pe_rsc_stop);
+-            if (pcmk_is_set(data_set->flags, pe_flag_stonith_enabled)) {
++            if (pcmk_is_set(rsc->cluster->flags, pe_flag_stonith_enabled)) {
+                 tmpnode = NULL;
+                 if (rsc->is_remote_node) {
+-                    tmpnode = pe_find_node(data_set->nodes, rsc->id);
++                    tmpnode = pe_find_node(rsc->cluster->nodes, rsc->id);
+                 }
+                 if (tmpnode &&
+                     pe__is_remote_node(tmpnode) &&
+@@ -2135,7 +2135,7 @@ process_rsc_state(pe_resource_t * rsc, pe_node_t * node,
+                     /* The remote connection resource failed in a way that
+                      * should result in fencing the remote node.
+                      */
+-                    pe_fence_node(data_set, tmpnode,
++                    pe_fence_node(rsc->cluster, tmpnode,
+                                   "remote connection is unrecoverable", FALSE);
+                 }
+             }
+@@ -2158,7 +2158,7 @@ process_rsc_state(pe_resource_t * rsc, pe_node_t * node,
+      * result in a fencing operation regardless if we're going to attempt to 
+      * reconnect to the remote-node in this transition or not. */
+     if (pcmk_is_set(rsc->flags, pe_rsc_failed) && rsc->is_remote_node) {
+-        tmpnode = pe_find_node(data_set->nodes, rsc->id);
++        tmpnode = pe_find_node(rsc->cluster->nodes, rsc->id);
+         if (tmpnode && tmpnode->details->unclean) {
+             tmpnode->details->unseen = FALSE;
+         }
+@@ -2177,7 +2177,8 @@ process_rsc_state(pe_resource_t * rsc, pe_node_t * node,
+             }
+         }
+ 
+-        native_add_running(rsc, node, data_set, (save_on_fail != action_fail_ignore));
++        native_add_running(rsc, node, rsc->cluster,
++                           (save_on_fail != action_fail_ignore));
+         switch (on_fail) {
+             case action_fail_ignore:
+                 break;
+@@ -2376,14 +2377,12 @@ unpack_lrm_resource(pe_node_t *node, xmlNode *lrm_resource,
+     int start_index = -1;
+     enum rsc_role_e req_role = RSC_ROLE_UNKNOWN;
+ 
+-    const char *task = NULL;
+     const char *rsc_id = ID(lrm_resource);
+ 
+     pe_resource_t *rsc = NULL;
+     GList *op_list = NULL;
+     GList *sorted_op_list = NULL;
+ 
+-    xmlNode *migrate_op = NULL;
+     xmlNode *rsc_op = NULL;
+     xmlNode *last_failure = NULL;
+ 
+@@ -2437,11 +2436,6 @@ unpack_lrm_resource(pe_node_t *node, xmlNode *lrm_resource,
+     for (gIter = sorted_op_list; gIter != NULL; gIter = gIter->next) {
+         xmlNode *rsc_op = (xmlNode *) gIter->data;
+ 
+-        task = crm_element_value(rsc_op, XML_LRM_ATTR_TASK);
+-        if (pcmk__str_eq(task, CRMD_ACTION_MIGRATED, pcmk__str_casei)) {
+-            migrate_op = rsc_op;
+-        }
+-
+         unpack_rsc_op(rsc, node, rsc_op, &last_failure, &on_fail, data_set);
+     }
+ 
+@@ -2452,7 +2446,7 @@ unpack_lrm_resource(pe_node_t *node, xmlNode *lrm_resource,
+     /* no need to free the contents */
+     g_list_free(sorted_op_list);
+ 
+-    process_rsc_state(rsc, node, on_fail, migrate_op, data_set);
++    process_rsc_state(rsc, node, on_fail);
+ 
+     if (get_target_role(rsc, &req_role)) {
+         if (rsc->next_role == RSC_ROLE_UNKNOWN || req_role < rsc->next_role) {
+-- 
+2.31.1
+
+From 6f4e34cccc4864961d2020a2dd547450ac53a44e Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Wed, 1 Feb 2023 16:30:20 -0600
+Subject: [PATCH 02/14] Log: scheduler: improve trace logs when unpacking
+ resource history
+
+---
+ lib/pengine/unpack.c | 112 +++++++++++++++++++++++++++----------------
+ 1 file changed, 71 insertions(+), 41 deletions(-)
+
+diff --git a/lib/pengine/unpack.c b/lib/pengine/unpack.c
+index 9524def..b7b2873 100644
+--- a/lib/pengine/unpack.c
++++ b/lib/pengine/unpack.c
+@@ -3363,6 +3363,24 @@ check_recoverable(pe_resource_t *rsc, pe_node_t *node, const char *task,
+     pe__set_resource_flags(rsc, pe_rsc_block);
+ }
+ 
++/*!
++ * \internal
++ * \brief Update an integer value and why
++ *
++ * \param[in,out] i       Pointer to integer to update
++ * \param[in,out] why     Where to store reason for update
++ * \param[in]     value   New value
++ * \param[in,out] reason  Description of why value was changed
++ */
++static inline void
++remap_because(int *i, const char **why, int value, const char *reason)
++{
++    if (*i != value) {
++        *i = value;
++        *why = reason;
++    }
++}
++
+ /*!
+  * \internal
+  * \brief Remap informational monitor results and operation status
+@@ -3393,29 +3411,34 @@ check_recoverable(pe_resource_t *rsc, pe_node_t *node, const char *task,
+ static void
+ remap_operation(xmlNode *xml_op, pe_resource_t *rsc, pe_node_t *node,
+                 pe_working_set_t *data_set, enum action_fail_response *on_fail,
+-                int target_rc, int *rc, int *status) {
++                int target_rc, int *rc, int *status)
++{
+     bool is_probe = false;
++    int orig_exit_status = *rc;
++    int orig_exec_status = *status;
++    const char *why = NULL;
+     const char *task = crm_element_value(xml_op, XML_LRM_ATTR_TASK);
+     const char *key = get_op_key(xml_op);
+     const char *exit_reason = crm_element_value(xml_op,
+                                                 XML_LRM_ATTR_EXIT_REASON);
+ 
+     if (pcmk__str_eq(task, CRMD_ACTION_STATUS, pcmk__str_none)) {
+-        int remapped_rc = pcmk__effective_rc(*rc);
+-
+-        if (*rc != remapped_rc) {
+-            crm_trace("Remapping monitor result %d to %d", *rc, remapped_rc);
++        // Remap degraded results to their usual counterparts
++        *rc = pcmk__effective_rc(*rc);
++        if (*rc != orig_exit_status) {
++            why = "degraded monitor result";
+             if (!node->details->shutdown || node->details->online) {
+                 record_failed_op(xml_op, node, rsc, data_set);
+             }
+-
+-            *rc = remapped_rc;
+         }
+     }
+ 
+     if (!pe_rsc_is_bundled(rsc) && pcmk_xe_mask_probe_failure(xml_op)) {
+-        *status = PCMK_EXEC_DONE;
+-        *rc = PCMK_OCF_NOT_RUNNING;
++        if ((*status != PCMK_EXEC_DONE) || (*rc != PCMK_OCF_NOT_RUNNING)) {
++            *status = PCMK_EXEC_DONE;
++            *rc = PCMK_OCF_NOT_RUNNING;
++            why = "irrelevant probe result";
++        }
+     }
+ 
+     /* If the executor reported an operation status of anything but done or
+@@ -3423,22 +3446,19 @@ remap_operation(xmlNode *xml_op, pe_resource_t *rsc, pe_node_t *node,
+      * it should be treated as a failure or not, because we know the expected
+      * result.
+      */
+-    if (*status != PCMK_EXEC_DONE && *status != PCMK_EXEC_ERROR) {
+-        return;
++    switch (*status) {
++        case PCMK_EXEC_DONE:
++        case PCMK_EXEC_ERROR:
++            break;
++        default:
++            goto remap_done;
+     }
+ 
+-    CRM_ASSERT(rsc);
+-    CRM_CHECK(task != NULL,
+-              *status = PCMK_EXEC_ERROR; return);
+-
+-    *status = PCMK_EXEC_DONE;
+-
+     if (exit_reason == NULL) {
+         exit_reason = "";
+     }
+ 
+     is_probe = pcmk_xe_is_probe(xml_op);
+-
+     if (is_probe) {
+         task = "probe";
+     }
+@@ -3452,12 +3472,15 @@ remap_operation(xmlNode *xml_op, pe_resource_t *rsc, pe_node_t *node,
+          * those versions or processing of saved CIB files from those versions,
+          * so we do not need to care much about this case.
+          */
+-        *status = PCMK_EXEC_ERROR;
++        remap_because(status, &why, PCMK_EXEC_ERROR, "obsolete history format");
+         crm_warn("Expected result not found for %s on %s (corrupt or obsolete CIB?)",
+                  key, pe__node_name(node));
+ 
+-    } else if (target_rc != *rc) {
+-        *status = PCMK_EXEC_ERROR;
++    } else if (*rc == target_rc) {
++        remap_because(status, &why, PCMK_EXEC_DONE, "expected result");
++
++    } else {
++        remap_because(status, &why, PCMK_EXEC_ERROR, "unexpected result");
+         pe_rsc_debug(rsc, "%s on %s: expected %d (%s), got %d (%s%s%s)",
+                      key, pe__node_name(node),
+                      target_rc, services_ocf_exitcode_str(target_rc),
+@@ -3468,7 +3491,7 @@ remap_operation(xmlNode *xml_op, pe_resource_t *rsc, pe_node_t *node,
+     switch (*rc) {
+         case PCMK_OCF_OK:
+             if (is_probe && (target_rc == PCMK_OCF_NOT_RUNNING)) {
+-                *status = PCMK_EXEC_DONE;
++                remap_because(status, &why,PCMK_EXEC_DONE, "probe");
+                 pe_rsc_info(rsc, "Probe found %s active on %s at %s",
+                             rsc->id, pe__node_name(node),
+                             last_change_str(xml_op));
+@@ -3479,7 +3502,7 @@ remap_operation(xmlNode *xml_op, pe_resource_t *rsc, pe_node_t *node,
+             if (is_probe || (target_rc == *rc)
+                 || !pcmk_is_set(rsc->flags, pe_rsc_managed)) {
+ 
+-                *status = PCMK_EXEC_DONE;
++                remap_because(status, &why, PCMK_EXEC_DONE, "exit status");
+                 rsc->role = RSC_ROLE_STOPPED;
+ 
+                 /* clear any previous failure actions */
+@@ -3490,7 +3513,7 @@ remap_operation(xmlNode *xml_op, pe_resource_t *rsc, pe_node_t *node,
+ 
+         case PCMK_OCF_RUNNING_PROMOTED:
+             if (is_probe && (*rc != target_rc)) {
+-                *status = PCMK_EXEC_DONE;
++                remap_because(status, &why, PCMK_EXEC_DONE, "probe");
+                 pe_rsc_info(rsc,
+                             "Probe found %s active and promoted on %s at %s",
+                             rsc->id, pe__node_name(node),
+@@ -3502,11 +3525,11 @@ remap_operation(xmlNode *xml_op, pe_resource_t *rsc, pe_node_t *node,
+         case PCMK_OCF_DEGRADED_PROMOTED:
+         case PCMK_OCF_FAILED_PROMOTED:
+             rsc->role = RSC_ROLE_PROMOTED;
+-            *status = PCMK_EXEC_ERROR;
++            remap_because(status, &why, PCMK_EXEC_ERROR, "exit status");
+             break;
+ 
+         case PCMK_OCF_NOT_CONFIGURED:
+-            *status = PCMK_EXEC_ERROR_FATAL;
++            remap_because(status, &why, PCMK_EXEC_ERROR_FATAL, "exit status");
+             break;
+ 
+         case PCMK_OCF_UNIMPLEMENT_FEATURE:
+@@ -3517,9 +3540,11 @@ remap_operation(xmlNode *xml_op, pe_resource_t *rsc, pe_node_t *node,
+ 
+                 if (interval_ms == 0) {
+                     check_recoverable(rsc, node, task, *rc, xml_op);
+-                    *status = PCMK_EXEC_ERROR_HARD;
++                    remap_because(status, &why, PCMK_EXEC_ERROR_HARD,
++                                  "exit status");
+                 } else {
+-                    *status = PCMK_EXEC_NOT_SUPPORTED;
++                    remap_because(status, &why, PCMK_EXEC_NOT_SUPPORTED,
++                                  "exit status");
+                 }
+             }
+             break;
+@@ -3528,7 +3553,7 @@ remap_operation(xmlNode *xml_op, pe_resource_t *rsc, pe_node_t *node,
+         case PCMK_OCF_INVALID_PARAM:
+         case PCMK_OCF_INSUFFICIENT_PRIV:
+             check_recoverable(rsc, node, task, *rc, xml_op);
+-            *status = PCMK_EXEC_ERROR_HARD;
++            remap_because(status, &why, PCMK_EXEC_ERROR_HARD, "exit status");
+             break;
+ 
+         default:
+@@ -3537,13 +3562,21 @@ remap_operation(xmlNode *xml_op, pe_resource_t *rsc, pe_node_t *node,
+                          "on %s at %s as failure",
+                          *rc, task, rsc->id, pe__node_name(node),
+                          last_change_str(xml_op));
+-                *status = PCMK_EXEC_ERROR;
++                remap_because(status, &why, PCMK_EXEC_ERROR,
++                              "unknown exit status");
+             }
+             break;
+     }
+ 
+-    pe_rsc_trace(rsc, "Remapped %s status to '%s'",
+-                 key, pcmk_exec_status_str(*status));
++remap_done:
++    if (why != NULL) {
++        pe_rsc_trace(rsc,
++                     "Remapped %s result from [%s: %s] to [%s: %s] "
++                     "because of %s",
++                     key, pcmk_exec_status_str(orig_exec_status),
++                     crm_exit_str(orig_exit_status),
++                     pcmk_exec_status_str(*status), crm_exit_str(*rc), why);
++    }
+ }
+ 
+ // return TRUE if start or monitor last failure but parameters changed
+@@ -3947,9 +3980,9 @@ unpack_rsc_op(pe_resource_t *rsc, pe_node_t *node, xmlNode *xml_op,
+         parent = uber_parent(rsc);
+     }
+ 
+-    pe_rsc_trace(rsc, "Unpacking task %s/%s (call_id=%d, status=%d, rc=%d) on %s (role=%s)",
+-                 task_key, task, task_id, status, rc, pe__node_name(node),
+-                 role2text(rsc->role));
++    pe_rsc_trace(rsc, "Unpacking %s (%s call %d on %s): %s (%s)",
++                 ID(xml_op), task, task_id, pe__node_name(node),
++                 pcmk_exec_status_str(status), crm_exit_str(rc));
+ 
+     if (node->details->unclean) {
+         pe_rsc_trace(rsc,
+@@ -4077,9 +4110,6 @@ unpack_rsc_op(pe_resource_t *rsc, pe_node_t *node, xmlNode *xml_op,
+             goto done;
+ 
+         case PCMK_EXEC_DONE:
+-            pe_rsc_trace(rsc, "%s of %s on %s completed at %s " CRM_XS " id=%s",
+-                         task, rsc->id, pe__node_name(node),
+-                         last_change_str(xml_op), ID(xml_op));
+             update_resource_state(rsc, node, xml_op, task, rc, *last_failure, on_fail, data_set);
+             goto done;
+ 
+@@ -4175,9 +4205,9 @@ unpack_rsc_op(pe_resource_t *rsc, pe_node_t *node, xmlNode *xml_op,
+     }
+ 
+ done:
+-    pe_rsc_trace(rsc, "Resource %s after %s: role=%s, next=%s",
+-                 rsc->id, task, role2text(rsc->role),
+-                 role2text(rsc->next_role));
++    pe_rsc_trace(rsc, "%s role on %s after %s is %s (next %s)",
++                 rsc->id, pe__node_name(node), ID(xml_op),
++                 role2text(rsc->role), role2text(rsc->next_role));
+ }
+ 
+ static void
+-- 
+2.31.1
+
+From 5a1d2a3ba58fa73225433dab40cee0a6e0ef9bda Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Wed, 1 Feb 2023 12:08:55 -0600
+Subject: [PATCH 03/14] Low: scheduler: improve migration history validation
+
+Instead of a simple CRM_CHECK(), functionize parsing the source and target node
+names from a migration action's resource history entry. This reduces
+duplication and allows us to log more helpful errors.
+
+Also, CRM_CHECK() tries to dump core for debugging, and that's not helpful for
+corrupted CIB entries.
+---
+ lib/pengine/unpack.c | 87 ++++++++++++++++++++++++++++++++++++++------
+ 1 file changed, 75 insertions(+), 12 deletions(-)
+
+diff --git a/lib/pengine/unpack.c b/lib/pengine/unpack.c
+index b7b2873..cd1b038 100644
+--- a/lib/pengine/unpack.c
++++ b/lib/pengine/unpack.c
+@@ -2786,6 +2786,60 @@ newer_state_after_migrate(const char *rsc_id, const char *node_name,
+            || monitor_not_running_after(rsc_id, node_name, xml_op, same_node,
+                                         data_set);
+ }
++ 
++/*!
++ * \internal
++ * \brief Parse migration source and target node names from history entry
++ *
++ * \param[in] entry         Resource history entry for a migration action
++ * \param[in] source_node   If not NULL, source must match this node
++ * \param[in] target_node   If not NULL, target must match this node
++ * \param[out] source_name  Where to store migration source node name
++ * \param[out] target_name  Where to store migration target node name
++ *
++ * \return Standard Pacemaker return code
++ */
++static int
++get_migration_node_names(const xmlNode *entry, const pe_node_t *source_node,
++                         const pe_node_t *target_node,
++                         const char **source_name, const char **target_name)
++{
++    const char *id = ID(entry);
++
++    if (id == NULL) {
++        crm_err("Ignoring resource history entry without ID");
++        return pcmk_rc_unpack_error;
++    }
++
++    *source_name = crm_element_value(entry, XML_LRM_ATTR_MIGRATE_SOURCE);
++    *target_name = crm_element_value(entry, XML_LRM_ATTR_MIGRATE_TARGET);
++    if ((*source_name == NULL) || (*target_name == NULL)) {
++        crm_err("Ignoring resource history entry %s without "
++                XML_LRM_ATTR_MIGRATE_SOURCE " and " XML_LRM_ATTR_MIGRATE_TARGET,
++                id);
++        return pcmk_rc_unpack_error;
++    }
++
++    if ((source_node != NULL)
++        && !pcmk__str_eq(*source_name, source_node->details->uname,
++                         pcmk__str_casei|pcmk__str_null_matches)) {
++        crm_err("Ignoring resource history entry %s because "
++                XML_LRM_ATTR_MIGRATE_SOURCE "='%s' does not match %s",
++                id, pcmk__s(*source_name, ""), pe__node_name(source_node));
++        return pcmk_rc_unpack_error;
++    }
++
++    if ((target_node != NULL)
++        && !pcmk__str_eq(*target_name, target_node->details->uname,
++                         pcmk__str_casei|pcmk__str_null_matches)) {
++        crm_err("Ignoring resource history entry %s because "
++                XML_LRM_ATTR_MIGRATE_TARGET "='%s' does not match %s",
++                id, pcmk__s(*target_name, ""), pe__node_name(target_node));
++        return pcmk_rc_unpack_error;
++    }
++
++    return pcmk_rc_ok;
++}
+ 
+ static void
+ unpack_migrate_to_success(pe_resource_t *rsc, pe_node_t *node, xmlNode *xml_op,
+@@ -2834,13 +2888,16 @@ unpack_migrate_to_success(pe_resource_t *rsc, pe_node_t *node, xmlNode *xml_op,
+     pe_node_t *target_node = NULL;
+     pe_node_t *source_node = NULL;
+     xmlNode *migrate_from = NULL;
+-    const char *source = crm_element_value(xml_op, XML_LRM_ATTR_MIGRATE_SOURCE);
+-    const char *target = crm_element_value(xml_op, XML_LRM_ATTR_MIGRATE_TARGET);
++    const char *source = NULL;
++    const char *target = NULL;
+     bool source_newer_op = false;
+     bool target_newer_state = false;
+ 
+-    // Sanity check
+-    CRM_CHECK(source && target && !strcmp(source, node->details->uname), return);
++    // Get source and target node names from XML
++    if (get_migration_node_names(xml_op, node, NULL, &source,
++                                 &target) != pcmk_rc_ok) {
++        return;
++    }
+ 
+     /* If there's any newer non-monitor operation on the source, this migrate_to
+      * potentially no longer matters for the source.
+@@ -2949,11 +3006,14 @@ unpack_migrate_to_failure(pe_resource_t *rsc, pe_node_t *node, xmlNode *xml_op,
+                           pe_working_set_t *data_set)
+ {
+     xmlNode *target_migrate_from = NULL;
+-    const char *source = crm_element_value(xml_op, XML_LRM_ATTR_MIGRATE_SOURCE);
+-    const char *target = crm_element_value(xml_op, XML_LRM_ATTR_MIGRATE_TARGET);
++    const char *source = NULL;
++    const char *target = NULL;
+ 
+-    // Sanity check
+-    CRM_CHECK(source && target && !strcmp(source, node->details->uname), return);
++    // Get source and target node names from XML
++    if (get_migration_node_names(xml_op, node, NULL, &source,
++                                 &target) != pcmk_rc_ok) {
++        return;
++    }
+ 
+     /* If a migration failed, we have to assume the resource is active. Clones
+      * are not allowed to migrate, so role can't be promoted.
+@@ -3001,11 +3061,14 @@ unpack_migrate_from_failure(pe_resource_t *rsc, pe_node_t *node,
+                             xmlNode *xml_op, pe_working_set_t *data_set)
+ {
+     xmlNode *source_migrate_to = NULL;
+-    const char *source = crm_element_value(xml_op, XML_LRM_ATTR_MIGRATE_SOURCE);
+-    const char *target = crm_element_value(xml_op, XML_LRM_ATTR_MIGRATE_TARGET);
++    const char *source = NULL;
++    const char *target = NULL;
+ 
+-    // Sanity check
+-    CRM_CHECK(source && target && !strcmp(target, node->details->uname), return);
++    // Get source and target node names from XML
++    if (get_migration_node_names(xml_op, NULL, node, &source,
++                                 &target) != pcmk_rc_ok) {
++        return;
++    }
+ 
+     /* If a migration failed, we have to assume the resource is active. Clones
+      * are not allowed to migrate, so role can't be promoted.
+-- 
+2.31.1
+
+From 5139e5369769e733b05bc28940d3dccb4f7fca95 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Tue, 31 Jan 2023 14:30:16 -0600
+Subject: [PATCH 04/14] Refactor: scheduler: functionize adding a dangling
+ migration
+
+... for code isolation and readability
+---
+ lib/pengine/unpack.c | 31 +++++++++++++++++++++++--------
+ 1 file changed, 23 insertions(+), 8 deletions(-)
+
+diff --git a/lib/pengine/unpack.c b/lib/pengine/unpack.c
+index cd1b038..fa7c2cc 100644
+--- a/lib/pengine/unpack.c
++++ b/lib/pengine/unpack.c
+@@ -2841,6 +2841,28 @@ get_migration_node_names(const xmlNode *entry, const pe_node_t *source_node,
+     return pcmk_rc_ok;
+ }
+ 
++/*
++ * \internal
++ * \brief Add a migration source to a resource's list of dangling migrations
++ *
++ * If the migrate_to and migrate_from actions in a live migration both
++ * succeeded, but there is no stop on the source, the migration is considered
++ * "dangling." Add the source to the resource's dangling migration list, which
++ * will be used to schedule a stop on the source without affecting the target.
++ *
++ * \param[in,out] rsc   Resource involved in migration
++ * \param[in]     node  Migration source
++ */
++static void
++add_dangling_migration(pe_resource_t *rsc, const pe_node_t *node)
++{
++    pe_rsc_trace(rsc, "Dangling migration of %s requires stop on %s",
++                 rsc->id, pe__node_name(node));
++    rsc->role = RSC_ROLE_STOPPED;
++    rsc->dangling_migrations = g_list_prepend(rsc->dangling_migrations,
++                                              (gpointer) node);
++}
++
+ static void
+ unpack_migrate_to_success(pe_resource_t *rsc, pe_node_t *node, xmlNode *xml_op,
+                           pe_working_set_t *data_set)
+@@ -2941,14 +2963,7 @@ unpack_migrate_to_success(pe_resource_t *rsc, pe_node_t *node, xmlNode *xml_op,
+ 
+     if (migrate_from && from_rc == PCMK_OCF_OK
+         && (from_status == PCMK_EXEC_DONE)) {
+-        /* The migrate_to and migrate_from both succeeded, so mark the migration
+-         * as "dangling". This will be used to schedule a stop action on the
+-         * source without affecting the target.
+-         */
+-        pe_rsc_trace(rsc, "Detected dangling migration op: %s on %s", ID(xml_op),
+-                     source);
+-        rsc->role = RSC_ROLE_STOPPED;
+-        rsc->dangling_migrations = g_list_prepend(rsc->dangling_migrations, node);
++        add_dangling_migration(rsc, node);
+ 
+     } else if (migrate_from && (from_status != PCMK_EXEC_PENDING)) { // Failed
+         /* If the resource has newer state on the target, this migrate_to no
+-- 
+2.31.1
+
+From da71c04463d31338dd5da54d1d48b53e413716dc Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Tue, 31 Jan 2023 16:57:55 -0600
+Subject: [PATCH 05/14] Refactor: scheduler: check for dangling migration
+ before setting role
+
+Previously, unpack_migrate_to_success() set rsc->role = RSC_ROLE_STARTED
+then checked for dangling migration, which would reset it to RSC_ROLE_STOPPED.
+
+For clarity, do the dangling migration check first.
+---
+ lib/pengine/unpack.c | 47 ++++++++++++++++++++++++--------------------
+ 1 file changed, 26 insertions(+), 21 deletions(-)
+
+diff --git a/lib/pengine/unpack.c b/lib/pengine/unpack.c
+index fa7c2cc..b858b59 100644
+--- a/lib/pengine/unpack.c
++++ b/lib/pengine/unpack.c
+@@ -2905,8 +2905,8 @@ unpack_migrate_to_success(pe_resource_t *rsc, pe_node_t *node, xmlNode *xml_op,
+      * migration is considered to be "dangling". Schedule a stop on the source
+      * in this case.
+      */
+-    int from_rc = 0;
+-    int from_status = 0;
++    int from_rc = PCMK_OCF_OK;
++    int from_status = PCMK_EXEC_PENDING;
+     pe_node_t *target_node = NULL;
+     pe_node_t *source_node = NULL;
+     xmlNode *migrate_from = NULL;
+@@ -2930,12 +2930,17 @@ unpack_migrate_to_success(pe_resource_t *rsc, pe_node_t *node, xmlNode *xml_op,
+     // Check whether there was a migrate_from action on the target
+     migrate_from = find_lrm_op(rsc->id, CRMD_ACTION_MIGRATED, target,
+                                source, -1, data_set);
+-
+-    /* Even if there's a newer non-monitor operation on the source, we still
+-     * need to check how this migrate_to might matter for the target.
+-     */
+-    if (source_newer_op && migrate_from) {
+-        return;
++    if (migrate_from != NULL) {
++        if (source_newer_op) {
++            /* There's a newer non-monitor operation on the source and a
++             * migrate_from on the target, so this migrate_to is irrelevant to
++             * the resource's state.
++             */
++            return;
++        }
++        crm_element_value_int(migrate_from, XML_LRM_ATTR_RC, &from_rc);
++        crm_element_value_int(migrate_from, XML_LRM_ATTR_OPSTATUS,
++                              &from_status);
+     }
+ 
+     /* If the resource has newer state on the target after the migration
+@@ -2948,24 +2953,24 @@ unpack_migrate_to_success(pe_resource_t *rsc, pe_node_t *node, xmlNode *xml_op,
+         return;
+     }
+ 
+-    // Clones are not allowed to migrate, so role can't be promoted
++    /* Check for dangling migration (migrate_from succeeded but stop not done).
++     * We know there's no stop because we already returned if the target has a
++     * migrate_from and the source has any newer non-monitor operation.
++     */
++    if ((from_rc == PCMK_OCF_OK) && (from_status == PCMK_EXEC_DONE)) {
++        add_dangling_migration(rsc, node);
++        return;
++    }
++
++    /* Without newer state, this migrate_to implies the resource is active.
++     * (Clones are not allowed to migrate, so role can't be promoted.)
++     */
+     rsc->role = RSC_ROLE_STARTED;
+ 
+     target_node = pe_find_node(data_set->nodes, target);
+     source_node = pe_find_node(data_set->nodes, source);
+ 
+-    if (migrate_from) {
+-        crm_element_value_int(migrate_from, XML_LRM_ATTR_RC, &from_rc);
+-        crm_element_value_int(migrate_from, XML_LRM_ATTR_OPSTATUS, &from_status);
+-        pe_rsc_trace(rsc, "%s op on %s exited with status=%d, rc=%d",
+-                     ID(migrate_from), target, from_status, from_rc);
+-    }
+-
+-    if (migrate_from && from_rc == PCMK_OCF_OK
+-        && (from_status == PCMK_EXEC_DONE)) {
+-        add_dangling_migration(rsc, node);
+-
+-    } else if (migrate_from && (from_status != PCMK_EXEC_PENDING)) { // Failed
++    if (from_status != PCMK_EXEC_PENDING) { // migrate_from failed on target
+         /* If the resource has newer state on the target, this migrate_to no
+          * longer matters for the target.
+          */
+-- 
+2.31.1
+
+From d98a2687d68747b0598554939dea05c420456a12 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Tue, 31 Jan 2023 17:05:50 -0600
+Subject: [PATCH 06/14] Refactor: scheduler: avoid duplication of
+ active-on-target check
+
+---
+ lib/pengine/unpack.c | 24 ++++++------------------
+ 1 file changed, 6 insertions(+), 18 deletions(-)
+
+diff --git a/lib/pengine/unpack.c b/lib/pengine/unpack.c
+index b858b59..8cfc0ef 100644
+--- a/lib/pengine/unpack.c
++++ b/lib/pengine/unpack.c
+@@ -2914,6 +2914,7 @@ unpack_migrate_to_success(pe_resource_t *rsc, pe_node_t *node, xmlNode *xml_op,
+     const char *target = NULL;
+     bool source_newer_op = false;
+     bool target_newer_state = false;
++    bool active_on_target = false;
+ 
+     // Get source and target node names from XML
+     if (get_migration_node_names(xml_op, node, NULL, &source,
+@@ -2969,23 +2970,14 @@ unpack_migrate_to_success(pe_resource_t *rsc, pe_node_t *node, xmlNode *xml_op,
+ 
+     target_node = pe_find_node(data_set->nodes, target);
+     source_node = pe_find_node(data_set->nodes, source);
++    active_on_target = !target_newer_state && (target_node != NULL)
++                       && target_node->details->online;
+ 
+     if (from_status != PCMK_EXEC_PENDING) { // migrate_from failed on target
+-        /* If the resource has newer state on the target, this migrate_to no
+-         * longer matters for the target.
+-         */
+-        if (!target_newer_state
+-            && target_node && target_node->details->online) {
+-            pe_rsc_trace(rsc, "Marking active on %s %p %d", target, target_node,
+-                         target_node->details->online);
++        if (active_on_target) {
+             native_add_running(rsc, target_node, data_set, TRUE);
+-
+         } else {
+-            /* With the earlier bail logic, migrate_from != NULL here implies
+-             * source_newer_op is false, meaning this migrate_to still matters
+-             * for the source.
+-             * Consider it failed here - forces a restart, prevents migration
+-             */
++            // Mark resource as failed, require recovery, and prevent migration
+             pe__set_resource_flags(rsc, pe_rsc_failed|pe_rsc_stop);
+             pe__clear_resource_flags(rsc, pe_rsc_allow_migrate);
+         }
+@@ -2994,11 +2986,7 @@ unpack_migrate_to_success(pe_resource_t *rsc, pe_node_t *node, xmlNode *xml_op,
+         /* If the resource has newer state on the target, this migrate_to no
+          * longer matters for the target.
+          */
+-        if (!target_newer_state
+-            && target_node && target_node->details->online) {
+-            pe_rsc_trace(rsc, "Marking active on %s %p %d", target, target_node,
+-                         target_node->details->online);
+-
++        if (active_on_target) {
+             native_add_running(rsc, target_node, data_set, FALSE);
+             if (source_node && source_node->details->online) {
+                 /* This is a partial migration: the migrate_to completed
+-- 
+2.31.1
+
+From ae145309e3fdb26608e99f6d1fe1a7859d98efd0 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Tue, 31 Jan 2023 17:07:58 -0600
+Subject: [PATCH 07/14] Refactor: scheduler: improve unpacking of successful
+ migrate_to
+
+Improve log messages, comments, and formatting, and avoid doing things until
+needed, to improve efficiency of early returns.
+---
+ lib/pengine/unpack.c | 109 +++++++++++++++++++------------------------
+ 1 file changed, 48 insertions(+), 61 deletions(-)
+
+diff --git a/lib/pengine/unpack.c b/lib/pengine/unpack.c
+index 8cfc0ef..224b7b5 100644
+--- a/lib/pengine/unpack.c
++++ b/lib/pengine/unpack.c
+@@ -2867,48 +2867,40 @@ static void
+ unpack_migrate_to_success(pe_resource_t *rsc, pe_node_t *node, xmlNode *xml_op,
+                           pe_working_set_t *data_set)
+ {
+-    /* A successful migration sequence is:
+-     *    migrate_to on source node
+-     *    migrate_from on target node
+-     *    stop on source node
++    /* A complete migration sequence is:
++     * 1. migrate_to on source node (which succeeded if we get to this function)
++     * 2. migrate_from on target node
++     * 3. stop on source node
+      *
+-     * But there could be scenarios like (It's easier to produce with cluster
+-     * property batch-limit=1):
+-     *
+-     * - rscA is live-migrating from node1 to node2.
+-     *
+-     * - Before migrate_to on node1 returns, put node2 into standby.
+-     *
+-     * - Transition aborts upon return of successful migrate_to on node1. New
+-     *   transition is going to stop the rscA on both nodes and start it on
+-     *   node1.
++     * If no migrate_from has happened, the migration is considered to be
++     * "partial". If the migrate_from succeeded but no stop has happened, the
++     * migration is considered to be "dangling".
+      *
+-     * - While it is stopping on node1, run something that is going to make
+-     *   the transition abort again like:
+-     *   crm_resource  --resource rscA --ban --node node2
++     * If a successful migrate_to and stop have happened on the source node, we
++     * still need to check for a partial migration, due to scenarios (easier to
++     * produce with batch-limit=1) like:
+      *
+-     * - Transition aborts upon return of stop on node1.
++     * - A resource is migrating from node1 to node2, and a migrate_to is
++     *   initiated for it on node1.
+      *
+-     * Now although there's a stop on node1, it's still a partial migration and
+-     * rscA is still potentially active on node2.
++     * - node2 goes into standby mode while the migrate_to is pending, which
++     *   aborts the transition.
+      *
+-     * So even if a migrate_to is followed by a stop, we still need to check
+-     * whether there's a corresponding migrate_from or any newer operation on
+-     * the target.
++     * - Upon completion of the migrate_to, a new transition schedules a stop
++     *   on both nodes and a start on node1.
+      *
+-     * If no migrate_from has happened, the migration is considered to be
+-     * "partial". If the migrate_from failed, make sure the resource gets
+-     * stopped on both source and target (if up).
++     * - If the new transition is aborted for any reason while the resource is
++     *   stopping on node1, the transition after that stop completes will see
++     *   the migrate_from and stop on the source, but it's still a partial
++     *   migration, and the resource must be stopped on node2 because it is
++     *   potentially active there due to the migrate_to.
+      *
+-     * If the migrate_to and migrate_from both succeeded (which also implies the
+-     * resource is no longer running on the source), but there is no stop, the
+-     * migration is considered to be "dangling". Schedule a stop on the source
+-     * in this case.
++     *   We also need to take into account that either node's history may be
++     *   cleared at any point in the migration process.
+      */
+     int from_rc = PCMK_OCF_OK;
+     int from_status = PCMK_EXEC_PENDING;
+     pe_node_t *target_node = NULL;
+-    pe_node_t *source_node = NULL;
+     xmlNode *migrate_from = NULL;
+     const char *source = NULL;
+     const char *target = NULL;
+@@ -2922,13 +2914,11 @@ unpack_migrate_to_success(pe_resource_t *rsc, pe_node_t *node, xmlNode *xml_op,
+         return;
+     }
+ 
+-    /* If there's any newer non-monitor operation on the source, this migrate_to
+-     * potentially no longer matters for the source.
+-     */
++    // Check for newer state on the source
+     source_newer_op = non_monitor_after(rsc->id, source, xml_op, true,
+                                         data_set);
+ 
+-    // Check whether there was a migrate_from action on the target
++    // Check for a migrate_from action from this source on the target
+     migrate_from = find_lrm_op(rsc->id, CRMD_ACTION_MIGRATED, target,
+                                source, -1, data_set);
+     if (migrate_from != NULL) {
+@@ -2944,12 +2934,11 @@ unpack_migrate_to_success(pe_resource_t *rsc, pe_node_t *node, xmlNode *xml_op,
+                               &from_status);
+     }
+ 
+-    /* If the resource has newer state on the target after the migration
+-     * events, this migrate_to no longer matters for the target.
++    /* If the resource has newer state on both the source and target after the
++     * migration events, this migrate_to is irrelevant to the resource's state.
+      */
+     target_newer_state = newer_state_after_migrate(rsc->id, target, xml_op,
+                                                    migrate_from, data_set);
+-
+     if (source_newer_op && target_newer_state) {
+         return;
+     }
+@@ -2969,7 +2958,6 @@ unpack_migrate_to_success(pe_resource_t *rsc, pe_node_t *node, xmlNode *xml_op,
+     rsc->role = RSC_ROLE_STARTED;
+ 
+     target_node = pe_find_node(data_set->nodes, target);
+-    source_node = pe_find_node(data_set->nodes, source);
+     active_on_target = !target_newer_state && (target_node != NULL)
+                        && target_node->details->online;
+ 
+@@ -2981,31 +2969,30 @@ unpack_migrate_to_success(pe_resource_t *rsc, pe_node_t *node, xmlNode *xml_op,
+             pe__set_resource_flags(rsc, pe_rsc_failed|pe_rsc_stop);
+             pe__clear_resource_flags(rsc, pe_rsc_allow_migrate);
+         }
++        return;
++    }
+ 
+-    } else { // Pending, or complete but erased
+-        /* If the resource has newer state on the target, this migrate_to no
+-         * longer matters for the target.
+-         */
+-        if (active_on_target) {
+-            native_add_running(rsc, target_node, data_set, FALSE);
+-            if (source_node && source_node->details->online) {
+-                /* This is a partial migration: the migrate_to completed
+-                 * successfully on the source, but the migrate_from has not
+-                 * completed. Remember the source and target; if the newly
+-                 * chosen target remains the same when we schedule actions
+-                 * later, we may continue with the migration.
+-                 */
+-                rsc->partial_migration_target = target_node;
+-                rsc->partial_migration_source = source_node;
+-            }
+-        } else if (!source_newer_op) {
+-            /* This migrate_to matters for the source only if it's the last
+-             * non-monitor operation here.
+-             * Consider it failed here - forces a restart, prevents migration
++    // The migrate_from is pending, complete but erased, or to be scheduled
++
++    if (active_on_target) {
++        pe_node_t *source_node = pe_find_node(data_set->nodes, source);
++
++        native_add_running(rsc, target_node, data_set, FALSE);
++        if ((source_node != NULL) && source_node->details->online) {
++            /* This is a partial migration: the migrate_to completed
++             * successfully on the source, but the migrate_from has not
++             * completed. Remember the source and target; if the newly
++             * chosen target remains the same when we schedule actions
++             * later, we may continue with the migration.
+              */
+-            pe__set_resource_flags(rsc, pe_rsc_failed|pe_rsc_stop);
+-            pe__clear_resource_flags(rsc, pe_rsc_allow_migrate);
++            rsc->partial_migration_target = target_node;
++            rsc->partial_migration_source = source_node;
+         }
++
++    } else if (!source_newer_op) {
++        // Mark resource as failed, require recovery, and prevent migration
++        pe__set_resource_flags(rsc, pe_rsc_failed|pe_rsc_stop);
++        pe__clear_resource_flags(rsc, pe_rsc_allow_migrate);
+     }
+ }
+ 
+-- 
+2.31.1
+
+From 7d63ed8d52f64d2523367cff36bf77bd85296bd9 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Tue, 31 Jan 2023 17:14:57 -0600
+Subject: [PATCH 08/14] Refactor: scheduler: drop redundant argument from
+ unpack_migrate_to_success()
+
+---
+ lib/pengine/unpack.c | 19 +++++++++----------
+ 1 file changed, 9 insertions(+), 10 deletions(-)
+
+diff --git a/lib/pengine/unpack.c b/lib/pengine/unpack.c
+index 224b7b5..6222115 100644
+--- a/lib/pengine/unpack.c
++++ b/lib/pengine/unpack.c
+@@ -2864,8 +2864,7 @@ add_dangling_migration(pe_resource_t *rsc, const pe_node_t *node)
+ }
+ 
+ static void
+-unpack_migrate_to_success(pe_resource_t *rsc, pe_node_t *node, xmlNode *xml_op,
+-                          pe_working_set_t *data_set)
++unpack_migrate_to_success(pe_resource_t *rsc, pe_node_t *node, xmlNode *xml_op)
+ {
+     /* A complete migration sequence is:
+      * 1. migrate_to on source node (which succeeded if we get to this function)
+@@ -2916,11 +2915,11 @@ unpack_migrate_to_success(pe_resource_t *rsc, pe_node_t *node, xmlNode *xml_op,
+ 
+     // Check for newer state on the source
+     source_newer_op = non_monitor_after(rsc->id, source, xml_op, true,
+-                                        data_set);
++                                        rsc->cluster);
+ 
+     // Check for a migrate_from action from this source on the target
+     migrate_from = find_lrm_op(rsc->id, CRMD_ACTION_MIGRATED, target,
+-                               source, -1, data_set);
++                               source, -1, rsc->cluster);
+     if (migrate_from != NULL) {
+         if (source_newer_op) {
+             /* There's a newer non-monitor operation on the source and a
+@@ -2938,7 +2937,7 @@ unpack_migrate_to_success(pe_resource_t *rsc, pe_node_t *node, xmlNode *xml_op,
+      * migration events, this migrate_to is irrelevant to the resource's state.
+      */
+     target_newer_state = newer_state_after_migrate(rsc->id, target, xml_op,
+-                                                   migrate_from, data_set);
++                                                   migrate_from, rsc->cluster);
+     if (source_newer_op && target_newer_state) {
+         return;
+     }
+@@ -2957,13 +2956,13 @@ unpack_migrate_to_success(pe_resource_t *rsc, pe_node_t *node, xmlNode *xml_op,
+      */
+     rsc->role = RSC_ROLE_STARTED;
+ 
+-    target_node = pe_find_node(data_set->nodes, target);
++    target_node = pe_find_node(rsc->cluster->nodes, target);
+     active_on_target = !target_newer_state && (target_node != NULL)
+                        && target_node->details->online;
+ 
+     if (from_status != PCMK_EXEC_PENDING) { // migrate_from failed on target
+         if (active_on_target) {
+-            native_add_running(rsc, target_node, data_set, TRUE);
++            native_add_running(rsc, target_node, rsc->cluster, TRUE);
+         } else {
+             // Mark resource as failed, require recovery, and prevent migration
+             pe__set_resource_flags(rsc, pe_rsc_failed|pe_rsc_stop);
+@@ -2975,9 +2974,9 @@ unpack_migrate_to_success(pe_resource_t *rsc, pe_node_t *node, xmlNode *xml_op,
+     // The migrate_from is pending, complete but erased, or to be scheduled
+ 
+     if (active_on_target) {
+-        pe_node_t *source_node = pe_find_node(data_set->nodes, source);
++        pe_node_t *source_node = pe_find_node(rsc->cluster->nodes, source);
+ 
+-        native_add_running(rsc, target_node, data_set, FALSE);
++        native_add_running(rsc, target_node, rsc->cluster, FALSE);
+         if ((source_node != NULL) && source_node->details->online) {
+             /* This is a partial migration: the migrate_to completed
+              * successfully on the source, but the migrate_from has not
+@@ -3946,7 +3945,7 @@ update_resource_state(pe_resource_t * rsc, pe_node_t * node, xmlNode * xml_op, c
+         clear_past_failure = TRUE;
+ 
+     } else if (pcmk__str_eq(task, CRMD_ACTION_MIGRATE, pcmk__str_casei)) {
+-        unpack_migrate_to_success(rsc, node, xml_op, data_set);
++        unpack_migrate_to_success(rsc, node, xml_op);
+ 
+     } else if (rsc->role < RSC_ROLE_STARTED) {
+         pe_rsc_trace(rsc, "%s active on %s", rsc->id, pe__node_name(node));
+-- 
+2.31.1
+
+From 3be487f87bf5e26277379148922525fd98d29681 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Thu, 2 Feb 2023 09:13:30 -0600
+Subject: [PATCH 09/14] Doc: scheduler: clarify comments about unpacking
+ migration history
+
+per review
+---
+ lib/pengine/unpack.c | 20 ++++++++++----------
+ 1 file changed, 10 insertions(+), 10 deletions(-)
+
+diff --git a/lib/pengine/unpack.c b/lib/pengine/unpack.c
+index 6222115..ec2cf26 100644
+--- a/lib/pengine/unpack.c
++++ b/lib/pengine/unpack.c
+@@ -2791,9 +2791,9 @@ newer_state_after_migrate(const char *rsc_id, const char *node_name,
+  * \internal
+  * \brief Parse migration source and target node names from history entry
+  *
+- * \param[in] entry         Resource history entry for a migration action
+- * \param[in] source_node   If not NULL, source must match this node
+- * \param[in] target_node   If not NULL, target must match this node
++ * \param[in]  entry        Resource history entry for a migration action
++ * \param[in]  source_node  If not NULL, source must match this node
++ * \param[in]  target_node  If not NULL, target must match this node
+  * \param[out] source_name  Where to store migration source node name
+  * \param[out] target_name  Where to store migration target node name
+  *
+@@ -2825,7 +2825,7 @@ get_migration_node_names(const xmlNode *entry, const pe_node_t *source_node,
+                          pcmk__str_casei|pcmk__str_null_matches)) {
+         crm_err("Ignoring resource history entry %s because "
+                 XML_LRM_ATTR_MIGRATE_SOURCE "='%s' does not match %s",
+-                id, pcmk__s(*source_name, ""), pe__node_name(source_node));
++                id, *source_name, pe__node_name(source_node));
+         return pcmk_rc_unpack_error;
+     }
+ 
+@@ -2834,7 +2834,7 @@ get_migration_node_names(const xmlNode *entry, const pe_node_t *source_node,
+                          pcmk__str_casei|pcmk__str_null_matches)) {
+         crm_err("Ignoring resource history entry %s because "
+                 XML_LRM_ATTR_MIGRATE_TARGET "='%s' does not match %s",
+-                id, pcmk__s(*target_name, ""), pe__node_name(target_node));
++                id, *target_name, pe__node_name(target_node));
+         return pcmk_rc_unpack_error;
+     }
+ 
+@@ -2890,7 +2890,7 @@ unpack_migrate_to_success(pe_resource_t *rsc, pe_node_t *node, xmlNode *xml_op)
+      *
+      * - If the new transition is aborted for any reason while the resource is
+      *   stopping on node1, the transition after that stop completes will see
+-     *   the migrate_from and stop on the source, but it's still a partial
++     *   the migrate_to and stop on the source, but it's still a partial
+      *   migration, and the resource must be stopped on node2 because it is
+      *   potentially active there due to the migrate_to.
+      *
+@@ -3425,9 +3425,9 @@ check_recoverable(pe_resource_t *rsc, pe_node_t *node, const char *task,
+  * \brief Update an integer value and why
+  *
+  * \param[in,out] i       Pointer to integer to update
+- * \param[in,out] why     Where to store reason for update
++ * \param[out]    why     Where to store reason for update
+  * \param[in]     value   New value
+- * \param[in,out] reason  Description of why value was changed
++ * \param[in]     reason  Description of why value was changed
+  */
+ static inline void
+ remap_because(int *i, const char **why, int value, const char *reason)
+@@ -3456,7 +3456,7 @@ remap_because(int *i, const char **why, int value, const char *reason)
+  * \param[in]     data_set   Current cluster working set
+  * \param[in,out] on_fail    What should be done about the result
+  * \param[in]     target_rc  Expected return code of operation
+- * \param[in,out] rc         Actual return code of operation
++ * \param[in,out] rc         Actual return code of operation (treated as OCF)
+  * \param[in,out] status     Operation execution status
+  *
+  * \note If the result is remapped and the node is not shutting down or failed,
+@@ -3548,7 +3548,7 @@ remap_operation(xmlNode *xml_op, pe_resource_t *rsc, pe_node_t *node,
+     switch (*rc) {
+         case PCMK_OCF_OK:
+             if (is_probe && (target_rc == PCMK_OCF_NOT_RUNNING)) {
+-                remap_because(status, &why,PCMK_EXEC_DONE, "probe");
++                remap_because(status, &why, PCMK_EXEC_DONE, "probe");
+                 pe_rsc_info(rsc, "Probe found %s active on %s at %s",
+                             rsc->id, pe__node_name(node),
+                             last_change_str(xml_op));
+-- 
+2.31.1
+
+From 3ef6c84a7b0dd434731e72d91f2724bdb52e292e Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Thu, 2 Feb 2023 09:42:01 -0600
+Subject: [PATCH 10/14] Refactor: scheduler: improve xpath efficiency when
+ unpacking
+
+Using "//" means that every child must be searched recursively. If we know the
+exact path, we should explicitly specify it.
+---
+ lib/pengine/unpack.c | 20 ++++++++++++--------
+ 1 file changed, 12 insertions(+), 8 deletions(-)
+
+diff --git a/lib/pengine/unpack.c b/lib/pengine/unpack.c
+index ec2cf26..8aead58 100644
+--- a/lib/pengine/unpack.c
++++ b/lib/pengine/unpack.c
+@@ -2571,6 +2571,13 @@ set_node_score(gpointer key, gpointer value, gpointer user_data)
+     node->weight = *score;
+ }
+ 
++#define XPATH_NODE_STATE "/" XML_TAG_CIB "/" XML_CIB_TAG_STATUS     \
++                         "/" XML_CIB_TAG_STATE
++#define SUB_XPATH_LRM_RESOURCE "/" XML_CIB_TAG_LRM              \
++                               "/" XML_LRM_TAG_RESOURCES        \
++                               "/" XML_LRM_TAG_RESOURCE
++#define SUB_XPATH_LRM_RSC_OP "/" XML_LRM_TAG_RSC_OP
++
+ static xmlNode *
+ find_lrm_op(const char *resource, const char *op, const char *node, const char *source,
+             int target_rc, pe_working_set_t *data_set)
+@@ -2583,10 +2590,9 @@ find_lrm_op(const char *resource, const char *op, const char *node, const char *
+ 
+     xpath = g_string_sized_new(256);
+     pcmk__g_strcat(xpath,
+-                   "//" XML_CIB_TAG_STATE "[@" XML_ATTR_UNAME "='", node, "']"
+-                   "//" XML_LRM_TAG_RESOURCE
+-                   "[@" XML_ATTR_ID "='", resource, "']"
+-                   "/" XML_LRM_TAG_RSC_OP "[@" XML_LRM_ATTR_TASK "='", op, "'",
++                   XPATH_NODE_STATE "[@" XML_ATTR_UNAME "='", node, "']"
++                   SUB_XPATH_LRM_RESOURCE "[@" XML_ATTR_ID "='", resource, "']"
++                   SUB_XPATH_LRM_RSC_OP "[@" XML_LRM_ATTR_TASK "='", op, "'",
+                    NULL);
+ 
+     /* Need to check against transition_magic too? */
+@@ -2631,10 +2637,8 @@ find_lrm_resource(const char *rsc_id, const char *node_name,
+ 
+     xpath = g_string_sized_new(256);
+     pcmk__g_strcat(xpath,
+-                   "//" XML_CIB_TAG_STATE
+-                   "[@" XML_ATTR_UNAME "='", node_name, "']"
+-                   "//" XML_LRM_TAG_RESOURCE
+-                   "[@" XML_ATTR_ID "='", rsc_id, "']",
++                   XPATH_NODE_STATE "[@" XML_ATTR_UNAME "='", node_name, "']"
++                   SUB_XPATH_LRM_RESOURCE "[@" XML_ATTR_ID "='", rsc_id, "']",
+                    NULL);
+ 
+     xml = get_xpath_object((const char *) xpath->str, data_set->input,
+-- 
+2.31.1
+
+From 1869f99bc8eeedb976f96f0f1cc3d4dd86735504 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Thu, 2 Feb 2023 10:25:53 -0600
+Subject: [PATCH 11/14] Low: scheduler: unknown_on_node() should ignore pending
+ actions
+
+Previously, unknown_on_node() looked for any lrm_rsc_op at all to decide
+whether a resource is known on a node. However if the only action is pending,
+the resource is not yet known.
+
+Also drop a redundant argument and add a doxygen block. (The rsc argument is
+not const due to a getDocPtr() call in the chain, as well as libxml2 calls that
+are likely const in practice but aren't marked as such.)
+---
+ lib/pengine/unpack.c | 37 +++++++++++++++++++++++++------------
+ 1 file changed, 25 insertions(+), 12 deletions(-)
+
+diff --git a/lib/pengine/unpack.c b/lib/pengine/unpack.c
+index 8aead58..14dc202 100644
+--- a/lib/pengine/unpack.c
++++ b/lib/pengine/unpack.c
+@@ -2648,19 +2648,32 @@ find_lrm_resource(const char *rsc_id, const char *node_name,
+     return xml;
+ }
+ 
++/*!
++ * \internal
++ * \brief Check whether a resource has no completed action history on a node
++ *
++ * \param[in,out] rsc        Resource to check
++ * \param[in]     node_name  Node to check
++ *
++ * \return true if \p rsc_id is unknown on \p node_name, otherwise false
++ */
+ static bool
+-unknown_on_node(const char *rsc_id, const char *node_name,
+-                pe_working_set_t *data_set)
++unknown_on_node(pe_resource_t *rsc, const char *node_name)
+ {
+-    xmlNode *lrm_resource = NULL;
+-
+-    lrm_resource = find_lrm_resource(rsc_id, node_name, data_set);
++    bool result = false;
++    xmlXPathObjectPtr search;
++    GString *xpath = g_string_sized_new(256);
+ 
+-    /* If the resource has no lrm_rsc_op history on the node, that means its
+-     * state is unknown there.
+-     */
+-    return (lrm_resource == NULL
+-            || first_named_child(lrm_resource, XML_LRM_TAG_RSC_OP) == NULL);
++    pcmk__g_strcat(xpath,
++                   XPATH_NODE_STATE "[@" XML_ATTR_UNAME "='", node_name, "']"
++                   SUB_XPATH_LRM_RESOURCE "[@" XML_ATTR_ID "='", rsc->id, "']"
++                   SUB_XPATH_LRM_RSC_OP "[@" XML_LRM_ATTR_RC "!='193']",
++                   NULL);
++    search = xpath_search(rsc->cluster->input, (const char *) xpath->str);
++    result = (numXpathResults(search) == 0);
++    freeXpathObject(search);
++    g_string_free(xpath, TRUE);
++    return result;
+ }
+ 
+ /*!
+@@ -3027,7 +3040,7 @@ unpack_migrate_to_failure(pe_resource_t *rsc, pe_node_t *node, xmlNode *xml_op,
+          * Don't just consider it running there. We will get back here anyway in
+          * case the probe detects it's running there.
+          */
+-        !unknown_on_node(rsc->id, target, data_set)
++        !unknown_on_node(rsc, target)
+         /* If the resource has newer state on the target after the migration
+          * events, this migrate_to no longer matters for the target.
+          */
+@@ -3082,7 +3095,7 @@ unpack_migrate_from_failure(pe_resource_t *rsc, pe_node_t *node,
+          * Don't just consider it running there. We will get back here anyway in
+          * case the probe detects it's running there.
+          */
+-        !unknown_on_node(rsc->id, source, data_set)
++        !unknown_on_node(rsc, source)
+         /* If the resource has newer state on the source after the migration
+          * events, this migrate_from no longer matters for the source.
+          */
+-- 
+2.31.1
+
+From 22fbab8e0d449d2accb231dfcec94294ded27f4e Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Tue, 31 Jan 2023 12:11:19 -0600
+Subject: [PATCH 12/14] Test: scheduler: add regression test for migration
+ intermediary
+
+As of this commit, the cluster wrongly restarts the migrated resource
+---
+ cts/cts-scheduler.in                          |   3 +
+ .../dot/migration-intermediary-cleaned.dot    |  46 ++
+ .../exp/migration-intermediary-cleaned.exp    | 316 +++++++++++
+ .../migration-intermediary-cleaned.scores     | 201 +++++++
+ .../migration-intermediary-cleaned.summary    |  94 ++++
+ .../xml/migration-intermediary-cleaned.xml    | 513 ++++++++++++++++++
+ 6 files changed, 1173 insertions(+)
+ create mode 100644 cts/scheduler/dot/migration-intermediary-cleaned.dot
+ create mode 100644 cts/scheduler/exp/migration-intermediary-cleaned.exp
+ create mode 100644 cts/scheduler/scores/migration-intermediary-cleaned.scores
+ create mode 100644 cts/scheduler/summary/migration-intermediary-cleaned.summary
+ create mode 100644 cts/scheduler/xml/migration-intermediary-cleaned.xml
+
+diff --git a/cts/cts-scheduler.in b/cts/cts-scheduler.in
+index feb5dc8..9899c36 100644
+--- a/cts/cts-scheduler.in
++++ b/cts/cts-scheduler.in
+@@ -387,6 +387,9 @@ TESTS = [
+         [ "probe-target-of-failed-migrate_to-1", "Failed migrate_to, target rejoins" ],
+         [ "probe-target-of-failed-migrate_to-2", "Failed migrate_to, target rejoined and probed" ],
+         [ "partial-live-migration-multiple-active", "Prevent running on multiple nodes due to partial live migration" ],
++        [ "migration-intermediary-cleaned",
++          "Probe live-migration intermediary with no history"
++        ],
+         [ "bug-lf-2422", "Dependency on partially active group - stop ocfs:*" ],
+     ],
+     [
+diff --git a/cts/scheduler/dot/migration-intermediary-cleaned.dot b/cts/scheduler/dot/migration-intermediary-cleaned.dot
+new file mode 100644
+index 0000000..09568d0
+--- /dev/null
++++ b/cts/scheduler/dot/migration-intermediary-cleaned.dot
+@@ -0,0 +1,46 @@
++ digraph "g" {
++"Connectivity_running_0" [ style=bold color="green" fontcolor="orange"]
++"Connectivity_start_0" -> "Connectivity_running_0" [ style = bold]
++"Connectivity_start_0" -> "ping-1_start_0 rhel8-2" [ style = bold]
++"Connectivity_start_0" [ style=bold color="green" fontcolor="orange"]
++"FencingFail_monitor_0 rhel8-2" [ style=bold color="green" fontcolor="black"]
++"FencingPass_monitor_0 rhel8-2" [ style=bold color="green" fontcolor="black"]
++"Fencing_monitor_0 rhel8-2" [ style=bold color="green" fontcolor="black"]
++"lsb-dummy_monitor_0 rhel8-2" [ style=bold color="green" fontcolor="black"]
++"migrator_monitor_0 rhel8-2" -> "migrator_start_0 rhel8-5" [ style = bold]
++"migrator_monitor_0 rhel8-2" [ style=bold color="green" fontcolor="black"]
++"migrator_monitor_10000 rhel8-5" [ style=bold color="green" fontcolor="black"]
++"migrator_start_0 rhel8-5" -> "migrator_monitor_10000 rhel8-5" [ style = bold]
++"migrator_start_0 rhel8-5" [ style=bold color="green" fontcolor="black"]
++"migrator_stop_0 rhel8-2" -> "migrator_start_0 rhel8-5" [ style = bold]
++"migrator_stop_0 rhel8-2" [ style=bold color="green" fontcolor="black"]
++"migrator_stop_0 rhel8-5" -> "migrator_start_0 rhel8-5" [ style = bold]
++"migrator_stop_0 rhel8-5" [ style=bold color="green" fontcolor="black"]
++"petulant_monitor_0 rhel8-2" [ style=bold color="green" fontcolor="black"]
++"ping-1_monitor_0 rhel8-2" -> "Connectivity_start_0" [ style = bold]
++"ping-1_monitor_0 rhel8-2" [ style=bold color="green" fontcolor="black"]
++"ping-1_monitor_60000 rhel8-2" [ style=bold color="green" fontcolor="black"]
++"ping-1_start_0 rhel8-2" -> "Connectivity_running_0" [ style = bold]
++"ping-1_start_0 rhel8-2" -> "ping-1_monitor_60000 rhel8-2" [ style = bold]
++"ping-1_start_0 rhel8-2" [ style=bold color="green" fontcolor="black"]
++"r192.168.122.207_monitor_0 rhel8-2" [ style=bold color="green" fontcolor="black"]
++"r192.168.122.208_monitor_0 rhel8-2" [ style=bold color="green" fontcolor="black"]
++"rsc_rhel8-1_monitor_0 rhel8-2" -> "rsc_rhel8-1_start_0 rhel8-2" [ style = bold]
++"rsc_rhel8-1_monitor_0 rhel8-2" [ style=bold color="green" fontcolor="black"]
++"rsc_rhel8-1_monitor_5000 rhel8-2" [ style=bold color="green" fontcolor="black"]
++"rsc_rhel8-1_start_0 rhel8-2" -> "rsc_rhel8-1_monitor_5000 rhel8-2" [ style = bold]
++"rsc_rhel8-1_start_0 rhel8-2" [ style=bold color="green" fontcolor="black"]
++"rsc_rhel8-1_stop_0 rhel8-3" -> "rsc_rhel8-1_start_0 rhel8-2" [ style = bold]
++"rsc_rhel8-1_stop_0 rhel8-3" [ style=bold color="green" fontcolor="black"]
++"rsc_rhel8-2_monitor_0 rhel8-2" -> "rsc_rhel8-2_start_0 rhel8-2" [ style = bold]
++"rsc_rhel8-2_monitor_0 rhel8-2" [ style=bold color="green" fontcolor="black"]
++"rsc_rhel8-2_monitor_5000 rhel8-2" [ style=bold color="green" fontcolor="black"]
++"rsc_rhel8-2_start_0 rhel8-2" -> "rsc_rhel8-2_monitor_5000 rhel8-2" [ style = bold]
++"rsc_rhel8-2_start_0 rhel8-2" [ style=bold color="green" fontcolor="black"]
++"rsc_rhel8-2_stop_0 rhel8-4" -> "rsc_rhel8-2_start_0 rhel8-2" [ style = bold]
++"rsc_rhel8-2_stop_0 rhel8-4" [ style=bold color="green" fontcolor="black"]
++"rsc_rhel8-3_monitor_0 rhel8-2" [ style=bold color="green" fontcolor="black"]
++"rsc_rhel8-4_monitor_0 rhel8-2" [ style=bold color="green" fontcolor="black"]
++"rsc_rhel8-5_monitor_0 rhel8-2" [ style=bold color="green" fontcolor="black"]
++"stateful-1_monitor_0 rhel8-2" [ style=bold color="green" fontcolor="black"]
++}
+diff --git a/cts/scheduler/exp/migration-intermediary-cleaned.exp b/cts/scheduler/exp/migration-intermediary-cleaned.exp
+new file mode 100644
+index 0000000..28fa776
+--- /dev/null
++++ b/cts/scheduler/exp/migration-intermediary-cleaned.exp
+@@ -0,0 +1,316 @@
++<transition_graph cluster-delay="60s" stonith-timeout="60s" failed-stop-offset="INFINITY" failed-start-offset="1"  transition_id="0">
++  <synapse id="0">
++    <action_set>
++      <rsc_op id="18" operation="monitor" operation_key="Fencing_monitor_0" on_node="rhel8-2" on_node_uuid="2">
++        <primitive id="Fencing" class="stonith" type="fence_xvm"/>
++        <attributes CRM_meta_on_node="rhel8-2" CRM_meta_on_node_uuid="2" CRM_meta_op_target_rc="7" CRM_meta_timeout="120000"  key_file="/etc/pacemaker/fence_xvm.key" multicast_address="239.255.100.100" pcmk_host_list="rhel8-1 remote-rhel8-1 rhel8-2 remote-rhel8-2 rhel8-3 remote-rhel8-3 rhel8-4 remote-rhel8-4 rhel8-5 remote-rhel8-5" pcmk_host_map="remote-rhel8-1:rhel8-1;remote-rhel8-2:rhel8-2;remote-rhel8-3:rhel8-3;remote-rhel8-4:rhel8-4;remote-rhel8-5:rhel8-5;"/>
++      </rsc_op>
++    </action_set>
++    <inputs/>
++  </synapse>
++  <synapse id="1">
++    <action_set>
++      <rsc_op id="19" operation="monitor" operation_key="FencingPass_monitor_0" on_node="rhel8-2" on_node_uuid="2">
++        <primitive id="FencingPass" class="stonith" type="fence_dummy"/>
++        <attributes CRM_meta_on_node="rhel8-2" CRM_meta_on_node_uuid="2" CRM_meta_op_target_rc="7" CRM_meta_timeout="90000"  mode="pass" pcmk_host_list="rhel8-2 remote-rhel8-2 rhel8-3 remote-rhel8-3 rhel8-5 remote-rhel8-5" random_sleep_range="30"/>
++      </rsc_op>
++    </action_set>
++    <inputs/>
++  </synapse>
++  <synapse id="2">
++    <action_set>
++      <rsc_op id="20" operation="monitor" operation_key="FencingFail_monitor_0" on_node="rhel8-2" on_node_uuid="2">
++        <primitive id="FencingFail" class="stonith" type="fence_dummy"/>
++        <attributes CRM_meta_on_node="rhel8-2" CRM_meta_on_node_uuid="2" CRM_meta_op_target_rc="7" CRM_meta_timeout="90000"  mode="fail" pcmk_host_list="rhel8-4 remote-rhel8-4" random_sleep_range="30"/>
++      </rsc_op>
++    </action_set>
++    <inputs/>
++  </synapse>
++  <synapse id="3">
++    <action_set>
++      <rsc_op id="41" operation="monitor" operation_key="rsc_rhel8-1_monitor_5000" on_node="rhel8-2" on_node_uuid="2">
++        <primitive id="rsc_rhel8-1" class="ocf" provider="heartbeat" type="IPaddr2"/>
++        <attributes CRM_meta_interval="5000" CRM_meta_name="monitor" CRM_meta_on_node="rhel8-2" CRM_meta_on_node_uuid="2" CRM_meta_timeout="90000" cidr_netmask="32"  ip="192.168.122.202"/>
++      </rsc_op>
++    </action_set>
++    <inputs>
++      <trigger>
++        <rsc_op id="40" operation="start" operation_key="rsc_rhel8-1_start_0" on_node="rhel8-2" on_node_uuid="2"/>
++      </trigger>
++    </inputs>
++  </synapse>
++  <synapse id="4">
++    <action_set>
++      <rsc_op id="40" operation="start" operation_key="rsc_rhel8-1_start_0" on_node="rhel8-2" on_node_uuid="2">
++        <primitive id="rsc_rhel8-1" class="ocf" provider="heartbeat" type="IPaddr2"/>
++        <attributes CRM_meta_on_node="rhel8-2" CRM_meta_on_node_uuid="2" CRM_meta_timeout="90000" cidr_netmask="32"  ip="192.168.122.202"/>
++      </rsc_op>
++    </action_set>
++    <inputs>
++      <trigger>
++        <rsc_op id="21" operation="monitor" operation_key="rsc_rhel8-1_monitor_0" on_node="rhel8-2" on_node_uuid="2"/>
++      </trigger>
++      <trigger>
++        <rsc_op id="39" operation="stop" operation_key="rsc_rhel8-1_stop_0" on_node="rhel8-3" on_node_uuid="3"/>
++      </trigger>
++    </inputs>
++  </synapse>
++  <synapse id="5">
++    <action_set>
++      <rsc_op id="39" operation="stop" operation_key="rsc_rhel8-1_stop_0" on_node="rhel8-3" on_node_uuid="3">
++        <primitive id="rsc_rhel8-1" class="ocf" provider="heartbeat" type="IPaddr2"/>
++        <attributes CRM_meta_on_node="rhel8-3" CRM_meta_on_node_uuid="3" CRM_meta_timeout="90000" cidr_netmask="32"  ip="192.168.122.202"/>
++      </rsc_op>
++    </action_set>
++    <inputs/>
++  </synapse>
++  <synapse id="6">
++    <action_set>
++      <rsc_op id="21" operation="monitor" operation_key="rsc_rhel8-1_monitor_0" on_node="rhel8-2" on_node_uuid="2">
++        <primitive id="rsc_rhel8-1" class="ocf" provider="heartbeat" type="IPaddr2"/>
++        <attributes CRM_meta_on_node="rhel8-2" CRM_meta_on_node_uuid="2" CRM_meta_op_target_rc="7" CRM_meta_timeout="90000" cidr_netmask="32"  ip="192.168.122.202"/>
++      </rsc_op>
++    </action_set>
++    <inputs/>
++  </synapse>
++  <synapse id="7">
++    <action_set>
++      <rsc_op id="44" operation="monitor" operation_key="rsc_rhel8-2_monitor_5000" on_node="rhel8-2" on_node_uuid="2">
++        <primitive id="rsc_rhel8-2" class="ocf" provider="heartbeat" type="IPaddr2"/>
++        <attributes CRM_meta_interval="5000" CRM_meta_name="monitor" CRM_meta_on_node="rhel8-2" CRM_meta_on_node_uuid="2" CRM_meta_timeout="90000" cidr_netmask="32"  ip="192.168.122.203"/>
++      </rsc_op>
++    </action_set>
++    <inputs>
++      <trigger>
++        <rsc_op id="43" operation="start" operation_key="rsc_rhel8-2_start_0" on_node="rhel8-2" on_node_uuid="2"/>
++      </trigger>
++    </inputs>
++  </synapse>
++  <synapse id="8">
++    <action_set>
++      <rsc_op id="43" operation="start" operation_key="rsc_rhel8-2_start_0" on_node="rhel8-2" on_node_uuid="2">
++        <primitive id="rsc_rhel8-2" class="ocf" provider="heartbeat" type="IPaddr2"/>
++        <attributes CRM_meta_on_node="rhel8-2" CRM_meta_on_node_uuid="2" CRM_meta_timeout="90000" cidr_netmask="32"  ip="192.168.122.203"/>
++      </rsc_op>
++    </action_set>
++    <inputs>
++      <trigger>
++        <rsc_op id="22" operation="monitor" operation_key="rsc_rhel8-2_monitor_0" on_node="rhel8-2" on_node_uuid="2"/>
++      </trigger>
++      <trigger>
++        <rsc_op id="42" operation="stop" operation_key="rsc_rhel8-2_stop_0" on_node="rhel8-4" on_node_uuid="4"/>
++      </trigger>
++    </inputs>
++  </synapse>
++  <synapse id="9">
++    <action_set>
++      <rsc_op id="42" operation="stop" operation_key="rsc_rhel8-2_stop_0" on_node="rhel8-4" on_node_uuid="4">
++        <primitive id="rsc_rhel8-2" class="ocf" provider="heartbeat" type="IPaddr2"/>
++        <attributes CRM_meta_on_node="rhel8-4" CRM_meta_on_node_uuid="4" CRM_meta_timeout="90000" cidr_netmask="32"  ip="192.168.122.203"/>
++      </rsc_op>
++    </action_set>
++    <inputs/>
++  </synapse>
++  <synapse id="10">
++    <action_set>
++      <rsc_op id="22" operation="monitor" operation_key="rsc_rhel8-2_monitor_0" on_node="rhel8-2" on_node_uuid="2">
++        <primitive id="rsc_rhel8-2" class="ocf" provider="heartbeat" type="IPaddr2"/>
++        <attributes CRM_meta_on_node="rhel8-2" CRM_meta_on_node_uuid="2" CRM_meta_op_target_rc="7" CRM_meta_timeout="90000" cidr_netmask="32"  ip="192.168.122.203"/>
++      </rsc_op>
++    </action_set>
++    <inputs/>
++  </synapse>
++  <synapse id="11">
++    <action_set>
++      <rsc_op id="23" operation="monitor" operation_key="rsc_rhel8-3_monitor_0" on_node="rhel8-2" on_node_uuid="2">
++        <primitive id="rsc_rhel8-3" class="ocf" provider="heartbeat" type="IPaddr2"/>
++        <attributes CRM_meta_on_node="rhel8-2" CRM_meta_on_node_uuid="2" CRM_meta_op_target_rc="7" CRM_meta_timeout="90000" cidr_netmask="32"  ip="192.168.122.204"/>
++      </rsc_op>
++    </action_set>
++    <inputs/>
++  </synapse>
++  <synapse id="12">
++    <action_set>
++      <rsc_op id="24" operation="monitor" operation_key="rsc_rhel8-4_monitor_0" on_node="rhel8-2" on_node_uuid="2">
++        <primitive id="rsc_rhel8-4" class="ocf" provider="heartbeat" type="IPaddr2"/>
++        <attributes CRM_meta_on_node="rhel8-2" CRM_meta_on_node_uuid="2" CRM_meta_op_target_rc="7" CRM_meta_timeout="90000" cidr_netmask="32"  ip="192.168.122.205"/>
++      </rsc_op>
++    </action_set>
++    <inputs/>
++  </synapse>
++  <synapse id="13">
++    <action_set>
++      <rsc_op id="25" operation="monitor" operation_key="rsc_rhel8-5_monitor_0" on_node="rhel8-2" on_node_uuid="2">
++        <primitive id="rsc_rhel8-5" class="ocf" provider="heartbeat" type="IPaddr2"/>
++        <attributes CRM_meta_on_node="rhel8-2" CRM_meta_on_node_uuid="2" CRM_meta_op_target_rc="7" CRM_meta_timeout="90000" cidr_netmask="32"  ip="192.168.122.206"/>
++      </rsc_op>
++    </action_set>
++    <inputs/>
++  </synapse>
++  <synapse id="14">
++    <action_set>
++      <rsc_op id="53" operation="start" operation_key="migrator_start_0" on_node="rhel8-5" on_node_uuid="5">
++        <primitive id="migrator" class="ocf" provider="pacemaker" type="Dummy"/>
++        <attributes CRM_meta_on_node="rhel8-5" CRM_meta_on_node_uuid="5" CRM_meta_timeout="90000"  passwd="whatever"/>
++      </rsc_op>
++    </action_set>
++    <inputs>
++      <trigger>
++        <rsc_op id="26" operation="monitor" operation_key="migrator_monitor_0" on_node="rhel8-2" on_node_uuid="2"/>
++      </trigger>
++      <trigger>
++        <rsc_op id="51" operation="stop" operation_key="migrator_stop_0" on_node="rhel8-5" on_node_uuid="5"/>
++      </trigger>
++      <trigger>
++        <rsc_op id="52" operation="stop" operation_key="migrator_stop_0" on_node="rhel8-2" on_node_uuid="2"/>
++      </trigger>
++    </inputs>
++  </synapse>
++  <synapse id="15">
++    <action_set>
++      <rsc_op id="52" operation="stop" operation_key="migrator_stop_0" on_node="rhel8-2" on_node_uuid="2">
++        <primitive id="migrator" class="ocf" provider="pacemaker" type="Dummy"/>
++        <attributes CRM_meta_on_node="rhel8-2" CRM_meta_on_node_uuid="2" CRM_meta_timeout="90000"  passwd="whatever"/>
++      </rsc_op>
++    </action_set>
++    <inputs/>
++  </synapse>
++  <synapse id="16">
++    <action_set>
++      <rsc_op id="51" operation="stop" operation_key="migrator_stop_0" on_node="rhel8-5" on_node_uuid="5">
++        <primitive id="migrator" class="ocf" provider="pacemaker" type="Dummy"/>
++        <attributes CRM_meta_on_node="rhel8-5" CRM_meta_on_node_uuid="5" CRM_meta_timeout="90000"  passwd="whatever"/>
++      </rsc_op>
++    </action_set>
++    <inputs/>
++  </synapse>
++  <synapse id="17">
++    <action_set>
++      <rsc_op id="26" operation="monitor" operation_key="migrator_monitor_0" on_node="rhel8-2" on_node_uuid="2">
++        <primitive id="migrator" class="ocf" provider="pacemaker" type="Dummy"/>
++        <attributes CRM_meta_on_node="rhel8-2" CRM_meta_on_node_uuid="2" CRM_meta_timeout="90000"  passwd="whatever"/>
++      </rsc_op>
++    </action_set>
++    <inputs/>
++  </synapse>
++  <synapse id="18">
++    <action_set>
++      <rsc_op id="17" operation="monitor" operation_key="migrator_monitor_10000" on_node="rhel8-5" on_node_uuid="5">
++        <primitive id="migrator" class="ocf" provider="pacemaker" type="Dummy"/>
++        <attributes CRM_meta_interval="10000" CRM_meta_name="monitor" CRM_meta_on_node="rhel8-5" CRM_meta_on_node_uuid="5" CRM_meta_timeout="90000"  passwd="whatever"/>
++      </rsc_op>
++    </action_set>
++    <inputs>
++      <trigger>
++        <rsc_op id="53" operation="start" operation_key="migrator_start_0" on_node="rhel8-5" on_node_uuid="5"/>
++      </trigger>
++    </inputs>
++  </synapse>
++  <synapse id="19">
++    <action_set>
++      <rsc_op id="61" operation="monitor" operation_key="ping-1_monitor_60000" internal_operation_key="ping-1:3_monitor_60000" on_node="rhel8-2" on_node_uuid="2">
++        <primitive id="ping-1" long-id="ping-1:3" class="ocf" provider="pacemaker" type="ping"/>
++        <attributes CRM_meta_clone="3" CRM_meta_clone_max="5" CRM_meta_clone_node_max="1" CRM_meta_globally_unique="false" CRM_meta_interval="60000" CRM_meta_name="monitor" CRM_meta_notify="false" CRM_meta_on_node="rhel8-2" CRM_meta_on_node_uuid="2" CRM_meta_timeout="90000"  debug="true" host_list="192.168.122.80" name="connected"/>
++      </rsc_op>
++    </action_set>
++    <inputs>
++      <trigger>
++        <rsc_op id="60" operation="start" operation_key="ping-1_start_0" internal_operation_key="ping-1:3_start_0" on_node="rhel8-2" on_node_uuid="2"/>
++      </trigger>
++    </inputs>
++  </synapse>
++  <synapse id="20">
++    <action_set>
++      <rsc_op id="60" operation="start" operation_key="ping-1_start_0" internal_operation_key="ping-1:3_start_0" on_node="rhel8-2" on_node_uuid="2">
++        <primitive id="ping-1" long-id="ping-1:3" class="ocf" provider="pacemaker" type="ping"/>
++        <attributes CRM_meta_clone="3" CRM_meta_clone_max="5" CRM_meta_clone_node_max="1" CRM_meta_globally_unique="false" CRM_meta_notify="false" CRM_meta_on_node="rhel8-2" CRM_meta_on_node_uuid="2" CRM_meta_timeout="90000"  debug="true" host_list="192.168.122.80" name="connected"/>
++      </rsc_op>
++    </action_set>
++    <inputs>
++      <trigger>
++        <pseudo_event id="62" operation="start" operation_key="Connectivity_start_0"/>
++      </trigger>
++    </inputs>
++  </synapse>
++  <synapse id="21">
++    <action_set>
++      <rsc_op id="27" operation="monitor" operation_key="ping-1_monitor_0" internal_operation_key="ping-1:3_monitor_0" on_node="rhel8-2" on_node_uuid="2">
++        <primitive id="ping-1" long-id="ping-1:3" class="ocf" provider="pacemaker" type="ping"/>
++        <attributes CRM_meta_clone="3" CRM_meta_clone_max="5" CRM_meta_clone_node_max="1" CRM_meta_globally_unique="false" CRM_meta_notify="false" CRM_meta_on_node="rhel8-2" CRM_meta_on_node_uuid="2" CRM_meta_op_target_rc="7" CRM_meta_timeout="90000"  debug="true" host_list="192.168.122.80" name="connected"/>
++      </rsc_op>
++    </action_set>
++    <inputs/>
++  </synapse>
++  <synapse id="22" priority="1000000">
++    <action_set>
++      <pseudo_event id="63" operation="running" operation_key="Connectivity_running_0">
++        <attributes CRM_meta_clone_max="5" CRM_meta_clone_node_max="1" CRM_meta_globally_unique="false" CRM_meta_notify="false" CRM_meta_timeout="90000" />
++      </pseudo_event>
++    </action_set>
++    <inputs>
++      <trigger>
++        <rsc_op id="60" operation="start" operation_key="ping-1_start_0" internal_operation_key="ping-1:3_start_0" on_node="rhel8-2" on_node_uuid="2"/>
++      </trigger>
++      <trigger>
++        <pseudo_event id="62" operation="start" operation_key="Connectivity_start_0"/>
++      </trigger>
++    </inputs>
++  </synapse>
++  <synapse id="23">
++    <action_set>
++      <pseudo_event id="62" operation="start" operation_key="Connectivity_start_0">
++        <attributes CRM_meta_clone_max="5" CRM_meta_clone_node_max="1" CRM_meta_globally_unique="false" CRM_meta_notify="false" CRM_meta_timeout="90000" />
++      </pseudo_event>
++    </action_set>
++    <inputs>
++      <trigger>
++        <rsc_op id="27" operation="monitor" operation_key="ping-1_monitor_0" internal_operation_key="ping-1:3_monitor_0" on_node="rhel8-2" on_node_uuid="2"/>
++      </trigger>
++    </inputs>
++  </synapse>
++  <synapse id="24">
++    <action_set>
++      <rsc_op id="28" operation="monitor" operation_key="stateful-1_monitor_0" internal_operation_key="stateful-1:0_monitor_0" on_node="rhel8-2" on_node_uuid="2">
++        <primitive id="stateful-1" long-id="stateful-1:0" class="ocf" provider="pacemaker" type="Stateful"/>
++        <attributes CRM_meta_clone="0" CRM_meta_clone_max="5" CRM_meta_clone_node_max="1" CRM_meta_globally_unique="false" CRM_meta_master_max="1" CRM_meta_master_node_max="1" CRM_meta_notify="false" CRM_meta_on_node="rhel8-2" CRM_meta_on_node_uuid="2" CRM_meta_op_target_rc="7" CRM_meta_promoted_max="1" CRM_meta_promoted_node_max="1" CRM_meta_timeout="60000" />
++      </rsc_op>
++    </action_set>
++    <inputs/>
++  </synapse>
++  <synapse id="25">
++    <action_set>
++      <rsc_op id="29" operation="monitor" operation_key="r192.168.122.207_monitor_0" on_node="rhel8-2" on_node_uuid="2">
++        <primitive id="r192.168.122.207" class="ocf" provider="heartbeat" type="IPaddr2"/>
++        <attributes CRM_meta_on_node="rhel8-2" CRM_meta_on_node_uuid="2" CRM_meta_op_target_rc="7" CRM_meta_timeout="90000" cidr_netmask="32"  ip="192.168.122.207"/>
++      </rsc_op>
++    </action_set>
++    <inputs/>
++  </synapse>
++  <synapse id="26">
++    <action_set>
++      <rsc_op id="30" operation="monitor" operation_key="petulant_monitor_0" on_node="rhel8-2" on_node_uuid="2">
++        <primitive id="petulant" class="service" type="pacemaker-cts-dummyd@10"/>
++        <attributes CRM_meta_on_node="rhel8-2" CRM_meta_on_node_uuid="2" CRM_meta_op_target_rc="7" CRM_meta_timeout="90000" />
++      </rsc_op>
++    </action_set>
++    <inputs/>
++  </synapse>
++  <synapse id="27">
++    <action_set>
++      <rsc_op id="31" operation="monitor" operation_key="r192.168.122.208_monitor_0" on_node="rhel8-2" on_node_uuid="2">
++        <primitive id="r192.168.122.208" class="ocf" provider="heartbeat" type="IPaddr2"/>
++        <attributes CRM_meta_on_node="rhel8-2" CRM_meta_on_node_uuid="2" CRM_meta_op_target_rc="7" CRM_meta_timeout="90000" cidr_netmask="32"  ip="192.168.122.208"/>
++      </rsc_op>
++    </action_set>
++    <inputs/>
++  </synapse>
++  <synapse id="28">
++    <action_set>
++      <rsc_op id="32" operation="monitor" operation_key="lsb-dummy_monitor_0" on_node="rhel8-2" on_node_uuid="2">
++        <primitive id="lsb-dummy" class="lsb" type="LSBDummy"/>
++        <attributes CRM_meta_on_node="rhel8-2" CRM_meta_on_node_uuid="2" CRM_meta_op_target_rc="7" CRM_meta_timeout="90000" />
++      </rsc_op>
++    </action_set>
++    <inputs/>
++  </synapse>
++</transition_graph>
+diff --git a/cts/scheduler/scores/migration-intermediary-cleaned.scores b/cts/scheduler/scores/migration-intermediary-cleaned.scores
+new file mode 100644
+index 0000000..b3b8dff
+--- /dev/null
++++ b/cts/scheduler/scores/migration-intermediary-cleaned.scores
+@@ -0,0 +1,201 @@
++
++pcmk__clone_allocate: Connectivity allocation score on rhel8-1: 0
++pcmk__clone_allocate: Connectivity allocation score on rhel8-2: 0
++pcmk__clone_allocate: Connectivity allocation score on rhel8-3: 0
++pcmk__clone_allocate: Connectivity allocation score on rhel8-4: 0
++pcmk__clone_allocate: Connectivity allocation score on rhel8-5: 0
++pcmk__clone_allocate: ping-1:0 allocation score on rhel8-1: 0
++pcmk__clone_allocate: ping-1:0 allocation score on rhel8-2: 0
++pcmk__clone_allocate: ping-1:0 allocation score on rhel8-3: 1
++pcmk__clone_allocate: ping-1:0 allocation score on rhel8-4: 0
++pcmk__clone_allocate: ping-1:0 allocation score on rhel8-5: 0
++pcmk__clone_allocate: ping-1:1 allocation score on rhel8-1: 0
++pcmk__clone_allocate: ping-1:1 allocation score on rhel8-2: 0
++pcmk__clone_allocate: ping-1:1 allocation score on rhel8-3: 0
++pcmk__clone_allocate: ping-1:1 allocation score on rhel8-4: 1
++pcmk__clone_allocate: ping-1:1 allocation score on rhel8-5: 0
++pcmk__clone_allocate: ping-1:2 allocation score on rhel8-1: 0
++pcmk__clone_allocate: ping-1:2 allocation score on rhel8-2: 0
++pcmk__clone_allocate: ping-1:2 allocation score on rhel8-3: 0
++pcmk__clone_allocate: ping-1:2 allocation score on rhel8-4: 0
++pcmk__clone_allocate: ping-1:2 allocation score on rhel8-5: 1
++pcmk__clone_allocate: ping-1:3 allocation score on rhel8-1: 0
++pcmk__clone_allocate: ping-1:3 allocation score on rhel8-2: 0
++pcmk__clone_allocate: ping-1:3 allocation score on rhel8-3: 0
++pcmk__clone_allocate: ping-1:3 allocation score on rhel8-4: 0
++pcmk__clone_allocate: ping-1:3 allocation score on rhel8-5: 0
++pcmk__clone_allocate: ping-1:4 allocation score on rhel8-1: 0
++pcmk__clone_allocate: ping-1:4 allocation score on rhel8-2: 0
++pcmk__clone_allocate: ping-1:4 allocation score on rhel8-3: 0
++pcmk__clone_allocate: ping-1:4 allocation score on rhel8-4: 0
++pcmk__clone_allocate: ping-1:4 allocation score on rhel8-5: 0
++pcmk__clone_allocate: promotable-1 allocation score on rhel8-1: -INFINITY
++pcmk__clone_allocate: promotable-1 allocation score on rhel8-2: -INFINITY
++pcmk__clone_allocate: promotable-1 allocation score on rhel8-3: 0
++pcmk__clone_allocate: promotable-1 allocation score on rhel8-4: 0
++pcmk__clone_allocate: promotable-1 allocation score on rhel8-5: 0
++pcmk__clone_allocate: stateful-1:0 allocation score on rhel8-1: -INFINITY
++pcmk__clone_allocate: stateful-1:0 allocation score on rhel8-2: -INFINITY
++pcmk__clone_allocate: stateful-1:0 allocation score on rhel8-3: 11
++pcmk__clone_allocate: stateful-1:0 allocation score on rhel8-4: 0
++pcmk__clone_allocate: stateful-1:0 allocation score on rhel8-5: 0
++pcmk__clone_allocate: stateful-1:1 allocation score on rhel8-1: -INFINITY
++pcmk__clone_allocate: stateful-1:1 allocation score on rhel8-2: -INFINITY
++pcmk__clone_allocate: stateful-1:1 allocation score on rhel8-3: 0
++pcmk__clone_allocate: stateful-1:1 allocation score on rhel8-4: 6
++pcmk__clone_allocate: stateful-1:1 allocation score on rhel8-5: 0
++pcmk__clone_allocate: stateful-1:2 allocation score on rhel8-1: -INFINITY
++pcmk__clone_allocate: stateful-1:2 allocation score on rhel8-2: -INFINITY
++pcmk__clone_allocate: stateful-1:2 allocation score on rhel8-3: 0
++pcmk__clone_allocate: stateful-1:2 allocation score on rhel8-4: 0
++pcmk__clone_allocate: stateful-1:2 allocation score on rhel8-5: 6
++pcmk__clone_allocate: stateful-1:3 allocation score on rhel8-1: -INFINITY
++pcmk__clone_allocate: stateful-1:3 allocation score on rhel8-2: -INFINITY
++pcmk__clone_allocate: stateful-1:3 allocation score on rhel8-3: 0
++pcmk__clone_allocate: stateful-1:3 allocation score on rhel8-4: 0
++pcmk__clone_allocate: stateful-1:3 allocation score on rhel8-5: 0
++pcmk__clone_allocate: stateful-1:4 allocation score on rhel8-1: -INFINITY
++pcmk__clone_allocate: stateful-1:4 allocation score on rhel8-2: -INFINITY
++pcmk__clone_allocate: stateful-1:4 allocation score on rhel8-3: 10
++pcmk__clone_allocate: stateful-1:4 allocation score on rhel8-4: 5
++pcmk__clone_allocate: stateful-1:4 allocation score on rhel8-5: 5
++pcmk__group_assign: group-1 allocation score on rhel8-1: 0
++pcmk__group_assign: group-1 allocation score on rhel8-2: 0
++pcmk__group_assign: group-1 allocation score on rhel8-3: 0
++pcmk__group_assign: group-1 allocation score on rhel8-4: 0
++pcmk__group_assign: group-1 allocation score on rhel8-5: 0
++pcmk__group_assign: petulant allocation score on rhel8-1: 0
++pcmk__group_assign: petulant allocation score on rhel8-2: 0
++pcmk__group_assign: petulant allocation score on rhel8-3: 0
++pcmk__group_assign: petulant allocation score on rhel8-4: 0
++pcmk__group_assign: petulant allocation score on rhel8-5: 0
++pcmk__group_assign: r192.168.122.207 allocation score on rhel8-1: 0
++pcmk__group_assign: r192.168.122.207 allocation score on rhel8-2: 0
++pcmk__group_assign: r192.168.122.207 allocation score on rhel8-3: 0
++pcmk__group_assign: r192.168.122.207 allocation score on rhel8-4: 0
++pcmk__group_assign: r192.168.122.207 allocation score on rhel8-5: 0
++pcmk__group_assign: r192.168.122.208 allocation score on rhel8-1: 0
++pcmk__group_assign: r192.168.122.208 allocation score on rhel8-2: 0
++pcmk__group_assign: r192.168.122.208 allocation score on rhel8-3: 0
++pcmk__group_assign: r192.168.122.208 allocation score on rhel8-4: 0
++pcmk__group_assign: r192.168.122.208 allocation score on rhel8-5: 0
++pcmk__primitive_assign: Fencing allocation score on rhel8-1: 0
++pcmk__primitive_assign: Fencing allocation score on rhel8-2: 0
++pcmk__primitive_assign: Fencing allocation score on rhel8-3: 0
++pcmk__primitive_assign: Fencing allocation score on rhel8-4: 0
++pcmk__primitive_assign: Fencing allocation score on rhel8-5: 0
++pcmk__primitive_assign: FencingFail allocation score on rhel8-1: 0
++pcmk__primitive_assign: FencingFail allocation score on rhel8-2: 0
++pcmk__primitive_assign: FencingFail allocation score on rhel8-3: 0
++pcmk__primitive_assign: FencingFail allocation score on rhel8-4: 0
++pcmk__primitive_assign: FencingFail allocation score on rhel8-5: 0
++pcmk__primitive_assign: FencingPass allocation score on rhel8-1: 0
++pcmk__primitive_assign: FencingPass allocation score on rhel8-2: 0
++pcmk__primitive_assign: FencingPass allocation score on rhel8-3: 0
++pcmk__primitive_assign: FencingPass allocation score on rhel8-4: 0
++pcmk__primitive_assign: FencingPass allocation score on rhel8-5: 0
++pcmk__primitive_assign: lsb-dummy allocation score on rhel8-1: -INFINITY
++pcmk__primitive_assign: lsb-dummy allocation score on rhel8-2: -INFINITY
++pcmk__primitive_assign: lsb-dummy allocation score on rhel8-3: 0
++pcmk__primitive_assign: lsb-dummy allocation score on rhel8-4: -INFINITY
++pcmk__primitive_assign: lsb-dummy allocation score on rhel8-5: -INFINITY
++pcmk__primitive_assign: migrator allocation score on rhel8-1: 0
++pcmk__primitive_assign: migrator allocation score on rhel8-2: 0
++pcmk__primitive_assign: migrator allocation score on rhel8-3: 0
++pcmk__primitive_assign: migrator allocation score on rhel8-4: 0
++pcmk__primitive_assign: migrator allocation score on rhel8-5: 0
++pcmk__primitive_assign: petulant allocation score on rhel8-1: -INFINITY
++pcmk__primitive_assign: petulant allocation score on rhel8-2: -INFINITY
++pcmk__primitive_assign: petulant allocation score on rhel8-3: 0
++pcmk__primitive_assign: petulant allocation score on rhel8-4: -INFINITY
++pcmk__primitive_assign: petulant allocation score on rhel8-5: -INFINITY
++pcmk__primitive_assign: ping-1:0 allocation score on rhel8-1: -INFINITY
++pcmk__primitive_assign: ping-1:0 allocation score on rhel8-2: 0
++pcmk__primitive_assign: ping-1:0 allocation score on rhel8-3: 1
++pcmk__primitive_assign: ping-1:0 allocation score on rhel8-4: 0
++pcmk__primitive_assign: ping-1:0 allocation score on rhel8-5: 0
++pcmk__primitive_assign: ping-1:1 allocation score on rhel8-1: -INFINITY
++pcmk__primitive_assign: ping-1:1 allocation score on rhel8-2: 0
++pcmk__primitive_assign: ping-1:1 allocation score on rhel8-3: -INFINITY
++pcmk__primitive_assign: ping-1:1 allocation score on rhel8-4: 1
++pcmk__primitive_assign: ping-1:1 allocation score on rhel8-5: 0
++pcmk__primitive_assign: ping-1:2 allocation score on rhel8-1: -INFINITY
++pcmk__primitive_assign: ping-1:2 allocation score on rhel8-2: 0
++pcmk__primitive_assign: ping-1:2 allocation score on rhel8-3: -INFINITY
++pcmk__primitive_assign: ping-1:2 allocation score on rhel8-4: -INFINITY
++pcmk__primitive_assign: ping-1:2 allocation score on rhel8-5: 1
++pcmk__primitive_assign: ping-1:3 allocation score on rhel8-1: -INFINITY
++pcmk__primitive_assign: ping-1:3 allocation score on rhel8-2: 0
++pcmk__primitive_assign: ping-1:3 allocation score on rhel8-3: -INFINITY
++pcmk__primitive_assign: ping-1:3 allocation score on rhel8-4: -INFINITY
++pcmk__primitive_assign: ping-1:3 allocation score on rhel8-5: -INFINITY
++pcmk__primitive_assign: ping-1:4 allocation score on rhel8-1: -INFINITY
++pcmk__primitive_assign: ping-1:4 allocation score on rhel8-2: -INFINITY
++pcmk__primitive_assign: ping-1:4 allocation score on rhel8-3: -INFINITY
++pcmk__primitive_assign: ping-1:4 allocation score on rhel8-4: -INFINITY
++pcmk__primitive_assign: ping-1:4 allocation score on rhel8-5: -INFINITY
++pcmk__primitive_assign: r192.168.122.207 allocation score on rhel8-1: -INFINITY
++pcmk__primitive_assign: r192.168.122.207 allocation score on rhel8-2: -INFINITY
++pcmk__primitive_assign: r192.168.122.207 allocation score on rhel8-3: 11
++pcmk__primitive_assign: r192.168.122.207 allocation score on rhel8-4: -INFINITY
++pcmk__primitive_assign: r192.168.122.207 allocation score on rhel8-5: -INFINITY
++pcmk__primitive_assign: r192.168.122.208 allocation score on rhel8-1: -INFINITY
++pcmk__primitive_assign: r192.168.122.208 allocation score on rhel8-2: -INFINITY
++pcmk__primitive_assign: r192.168.122.208 allocation score on rhel8-3: 0
++pcmk__primitive_assign: r192.168.122.208 allocation score on rhel8-4: -INFINITY
++pcmk__primitive_assign: r192.168.122.208 allocation score on rhel8-5: -INFINITY
++pcmk__primitive_assign: rsc_rhel8-1 allocation score on rhel8-1: 100
++pcmk__primitive_assign: rsc_rhel8-1 allocation score on rhel8-2: 0
++pcmk__primitive_assign: rsc_rhel8-1 allocation score on rhel8-3: 0
++pcmk__primitive_assign: rsc_rhel8-1 allocation score on rhel8-4: 0
++pcmk__primitive_assign: rsc_rhel8-1 allocation score on rhel8-5: 0
++pcmk__primitive_assign: rsc_rhel8-2 allocation score on rhel8-1: 0
++pcmk__primitive_assign: rsc_rhel8-2 allocation score on rhel8-2: 100
++pcmk__primitive_assign: rsc_rhel8-2 allocation score on rhel8-3: 0
++pcmk__primitive_assign: rsc_rhel8-2 allocation score on rhel8-4: 0
++pcmk__primitive_assign: rsc_rhel8-2 allocation score on rhel8-5: 0
++pcmk__primitive_assign: rsc_rhel8-3 allocation score on rhel8-1: 0
++pcmk__primitive_assign: rsc_rhel8-3 allocation score on rhel8-2: 0
++pcmk__primitive_assign: rsc_rhel8-3 allocation score on rhel8-3: 100
++pcmk__primitive_assign: rsc_rhel8-3 allocation score on rhel8-4: 0
++pcmk__primitive_assign: rsc_rhel8-3 allocation score on rhel8-5: 0
++pcmk__primitive_assign: rsc_rhel8-4 allocation score on rhel8-1: 0
++pcmk__primitive_assign: rsc_rhel8-4 allocation score on rhel8-2: 0
++pcmk__primitive_assign: rsc_rhel8-4 allocation score on rhel8-3: 0
++pcmk__primitive_assign: rsc_rhel8-4 allocation score on rhel8-4: 100
++pcmk__primitive_assign: rsc_rhel8-4 allocation score on rhel8-5: 0
++pcmk__primitive_assign: rsc_rhel8-5 allocation score on rhel8-1: 0
++pcmk__primitive_assign: rsc_rhel8-5 allocation score on rhel8-2: 0
++pcmk__primitive_assign: rsc_rhel8-5 allocation score on rhel8-3: 0
++pcmk__primitive_assign: rsc_rhel8-5 allocation score on rhel8-4: 0
++pcmk__primitive_assign: rsc_rhel8-5 allocation score on rhel8-5: 100
++pcmk__primitive_assign: stateful-1:0 allocation score on rhel8-1: -INFINITY
++pcmk__primitive_assign: stateful-1:0 allocation score on rhel8-2: -INFINITY
++pcmk__primitive_assign: stateful-1:0 allocation score on rhel8-3: 11
++pcmk__primitive_assign: stateful-1:0 allocation score on rhel8-4: 0
++pcmk__primitive_assign: stateful-1:0 allocation score on rhel8-5: 0
++pcmk__primitive_assign: stateful-1:1 allocation score on rhel8-1: -INFINITY
++pcmk__primitive_assign: stateful-1:1 allocation score on rhel8-2: -INFINITY
++pcmk__primitive_assign: stateful-1:1 allocation score on rhel8-3: -INFINITY
++pcmk__primitive_assign: stateful-1:1 allocation score on rhel8-4: 6
++pcmk__primitive_assign: stateful-1:1 allocation score on rhel8-5: 0
++pcmk__primitive_assign: stateful-1:2 allocation score on rhel8-1: -INFINITY
++pcmk__primitive_assign: stateful-1:2 allocation score on rhel8-2: -INFINITY
++pcmk__primitive_assign: stateful-1:2 allocation score on rhel8-3: -INFINITY
++pcmk__primitive_assign: stateful-1:2 allocation score on rhel8-4: -INFINITY
++pcmk__primitive_assign: stateful-1:2 allocation score on rhel8-5: 6
++pcmk__primitive_assign: stateful-1:3 allocation score on rhel8-1: -INFINITY
++pcmk__primitive_assign: stateful-1:3 allocation score on rhel8-2: -INFINITY
++pcmk__primitive_assign: stateful-1:3 allocation score on rhel8-3: -INFINITY
++pcmk__primitive_assign: stateful-1:3 allocation score on rhel8-4: -INFINITY
++pcmk__primitive_assign: stateful-1:3 allocation score on rhel8-5: -INFINITY
++pcmk__primitive_assign: stateful-1:4 allocation score on rhel8-1: -INFINITY
++pcmk__primitive_assign: stateful-1:4 allocation score on rhel8-2: -INFINITY
++pcmk__primitive_assign: stateful-1:4 allocation score on rhel8-3: -INFINITY
++pcmk__primitive_assign: stateful-1:4 allocation score on rhel8-4: -INFINITY
++pcmk__primitive_assign: stateful-1:4 allocation score on rhel8-5: -INFINITY
++stateful-1:0 promotion score on rhel8-3: 10
++stateful-1:1 promotion score on rhel8-4: 5
++stateful-1:2 promotion score on rhel8-5: 5
++stateful-1:3 promotion score on none: 0
++stateful-1:4 promotion score on none: 0
+diff --git a/cts/scheduler/summary/migration-intermediary-cleaned.summary b/cts/scheduler/summary/migration-intermediary-cleaned.summary
+new file mode 100644
+index 0000000..5de1355
+--- /dev/null
++++ b/cts/scheduler/summary/migration-intermediary-cleaned.summary
+@@ -0,0 +1,94 @@
++Using the original execution date of: 2023-01-19 21:05:59Z
++Current cluster status:
++  * Node List:
++    * Online: [ rhel8-2 rhel8-3 rhel8-4 rhel8-5 ]
++    * OFFLINE: [ rhel8-1 ]
++
++  * Full List of Resources:
++    * Fencing	(stonith:fence_xvm):	 Started rhel8-3
++    * FencingPass	(stonith:fence_dummy):	 Started rhel8-4
++    * FencingFail	(stonith:fence_dummy):	 Started rhel8-5
++    * rsc_rhel8-1	(ocf:heartbeat:IPaddr2):	 Started rhel8-3
++    * rsc_rhel8-2	(ocf:heartbeat:IPaddr2):	 Started rhel8-4
++    * rsc_rhel8-3	(ocf:heartbeat:IPaddr2):	 Started rhel8-3
++    * rsc_rhel8-4	(ocf:heartbeat:IPaddr2):	 Started rhel8-4
++    * rsc_rhel8-5	(ocf:heartbeat:IPaddr2):	 Started rhel8-5
++    * migrator	(ocf:pacemaker:Dummy):	 Started [ rhel8-5 rhel8-2 ]
++    * Clone Set: Connectivity [ping-1]:
++      * Started: [ rhel8-3 rhel8-4 rhel8-5 ]
++      * Stopped: [ rhel8-1 rhel8-2 ]
++    * Clone Set: promotable-1 [stateful-1] (promotable):
++      * Promoted: [ rhel8-3 ]
++      * Unpromoted: [ rhel8-4 rhel8-5 ]
++      * Stopped: [ rhel8-1 rhel8-2 ]
++    * Resource Group: group-1:
++      * r192.168.122.207	(ocf:heartbeat:IPaddr2):	 Started rhel8-3
++      * petulant	(service:pacemaker-cts-dummyd@10):	 Started rhel8-3
++      * r192.168.122.208	(ocf:heartbeat:IPaddr2):	 Started rhel8-3
++    * lsb-dummy	(lsb:LSBDummy):	 Started rhel8-3
++
++Transition Summary:
++  * Move       rsc_rhel8-1     ( rhel8-3 -> rhel8-2 )
++  * Move       rsc_rhel8-2     ( rhel8-4 -> rhel8-2 )
++  * Restart    migrator        (            rhel8-5 )
++  * Start      ping-1:3        (            rhel8-2 )
++
++Executing Cluster Transition:
++  * Resource action: Fencing         monitor on rhel8-2
++  * Resource action: FencingPass     monitor on rhel8-2
++  * Resource action: FencingFail     monitor on rhel8-2
++  * Resource action: rsc_rhel8-1     stop on rhel8-3
++  * Resource action: rsc_rhel8-1     monitor on rhel8-2
++  * Resource action: rsc_rhel8-2     stop on rhel8-4
++  * Resource action: rsc_rhel8-2     monitor on rhel8-2
++  * Resource action: rsc_rhel8-3     monitor on rhel8-2
++  * Resource action: rsc_rhel8-4     monitor on rhel8-2
++  * Resource action: rsc_rhel8-5     monitor on rhel8-2
++  * Resource action: migrator        stop on rhel8-2
++  * Resource action: migrator        stop on rhel8-5
++  * Resource action: migrator        monitor on rhel8-2
++  * Resource action: ping-1          monitor on rhel8-2
++  * Pseudo action:   Connectivity_start_0
++  * Resource action: stateful-1      monitor on rhel8-2
++  * Resource action: r192.168.122.207 monitor on rhel8-2
++  * Resource action: petulant        monitor on rhel8-2
++  * Resource action: r192.168.122.208 monitor on rhel8-2
++  * Resource action: lsb-dummy       monitor on rhel8-2
++  * Resource action: rsc_rhel8-1     start on rhel8-2
++  * Resource action: rsc_rhel8-2     start on rhel8-2
++  * Resource action: migrator        start on rhel8-5
++  * Resource action: migrator        monitor=10000 on rhel8-5
++  * Resource action: ping-1          start on rhel8-2
++  * Pseudo action:   Connectivity_running_0
++  * Resource action: rsc_rhel8-1     monitor=5000 on rhel8-2
++  * Resource action: rsc_rhel8-2     monitor=5000 on rhel8-2
++  * Resource action: ping-1          monitor=60000 on rhel8-2
++Using the original execution date of: 2023-01-19 21:05:59Z
++
++Revised Cluster Status:
++  * Node List:
++    * Online: [ rhel8-2 rhel8-3 rhel8-4 rhel8-5 ]
++    * OFFLINE: [ rhel8-1 ]
++
++  * Full List of Resources:
++    * Fencing	(stonith:fence_xvm):	 Started rhel8-3
++    * FencingPass	(stonith:fence_dummy):	 Started rhel8-4
++    * FencingFail	(stonith:fence_dummy):	 Started rhel8-5
++    * rsc_rhel8-1	(ocf:heartbeat:IPaddr2):	 Started rhel8-2
++    * rsc_rhel8-2	(ocf:heartbeat:IPaddr2):	 Started rhel8-2
++    * rsc_rhel8-3	(ocf:heartbeat:IPaddr2):	 Started rhel8-3
++    * rsc_rhel8-4	(ocf:heartbeat:IPaddr2):	 Started rhel8-4
++    * rsc_rhel8-5	(ocf:heartbeat:IPaddr2):	 Started rhel8-5
++    * migrator	(ocf:pacemaker:Dummy):	 Started [ rhel8-2 rhel8-5 ]
++    * Clone Set: Connectivity [ping-1]:
++      * Started: [ rhel8-2 rhel8-3 rhel8-4 rhel8-5 ]
++      * Stopped: [ rhel8-1 ]
++    * Clone Set: promotable-1 [stateful-1] (promotable):
++      * Promoted: [ rhel8-3 ]
++      * Unpromoted: [ rhel8-4 rhel8-5 ]
++      * Stopped: [ rhel8-1 rhel8-2 ]
++    * Resource Group: group-1:
++      * r192.168.122.207	(ocf:heartbeat:IPaddr2):	 Started rhel8-3
++      * petulant	(service:pacemaker-cts-dummyd@10):	 Started rhel8-3
++      * r192.168.122.208	(ocf:heartbeat:IPaddr2):	 Started rhel8-3
++    * lsb-dummy	(lsb:LSBDummy):	 Started rhel8-3
+diff --git a/cts/scheduler/xml/migration-intermediary-cleaned.xml b/cts/scheduler/xml/migration-intermediary-cleaned.xml
+new file mode 100644
+index 0000000..bec7888
+--- /dev/null
++++ b/cts/scheduler/xml/migration-intermediary-cleaned.xml
+@@ -0,0 +1,513 @@
++<cib crm_feature_set="3.16.2" validate-with="pacemaker-3.7" epoch="61" num_updates="99" admin_epoch="0" cib-last-written="Thu Jan 19 15:04:53 2023" update-origin="rhel8-2" update-client="crm_resource" update-user="root" have-quorum="true" dc-uuid="3" execution-date="1674162359">
++  <!-- The essential conditions of this test are that a resource (migrator) has
++       live-migrated twice (from rhel8-1 to rhel8-2, then again to rhel8-5),
++       and the intermediary node has had its resource history cleaned. In this
++       situation, we should schedule a probe on the intermediary, and leave the
++       resource alone.
++    -->
++  <configuration>
++    <crm_config>
++      <cluster_property_set id="cib-bootstrap-options">
++        <nvpair id="cts-stonith-enabled" name="stonith-enabled" value="1"/>
++        <nvpair id="cts-start-failure-is-fatal" name="start-failure-is-fatal" value="false"/>
++        <nvpair id="cts-pe-input-series-max" name="pe-input-series-max" value="5000"/>
++        <nvpair id="cts-shutdown-escalation" name="shutdown-escalation" value="5min"/>
++        <nvpair id="cts-batch-limit" name="batch-limit" value="10"/>
++        <nvpair id="cts-dc-deadtime" name="dc-deadtime" value="5s"/>
++        <nvpair id="cts-no-quorum-policy" name="no-quorum-policy" value="stop"/>
++        <nvpair id="cib-bootstrap-options-have-watchdog" name="have-watchdog" value="false"/>
++        <nvpair id="cib-bootstrap-options-dc-version" name="dc-version" value="2.1.5-1181.70909c2b3b.git.el8-70909c2b3b"/>
++        <nvpair id="cib-bootstrap-options-cluster-infrastructure" name="cluster-infrastructure" value="corosync"/>
++        <nvpair id="cib-bootstrap-options-cluster-name" name="cluster-name" value="rhel8-lab"/>
++      </cluster_property_set>
++    </crm_config>
++    <nodes>
++      <node id="2" uname="rhel8-2">
++        <instance_attributes id="rhel8-2-1">
++          <nvpair id="rhel8-2-1-cts-fencing" name="cts-fencing" value="levels-and"/>
++        </instance_attributes>
++      </node>
++      <node id="5" uname="rhel8-5">
++        <instance_attributes id="rhel8-5-1">
++          <nvpair id="rhel8-5-1-cts-fencing" name="cts-fencing" value="levels-and"/>
++        </instance_attributes>
++      </node>
++      <node id="1" uname="rhel8-1"/>
++      <node id="3" uname="rhel8-3"/>
++      <node id="4" uname="rhel8-4">
++        <instance_attributes id="nodes-4">
++          <nvpair id="nodes-4-standby" name="standby" value="off"/>
++        </instance_attributes>
++      </node>
++    </nodes>
++    <resources>
++      <primitive id="Fencing" class="stonith" type="fence_xvm">
++        <meta_attributes id="Fencing-meta">
++          <nvpair id="Fencing-migration-threshold" name="migration-threshold" value="5"/>
++        </meta_attributes>
++        <instance_attributes id="Fencing-params">
++          <nvpair id="Fencing-pcmk_host_map" name="pcmk_host_map" value="remote-rhel8-1:rhel8-1;remote-rhel8-2:rhel8-2;remote-rhel8-3:rhel8-3;remote-rhel8-4:rhel8-4;remote-rhel8-5:rhel8-5;"/>
++          <nvpair id="Fencing-key_file" name="key_file" value="/etc/pacemaker/fence_xvm.key"/>
++          <nvpair id="Fencing-multicast_address" name="multicast_address" value="239.255.100.100"/>
++          <nvpair id="Fencing-pcmk_host_list" name="pcmk_host_list" value="rhel8-1 remote-rhel8-1 rhel8-2 remote-rhel8-2 rhel8-3 remote-rhel8-3 rhel8-4 remote-rhel8-4 rhel8-5 remote-rhel8-5"/>
++        </instance_attributes>
++        <operations>
++          <op id="Fencing-monitor-120s" name="monitor" interval="120s" timeout="120s"/>
++          <op id="Fencing-stop-0" name="stop" interval="0" timeout="60s"/>
++          <op id="Fencing-start-0" name="start" interval="0" timeout="60s"/>
++        </operations>
++      </primitive>
++      <primitive id="FencingPass" class="stonith" type="fence_dummy">
++        <instance_attributes id="FencingPass-params">
++          <nvpair id="FencingPass-pcmk_host_list" name="pcmk_host_list" value="rhel8-2 remote-rhel8-2 rhel8-3 remote-rhel8-3 rhel8-5 remote-rhel8-5"/>
++          <nvpair id="FencingPass-random_sleep_range" name="random_sleep_range" value="30"/>
++          <nvpair id="FencingPass-mode" name="mode" value="pass"/>
++        </instance_attributes>
++      </primitive>
++      <primitive id="FencingFail" class="stonith" type="fence_dummy">
++        <instance_attributes id="FencingFail-params">
++          <nvpair id="FencingFail-pcmk_host_list" name="pcmk_host_list" value="rhel8-4 remote-rhel8-4"/>
++          <nvpair id="FencingFail-random_sleep_range" name="random_sleep_range" value="30"/>
++          <nvpair id="FencingFail-mode" name="mode" value="fail"/>
++        </instance_attributes>
++      </primitive>
++      <primitive id="rsc_rhel8-1" class="ocf" type="IPaddr2" provider="heartbeat">
++        <instance_attributes id="rsc_rhel8-1-params">
++          <nvpair id="rsc_rhel8-1-ip" name="ip" value="192.168.122.202"/>
++          <nvpair id="rsc_rhel8-1-cidr_netmask" name="cidr_netmask" value="32"/>
++        </instance_attributes>
++        <operations>
++          <op id="rsc_rhel8-1-monitor-5s" name="monitor" interval="5s"/>
++        </operations>
++      </primitive>
++      <primitive id="rsc_rhel8-2" class="ocf" type="IPaddr2" provider="heartbeat">
++        <instance_attributes id="rsc_rhel8-2-params">
++          <nvpair id="rsc_rhel8-2-ip" name="ip" value="192.168.122.203"/>
++          <nvpair id="rsc_rhel8-2-cidr_netmask" name="cidr_netmask" value="32"/>
++        </instance_attributes>
++        <operations>
++          <op id="rsc_rhel8-2-monitor-5s" name="monitor" interval="5s"/>
++        </operations>
++      </primitive>
++      <primitive id="rsc_rhel8-3" class="ocf" type="IPaddr2" provider="heartbeat">
++        <instance_attributes id="rsc_rhel8-3-params">
++          <nvpair id="rsc_rhel8-3-ip" name="ip" value="192.168.122.204"/>
++          <nvpair id="rsc_rhel8-3-cidr_netmask" name="cidr_netmask" value="32"/>
++        </instance_attributes>
++        <operations>
++          <op id="rsc_rhel8-3-monitor-5s" name="monitor" interval="5s"/>
++        </operations>
++      </primitive>
++      <primitive id="rsc_rhel8-4" class="ocf" type="IPaddr2" provider="heartbeat">
++        <instance_attributes id="rsc_rhel8-4-params">
++          <nvpair id="rsc_rhel8-4-ip" name="ip" value="192.168.122.205"/>
++          <nvpair id="rsc_rhel8-4-cidr_netmask" name="cidr_netmask" value="32"/>
++        </instance_attributes>
++        <operations>
++          <op id="rsc_rhel8-4-monitor-5s" name="monitor" interval="5s"/>
++        </operations>
++      </primitive>
++      <primitive id="rsc_rhel8-5" class="ocf" type="IPaddr2" provider="heartbeat">
++        <instance_attributes id="rsc_rhel8-5-params">
++          <nvpair id="rsc_rhel8-5-ip" name="ip" value="192.168.122.206"/>
++          <nvpair id="rsc_rhel8-5-cidr_netmask" name="cidr_netmask" value="32"/>
++        </instance_attributes>
++        <operations>
++          <op id="rsc_rhel8-5-monitor-5s" name="monitor" interval="5s"/>
++        </operations>
++      </primitive>
++      <primitive id="migrator" class="ocf" type="Dummy" provider="pacemaker">
++        <meta_attributes id="migrator-meta">
++          <nvpair id="migrator-resource-stickiness" name="resource-stickiness" value="1"/>
++          <nvpair id="migrator-allow-migrate" name="allow-migrate" value="1"/>
++        </meta_attributes>
++        <instance_attributes id="migrator-params">
++          <nvpair id="migrator-passwd" name="passwd" value="whatever"/>
++        </instance_attributes>
++        <operations>
++          <op id="migrator-monitor-P10S" name="monitor" interval="P10S"/>
++        </operations>
++      </primitive>
++      <clone id="Connectivity">
++        <meta_attributes id="Connectivity-meta">
++          <nvpair id="Connectivity-globally-unique" name="globally-unique" value="false"/>
++        </meta_attributes>
++        <primitive id="ping-1" class="ocf" type="ping" provider="pacemaker">
++          <instance_attributes id="ping-1-params">
++            <nvpair id="ping-1-host_list" name="host_list" value="192.168.122.80"/>
++            <nvpair id="ping-1-name" name="name" value="connected"/>
++            <nvpair id="ping-1-debug" name="debug" value="true"/>
++          </instance_attributes>
++          <operations>
++            <op id="ping-1-monitor-60s" name="monitor" interval="60s"/>
++          </operations>
++        </primitive>
++      </clone>
++      <clone id="promotable-1">
++        <meta_attributes id="promotable-1-meta">
++          <nvpair id="promotable-1-promotable" name="promotable" value="true"/>
++          <nvpair id="promotable-1-clone-max" name="clone-max" value="5"/>
++          <nvpair id="promotable-1-clone-node-max" name="clone-node-max" value="1"/>
++          <nvpair id="promotable-1-promoted-max" name="promoted-max" value="1"/>
++          <nvpair id="promotable-1-promoted-node-max" name="promoted-node-max" value="1"/>
++        </meta_attributes>
++        <primitive id="stateful-1" class="ocf" type="Stateful" provider="pacemaker">
++          <operations>
++            <op id="stateful-1-monitor-15s" name="monitor" interval="15s" timeout="60s"/>
++            <op id="stateful-1-monitor-16s" name="monitor" interval="16s" timeout="60s" role="Promoted"/>
++          </operations>
++        </primitive>
++      </clone>
++      <group id="group-1">
++        <primitive id="r192.168.122.207" class="ocf" type="IPaddr2" provider="heartbeat">
++          <instance_attributes id="r192.168.122.207-params">
++            <nvpair id="r192.168.122.207-ip" name="ip" value="192.168.122.207"/>
++            <nvpair id="r192.168.122.207-cidr_netmask" name="cidr_netmask" value="32"/>
++          </instance_attributes>
++          <operations>
++            <op id="r192.168.122.207-monitor-5s" name="monitor" interval="5s"/>
++          </operations>
++        </primitive>
++        <primitive id="petulant" class="service" type="pacemaker-cts-dummyd@10">
++          <operations>
++            <op id="petulant-monitor-P10S" name="monitor" interval="P10S"/>
++          </operations>
++        </primitive>
++        <primitive id="r192.168.122.208" class="ocf" type="IPaddr2" provider="heartbeat">
++          <instance_attributes id="r192.168.122.208-params">
++            <nvpair id="r192.168.122.208-ip" name="ip" value="192.168.122.208"/>
++            <nvpair id="r192.168.122.208-cidr_netmask" name="cidr_netmask" value="32"/>
++          </instance_attributes>
++          <operations>
++            <op id="r192.168.122.208-monitor-5s" name="monitor" interval="5s"/>
++          </operations>
++        </primitive>
++      </group>
++      <primitive id="lsb-dummy" class="lsb" type="LSBDummy">
++        <operations>
++          <op id="lsb-dummy-monitor-5s" name="monitor" interval="5s"/>
++        </operations>
++      </primitive>
++    </resources>
++    <constraints>
++      <rsc_location id="prefer-rhel8-1" rsc="rsc_rhel8-1">
++        <rule id="prefer-rhel8-1-r" boolean-op="and" score="100">
++          <expression id="prefer-rhel8-1-e" attribute="#uname" operation="eq" value="rhel8-1"/>
++        </rule>
++      </rsc_location>
++      <rsc_location id="prefer-rhel8-2" rsc="rsc_rhel8-2">
++        <rule id="prefer-rhel8-2-r" boolean-op="and" score="100">
++          <expression id="prefer-rhel8-2-e" attribute="#uname" operation="eq" value="rhel8-2"/>
++        </rule>
++      </rsc_location>
++      <rsc_location id="prefer-rhel8-3" rsc="rsc_rhel8-3">
++        <rule id="prefer-rhel8-3-r" boolean-op="and" score="100">
++          <expression id="prefer-rhel8-3-e" attribute="#uname" operation="eq" value="rhel8-3"/>
++        </rule>
++      </rsc_location>
++      <rsc_location id="prefer-rhel8-4" rsc="rsc_rhel8-4">
++        <rule id="prefer-rhel8-4-r" boolean-op="and" score="100">
++          <expression id="prefer-rhel8-4-e" attribute="#uname" operation="eq" value="rhel8-4"/>
++        </rule>
++      </rsc_location>
++      <rsc_location id="prefer-rhel8-5" rsc="rsc_rhel8-5">
++        <rule id="prefer-rhel8-5-r" boolean-op="and" score="100">
++          <expression id="prefer-rhel8-5-e" attribute="#uname" operation="eq" value="rhel8-5"/>
++        </rule>
++      </rsc_location>
++      <rsc_location id="prefer-connected" rsc="promotable-1">
++        <rule id="connected" boolean-op="or" score="-INFINITY">
++          <expression id="m1-connected-1" attribute="connected" operation="lt" value="1"/>
++          <expression id="m1-connected-2" attribute="connected" operation="not_defined"/>
++        </rule>
++      </rsc_location>
++      <rsc_order id="group-1-after-promotable-1" first="promotable-1" then="group-1" kind="Mandatory" first-action="promote" then-action="start"/>
++      <rsc_colocation id="group-1-with-promotable-1" rsc="group-1" with-rsc="promotable-1" score="INFINITY" with-rsc-role="Promoted"/>
++      <rsc_order id="lsb-dummy-after-group-1" first="group-1" then="lsb-dummy" kind="Mandatory" first-action="start" then-action="start"/>
++      <rsc_colocation id="lsb-dummy-with-group-1" rsc="lsb-dummy" with-rsc="group-1" score="INFINITY"/>
++    </constraints>
++    <fencing-topology>
++      <fencing-level id="cts-remote-rhel8-2.1" target="remote-rhel8-2" index="1" devices="FencingPass,Fencing"/>
++      <fencing-level id="cts-rhel8-3.1" target="rhel8-3" index="1" devices="FencingPass,Fencing"/>
++      <fencing-level id="cts-remote-rhel8-3.1" target="remote-rhel8-3" index="1" devices="FencingPass,Fencing"/>
++      <fencing-level id="cts-rhel8-4.1" target="rhel8-4" index="1" devices="FencingFail"/>
++      <fencing-level id="cts-rhel8-4.2" target="rhel8-4" index="2" devices="Fencing"/>
++      <fencing-level id="cts-remote-rhel8-4.1" target="remote-rhel8-4" index="1" devices="FencingFail"/>
++      <fencing-level id="cts-remote-rhel8-4.2" target="remote-rhel8-4" index="2" devices="Fencing"/>
++      <fencing-level id="cts-remote-rhel8-5.1" target="remote-rhel8-5" index="1" devices="FencingPass,Fencing"/>
++      <fencing-level id="cts-fencing-levels-and.1" index="1" devices="FencingPass,Fencing" target-attribute="cts-fencing" target-value="levels-and"/>
++    </fencing-topology>
++    <op_defaults>
++      <meta_attributes id="cts-op_defaults-meta">
++        <nvpair id="cts-op_defaults-timeout" name="timeout" value="90s"/>
++      </meta_attributes>
++    </op_defaults>
++    <alerts>
++      <alert id="alert-1" path="/var/lib/pacemaker/notify.sh">
++        <recipient id="alert-1-recipient-1" value="/run/crm/alert.log"/>
++      </alert>
++    </alerts>
++  </configuration>
++  <status>
++    <node_state id="2" uname="rhel8-2" in_ccm="true" crmd="online" crm-debug-origin="do_state_transition" join="member" expected="member">
++      <lrm id="2">
++        <lrm_resources/>
++      </lrm>
++      <transient_attributes id="2">
++        <instance_attributes id="status-2">
++          <nvpair id="status-2-.feature-set" name="#feature-set" value="3.16.2"/>
++        </instance_attributes>
++      </transient_attributes>
++    </node_state>
++    <node_state id="3" uname="rhel8-3" in_ccm="true" crmd="online" crm-debug-origin="do_state_transition" join="member" expected="member">
++      <transient_attributes id="3">
++        <instance_attributes id="status-3">
++          <nvpair id="status-3-.feature-set" name="#feature-set" value="3.16.2"/>
++          <nvpair id="status-3-connected" name="connected" value="1"/>
++          <nvpair id="status-3-master-stateful-1" name="master-stateful-1" value="10"/>
++        </instance_attributes>
++      </transient_attributes>
++      <lrm id="3">
++        <lrm_resources>
++          <lrm_resource id="r192.168.122.207" type="IPaddr2" class="ocf" provider="heartbeat">
++            <lrm_rsc_op id="r192.168.122.207_last_0" operation_key="r192.168.122.207_start_0" operation="start" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.16.2" transition-key="58:0:0:9001a158-ff9a-47dd-a9f7-ae46bd457f3c" transition-magic="0:0;58:0:0:9001a158-ff9a-47dd-a9f7-ae46bd457f3c" exit-reason="" on_node="rhel8-3" call-id="136" rc-code="0" op-status="0" interval="0" last-rc-change="1674162336" exec-time="55" queue-time="0" op-digest="455141de0d85faf791392b0857f9dea1"/>
++            <lrm_rsc_op id="r192.168.122.207_monitor_5000" operation_key="r192.168.122.207_monitor_5000" operation="monitor" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.16.2" transition-key="59:0:0:9001a158-ff9a-47dd-a9f7-ae46bd457f3c" transition-magic="0:0;59:0:0:9001a158-ff9a-47dd-a9f7-ae46bd457f3c" exit-reason="" on_node="rhel8-3" call-id="138" rc-code="0" op-status="0" interval="5000" last-rc-change="1674162336" exec-time="37" queue-time="0" op-digest="e265b034f446ca5c724ff25c223f1078"/>
++          </lrm_resource>
++          <lrm_resource id="r192.168.122.208" type="IPaddr2" class="ocf" provider="heartbeat">
++            <lrm_rsc_op id="r192.168.122.208_last_0" operation_key="r192.168.122.208_start_0" operation="start" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.16.2" transition-key="62:0:0:9001a158-ff9a-47dd-a9f7-ae46bd457f3c" transition-magic="0:0;62:0:0:9001a158-ff9a-47dd-a9f7-ae46bd457f3c" exit-reason="" on_node="rhel8-3" call-id="144" rc-code="0" op-status="0" interval="0" last-rc-change="1674162346" exec-time="57" queue-time="0" op-digest="d62599e347d2c3a524c13e135846a774"/>
++            <lrm_rsc_op id="r192.168.122.208_monitor_5000" operation_key="r192.168.122.208_monitor_5000" operation="monitor" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.16.2" transition-key="63:0:0:9001a158-ff9a-47dd-a9f7-ae46bd457f3c" transition-magic="0:0;63:0:0:9001a158-ff9a-47dd-a9f7-ae46bd457f3c" exit-reason="" on_node="rhel8-3" call-id="146" rc-code="0" op-status="0" interval="5000" last-rc-change="1674162346" exec-time="43" queue-time="0" op-digest="10ff4c567237e36994b5c19f129f6a1e"/>
++          </lrm_resource>
++          <lrm_resource id="FencingFail" type="fence_dummy" class="stonith">
++            <lrm_rsc_op id="FencingFail_last_0" operation_key="FencingFail_stop_0" operation="stop" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="27:4:0:a2ac5181-c5aa-4331-8e3b-5881893d51c7" transition-magic="0:0;27:4:0:a2ac5181-c5aa-4331-8e3b-5881893d51c7" exit-reason="" on_node="rhel8-3" call-id="87" rc-code="0" op-status="0" interval="0" last-rc-change="1674162210" exec-time="0" queue-time="0" op-digest="d3c544c746b64c636fc7a3c0ebf35fdd"/>
++          </lrm_resource>
++          <lrm_resource id="lsb-dummy" type="LSBDummy" class="lsb">
++            <lrm_rsc_op id="lsb-dummy_last_0" operation_key="lsb-dummy_start_0" operation="start" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.16.2" transition-key="68:0:0:9001a158-ff9a-47dd-a9f7-ae46bd457f3c" transition-magic="0:0;68:0:0:9001a158-ff9a-47dd-a9f7-ae46bd457f3c" exit-reason="" on_node="rhel8-3" call-id="148" rc-code="0" op-status="0" interval="0" last-rc-change="1674162346" exec-time="12" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++            <lrm_rsc_op id="lsb-dummy_monitor_5000" operation_key="lsb-dummy_monitor_5000" operation="monitor" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.16.2" transition-key="69:0:0:9001a158-ff9a-47dd-a9f7-ae46bd457f3c" transition-magic="0:0;69:0:0:9001a158-ff9a-47dd-a9f7-ae46bd457f3c" exit-reason="" on_node="rhel8-3" call-id="150" rc-code="0" op-status="0" interval="5000" last-rc-change="1674162346" exec-time="12" queue-time="0" op-digest="8f6a313464b7f9e3a31cb448458b700e"/>
++          </lrm_resource>
++          <lrm_resource id="FencingPass" type="fence_dummy" class="stonith">
++            <lrm_rsc_op id="FencingPass_last_0" operation_key="FencingPass_stop_0" operation="stop" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="39:1:0:cf4a396e-f29c-4391-acd7-ee32f62dd8c7" transition-magic="0:0;39:1:0:cf4a396e-f29c-4391-acd7-ee32f62dd8c7" exit-reason="" on_node="rhel8-3" call-id="92" rc-code="0" op-status="0" interval="0" last-rc-change="1674162244" exec-time="0" queue-time="0" op-digest="147576adc6e9926464990826fe2d02ca"/>
++          </lrm_resource>
++          <lrm_resource id="Fencing" type="fence_xvm" class="stonith">
++            <lrm_rsc_op id="Fencing_last_0" operation_key="Fencing_start_0" operation="start" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="21:16:0:cf4a396e-f29c-4391-acd7-ee32f62dd8c7" transition-magic="0:0;21:16:0:cf4a396e-f29c-4391-acd7-ee32f62dd8c7" exit-reason="" on_node="rhel8-3" call-id="127" rc-code="0" op-status="0" interval="0" last-rc-change="1674162323" exec-time="37" queue-time="0" op-digest="bf974d77f2d4d33e434be1f89e362a52"/>
++            <lrm_rsc_op id="Fencing_monitor_120000" operation_key="Fencing_monitor_120000" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="22:16:0:cf4a396e-f29c-4391-acd7-ee32f62dd8c7" transition-magic="0:0;22:16:0:cf4a396e-f29c-4391-acd7-ee32f62dd8c7" exit-reason="" on_node="rhel8-3" call-id="129" rc-code="0" op-status="0" interval="120000" last-rc-change="1674162323" exec-time="52" queue-time="0" op-digest="24c9c9364f847dcb857d6fb4e1b4d3c8"/>
++          </lrm_resource>
++          <lrm_resource id="petulant" type="pacemaker-cts-dummyd@10" class="service">
++            <lrm_rsc_op id="petulant_last_0" operation_key="petulant_start_0" operation="start" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.16.2" transition-key="60:0:0:9001a158-ff9a-47dd-a9f7-ae46bd457f3c" transition-magic="0:0;60:0:0:9001a158-ff9a-47dd-a9f7-ae46bd457f3c" exit-reason="" on_node="rhel8-3" call-id="140" rc-code="0" op-status="0" interval="0" last-rc-change="1674162346" exec-time="10215" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++            <lrm_rsc_op id="petulant_monitor_10000" operation_key="petulant_monitor_10000" operation="monitor" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.16.2" transition-key="61:0:0:9001a158-ff9a-47dd-a9f7-ae46bd457f3c" transition-magic="0:0;61:0:0:9001a158-ff9a-47dd-a9f7-ae46bd457f3c" exit-reason="" on_node="rhel8-3" call-id="142" rc-code="0" op-status="0" interval="10000" last-rc-change="1674162346" exec-time="9" queue-time="0" op-digest="8f6a313464b7f9e3a31cb448458b700e"/>
++          </lrm_resource>
++          <lrm_resource id="ping-1" type="ping" class="ocf" provider="pacemaker">
++            <lrm_rsc_op id="ping-1_last_0" operation_key="ping-1_start_0" operation="start" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="62:9:0:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" transition-magic="0:0;62:9:0:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" exit-reason="" on_node="rhel8-3" call-id="56" rc-code="0" op-status="0" interval="0" last-rc-change="1674162118" exec-time="2139" queue-time="0" op-digest="a53fc9fb0118a43d3be0fceaf2348d38" op-force-restart="  use_fping failure_score options host_list multiplier name pidfile  " op-restart-digest="b04a44b98b5edbf24eae263f0e6ee0c3"/>
++            <lrm_rsc_op id="ping-1_monitor_60000" operation_key="ping-1_monitor_60000" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="63:9:0:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" transition-magic="0:0;63:9:0:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" exit-reason="" on_node="rhel8-3" call-id="75" rc-code="0" op-status="0" interval="60000" last-rc-change="1674162120" exec-time="2101" queue-time="0" op-digest="6b1eba5fe19d16fa21bf0501bbe5c0cd"/>
++          </lrm_resource>
++          <lrm_resource id="stateful-1" type="Stateful" class="ocf" provider="pacemaker">
++            <lrm_rsc_op id="stateful-1_last_0" operation_key="stateful-1_promote_0" operation="promote" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="43:19:0:cf4a396e-f29c-4391-acd7-ee32f62dd8c7" transition-magic="0:0;43:19:0:cf4a396e-f29c-4391-acd7-ee32f62dd8c7" exit-reason="" on_node="rhel8-3" call-id="131" rc-code="0" op-status="0" interval="0" last-rc-change="1674162334" exec-time="30" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-force-restart="  state  " op-restart-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++            <lrm_rsc_op id="stateful-1_monitor_16000" operation_key="stateful-1_monitor_16000" operation="monitor" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.16.2" transition-key="45:0:8:9001a158-ff9a-47dd-a9f7-ae46bd457f3c" transition-magic="0:8;45:0:8:9001a158-ff9a-47dd-a9f7-ae46bd457f3c" exit-reason="" on_node="rhel8-3" call-id="134" rc-code="8" op-status="0" interval="16000" last-rc-change="1674162336" exec-time="16" queue-time="0" op-digest="873ed4f07792aa8ff18f3254244675ea"/>
++          </lrm_resource>
++          <lrm_resource id="rsc_rhel8-1" type="IPaddr2" class="ocf" provider="heartbeat">
++            <lrm_rsc_op id="rsc_rhel8-1_last_0" operation_key="rsc_rhel8-1_start_0" operation="start" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="34:12:0:cf4a396e-f29c-4391-acd7-ee32f62dd8c7" transition-magic="0:0;34:12:0:cf4a396e-f29c-4391-acd7-ee32f62dd8c7" exit-reason="" on_node="rhel8-3" call-id="116" rc-code="0" op-status="0" interval="0" last-rc-change="1674162294" exec-time="62" queue-time="0" op-digest="75df1567eb9457f8f3c4486bbf875846"/>
++            <lrm_rsc_op id="rsc_rhel8-1_monitor_5000" operation_key="rsc_rhel8-1_monitor_5000" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="35:12:0:cf4a396e-f29c-4391-acd7-ee32f62dd8c7" transition-magic="0:0;35:12:0:cf4a396e-f29c-4391-acd7-ee32f62dd8c7" exit-reason="" on_node="rhel8-3" call-id="120" rc-code="0" op-status="0" interval="5000" last-rc-change="1674162294" exec-time="47" queue-time="0" op-digest="045c3d6f5e29b94dc4e3fbfd6c2c0693"/>
++          </lrm_resource>
++          <lrm_resource id="rsc_rhel8-2" type="IPaddr2" class="ocf" provider="heartbeat">
++            <lrm_rsc_op id="rsc_rhel8-2_last_0" operation_key="rsc_rhel8-2_monitor_0" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="24:9:7:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" transition-magic="0:7;24:9:7:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" exit-reason="" on_node="rhel8-3" call-id="26" rc-code="7" op-status="0" interval="0" last-rc-change="1674162117" exec-time="86" queue-time="0" op-digest="ced6f8a1916ebbe555cedafe69985e63"/>
++          </lrm_resource>
++          <lrm_resource id="rsc_rhel8-3" type="IPaddr2" class="ocf" provider="heartbeat">
++            <lrm_rsc_op id="rsc_rhel8-3_last_0" operation_key="rsc_rhel8-3_start_0" operation="start" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="46:9:0:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" transition-magic="0:0;46:9:0:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" exit-reason="" on_node="rhel8-3" call-id="39" rc-code="0" op-status="0" interval="0" last-rc-change="1674162118" exec-time="166" queue-time="0" op-digest="3a5f279381f73d4be861526d72bb17a3"/>
++            <lrm_rsc_op id="rsc_rhel8-3_monitor_5000" operation_key="rsc_rhel8-3_monitor_5000" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="47:9:0:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" transition-magic="0:0;47:9:0:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" exit-reason="" on_node="rhel8-3" call-id="50" rc-code="0" op-status="0" interval="5000" last-rc-change="1674162118" exec-time="137" queue-time="0" op-digest="a1b2eeaa8d23ff33ffebd44f45931017"/>
++          </lrm_resource>
++          <lrm_resource id="rsc_rhel8-4" type="IPaddr2" class="ocf" provider="heartbeat">
++            <lrm_rsc_op id="rsc_rhel8-4_last_0" operation_key="rsc_rhel8-4_monitor_0" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="26:9:7:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" transition-magic="0:7;26:9:7:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" exit-reason="" on_node="rhel8-3" call-id="34" rc-code="7" op-status="0" interval="0" last-rc-change="1674162118" exec-time="76" queue-time="0" op-digest="b4b6b30b67042d5bc4c1735b0df27dc0"/>
++          </lrm_resource>
++          <lrm_resource id="rsc_rhel8-5" type="IPaddr2" class="ocf" provider="heartbeat">
++            <lrm_rsc_op id="rsc_rhel8-5_last_0" operation_key="rsc_rhel8-5_monitor_0" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="27:9:7:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" transition-magic="0:7;27:9:7:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" exit-reason="" on_node="rhel8-3" call-id="38" rc-code="7" op-status="0" interval="0" last-rc-change="1674162118" exec-time="87" queue-time="0" op-digest="aca525581410dfda70831f2846b9807d"/>
++          </lrm_resource>
++          <lrm_resource id="migrator" type="Dummy" class="ocf" provider="pacemaker">
++            <lrm_rsc_op id="migrator_last_0" operation_key="migrator_monitor_0" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="28:9:7:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" transition-magic="0:7;28:9:7:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" exit-reason="" on_node="rhel8-3" call-id="43" rc-code="7" op-status="0" interval="0" last-rc-change="1674162118" exec-time="21" queue-time="0" op-digest="5de129d7fe42dbcfe537f2c63b1921b6" op-force-restart="  state  " op-restart-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-secure-params="  passwd  " op-secure-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++          </lrm_resource>
++        </lrm_resources>
++      </lrm>
++    </node_state>
++    <node_state id="4" uname="rhel8-4" in_ccm="true" crmd="online" crm-debug-origin="do_state_transition" join="member" expected="member">
++      <transient_attributes id="4">
++        <instance_attributes id="status-4">
++          <nvpair id="status-4-.feature-set" name="#feature-set" value="3.16.2"/>
++          <nvpair id="status-4-connected" name="connected" value="1"/>
++          <nvpair id="status-4-master-stateful-1" name="master-stateful-1" value="5"/>
++        </instance_attributes>
++      </transient_attributes>
++      <lrm id="4">
++        <lrm_resources>
++          <lrm_resource id="r192.168.122.207" type="IPaddr2" class="ocf" provider="heartbeat">
++            <lrm_rsc_op id="r192.168.122.207_last_0" operation_key="r192.168.122.207_monitor_0" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="31:15:7:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" transition-magic="0:7;31:15:7:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" exit-reason="" on_node="rhel8-4" call-id="60" rc-code="7" op-status="0" interval="0" last-rc-change="1674162147" exec-time="87" queue-time="0" op-digest="455141de0d85faf791392b0857f9dea1"/>
++          </lrm_resource>
++          <lrm_resource id="r192.168.122.208" type="IPaddr2" class="ocf" provider="heartbeat">
++            <lrm_rsc_op id="r192.168.122.208_last_0" operation_key="r192.168.122.208_monitor_0" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="33:15:7:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" transition-magic="0:7;33:15:7:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" exit-reason="" on_node="rhel8-4" call-id="69" rc-code="7" op-status="0" interval="0" last-rc-change="1674162148" exec-time="45" queue-time="0" op-digest="d62599e347d2c3a524c13e135846a774"/>
++          </lrm_resource>
++          <lrm_resource id="FencingFail" type="fence_dummy" class="stonith">
++            <lrm_rsc_op id="FencingFail_last_0" operation_key="FencingFail_stop_0" operation="stop" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="41:1:0:cf4a396e-f29c-4391-acd7-ee32f62dd8c7" transition-magic="0:0;41:1:0:cf4a396e-f29c-4391-acd7-ee32f62dd8c7" exit-reason="" on_node="rhel8-4" call-id="94" rc-code="0" op-status="0" interval="0" last-rc-change="1674162244" exec-time="0" queue-time="0" op-digest="d3c544c746b64c636fc7a3c0ebf35fdd"/>
++          </lrm_resource>
++          <lrm_resource id="lsb-dummy" type="LSBDummy" class="lsb">
++            <lrm_rsc_op id="lsb-dummy_last_0" operation_key="lsb-dummy_monitor_0" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="34:15:7:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" transition-magic="0:7;34:15:7:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" exit-reason="" on_node="rhel8-4" call-id="73" rc-code="7" op-status="0" interval="0" last-rc-change="1674162148" exec-time="13" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++          </lrm_resource>
++          <lrm_resource id="FencingPass" type="fence_dummy" class="stonith">
++            <lrm_rsc_op id="FencingPass_last_0" operation_key="FencingPass_start_0" operation="start" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="40:1:0:cf4a396e-f29c-4391-acd7-ee32f62dd8c7" transition-magic="0:0;40:1:0:cf4a396e-f29c-4391-acd7-ee32f62dd8c7" exit-reason="" on_node="rhel8-4" call-id="97" rc-code="0" op-status="0" interval="0" last-rc-change="1674162244" exec-time="28121" queue-time="0" op-digest="147576adc6e9926464990826fe2d02ca"/>
++          </lrm_resource>
++          <lrm_resource id="Fencing" type="fence_xvm" class="stonith">
++            <lrm_rsc_op id="Fencing_last_0" operation_key="Fencing_monitor_0" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="20:15:7:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" transition-magic="0:7;20:15:7:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" exit-reason="" on_node="rhel8-4" call-id="13" rc-code="7" op-status="0" interval="0" last-rc-change="1674162147" exec-time="3" queue-time="0" op-digest="bf974d77f2d4d33e434be1f89e362a52"/>
++          </lrm_resource>
++          <lrm_resource id="petulant" type="pacemaker-cts-dummyd@10" class="service">
++            <lrm_rsc_op id="petulant_last_0" operation_key="petulant_monitor_0" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="32:15:7:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" transition-magic="0:7;32:15:7:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" exit-reason="" on_node="rhel8-4" call-id="65" rc-code="7" op-status="0" interval="0" last-rc-change="1674162148" exec-time="25" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++          </lrm_resource>
++          <lrm_resource id="ping-1" type="ping" class="ocf" provider="pacemaker">
++            <lrm_rsc_op id="ping-1_last_0" operation_key="ping-1_start_0" operation="start" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="62:15:0:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" transition-magic="0:0;62:15:0:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" exit-reason="" on_node="rhel8-4" call-id="61" rc-code="0" op-status="0" interval="0" last-rc-change="1674162147" exec-time="2093" queue-time="0" op-digest="a53fc9fb0118a43d3be0fceaf2348d38" op-force-restart="  use_fping failure_score options host_list multiplier name pidfile  " op-restart-digest="b04a44b98b5edbf24eae263f0e6ee0c3"/>
++            <lrm_rsc_op id="ping-1_monitor_60000" operation_key="ping-1_monitor_60000" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="63:15:0:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" transition-magic="0:0;63:15:0:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" exit-reason="" on_node="rhel8-4" call-id="75" rc-code="0" op-status="0" interval="60000" last-rc-change="1674162150" exec-time="2104" queue-time="0" op-digest="6b1eba5fe19d16fa21bf0501bbe5c0cd"/>
++          </lrm_resource>
++          <lrm_resource id="stateful-1" type="Stateful" class="ocf" provider="pacemaker">
++            <lrm_rsc_op id="stateful-1_last_0" operation_key="stateful-1_start_0" operation="start" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="63:16:0:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" transition-magic="0:0;63:16:0:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" exit-reason="" on_node="rhel8-4" call-id="77" rc-code="0" op-status="0" interval="0" last-rc-change="1674162155" exec-time="46" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-force-restart="  state  " op-restart-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++            <lrm_rsc_op id="stateful-1_monitor_15000" operation_key="stateful-1_monitor_15000" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="61:17:0:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" transition-magic="0:0;61:17:0:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" exit-reason="" on_node="rhel8-4" call-id="79" rc-code="0" op-status="0" interval="15000" last-rc-change="1674162155" exec-time="22" queue-time="0" op-digest="873ed4f07792aa8ff18f3254244675ea"/>
++          </lrm_resource>
++          <lrm_resource id="rsc_rhel8-1" type="IPaddr2" class="ocf" provider="heartbeat">
++            <lrm_rsc_op id="rsc_rhel8-1_last_0" operation_key="rsc_rhel8-1_monitor_0" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="23:15:7:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" transition-magic="0:7;23:15:7:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" exit-reason="" on_node="rhel8-4" call-id="22" rc-code="7" op-status="0" interval="0" last-rc-change="1674162147" exec-time="78" queue-time="0" op-digest="75df1567eb9457f8f3c4486bbf875846"/>
++          </lrm_resource>
++          <lrm_resource id="rsc_rhel8-2" type="IPaddr2" class="ocf" provider="heartbeat">
++            <lrm_rsc_op id="rsc_rhel8-2_last_0" operation_key="rsc_rhel8-2_start_0" operation="start" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="30:16:0:cf4a396e-f29c-4391-acd7-ee32f62dd8c7" transition-magic="0:0;30:16:0:cf4a396e-f29c-4391-acd7-ee32f62dd8c7" exit-reason="" on_node="rhel8-4" call-id="104" rc-code="0" op-status="0" interval="0" last-rc-change="1674162323" exec-time="107" queue-time="0" op-digest="ced6f8a1916ebbe555cedafe69985e63"/>
++            <lrm_rsc_op id="rsc_rhel8-2_monitor_5000" operation_key="rsc_rhel8-2_monitor_5000" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="31:16:0:cf4a396e-f29c-4391-acd7-ee32f62dd8c7" transition-magic="0:0;31:16:0:cf4a396e-f29c-4391-acd7-ee32f62dd8c7" exit-reason="" on_node="rhel8-4" call-id="106" rc-code="0" op-status="0" interval="5000" last-rc-change="1674162324" exec-time="80" queue-time="0" op-digest="4385e7bd76844b9bc880a410b317b8ab"/>
++          </lrm_resource>
++          <lrm_resource id="rsc_rhel8-3" type="IPaddr2" class="ocf" provider="heartbeat">
++            <lrm_rsc_op id="rsc_rhel8-3_last_0" operation_key="rsc_rhel8-3_monitor_0" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="25:15:7:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" transition-magic="0:7;25:15:7:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" exit-reason="" on_node="rhel8-4" call-id="30" rc-code="7" op-status="0" interval="0" last-rc-change="1674162147" exec-time="86" queue-time="0" op-digest="3a5f279381f73d4be861526d72bb17a3"/>
++          </lrm_resource>
++          <lrm_resource id="rsc_rhel8-4" type="IPaddr2" class="ocf" provider="heartbeat">
++            <lrm_rsc_op id="rsc_rhel8-4_last_0" operation_key="rsc_rhel8-4_start_0" operation="start" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="48:15:0:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" transition-magic="0:0;48:15:0:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" exit-reason="" on_node="rhel8-4" call-id="39" rc-code="0" op-status="0" interval="0" last-rc-change="1674162147" exec-time="123" queue-time="0" op-digest="b4b6b30b67042d5bc4c1735b0df27dc0"/>
++            <lrm_rsc_op id="rsc_rhel8-4_monitor_5000" operation_key="rsc_rhel8-4_monitor_5000" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="49:15:0:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" transition-magic="0:0;49:15:0:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" exit-reason="" on_node="rhel8-4" call-id="49" rc-code="0" op-status="0" interval="5000" last-rc-change="1674162147" exec-time="132" queue-time="0" op-digest="8ee22149973acaa2c4a338cde274ee1b"/>
++          </lrm_resource>
++          <lrm_resource id="rsc_rhel8-5" type="IPaddr2" class="ocf" provider="heartbeat">
++            <lrm_rsc_op id="rsc_rhel8-5_last_0" operation_key="rsc_rhel8-5_stop_0" operation="stop" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="49:1:0:a2ac5181-c5aa-4331-8e3b-5881893d51c7" transition-magic="0:0;49:1:0:a2ac5181-c5aa-4331-8e3b-5881893d51c7" exit-reason="" on_node="rhel8-4" call-id="88" rc-code="0" op-status="0" interval="0" last-rc-change="1674162173" exec-time="76" queue-time="0" op-digest="aca525581410dfda70831f2846b9807d"/>
++          </lrm_resource>
++          <lrm_resource id="migrator" type="Dummy" class="ocf" provider="pacemaker">
++            <lrm_rsc_op id="migrator_last_0" operation_key="migrator_monitor_0" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="28:15:7:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" transition-magic="0:7;28:15:7:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" exit-reason="" on_node="rhel8-4" call-id="43" rc-code="7" op-status="0" interval="0" last-rc-change="1674162147" exec-time="17" queue-time="0" op-digest="5de129d7fe42dbcfe537f2c63b1921b6" op-force-restart="  state  " op-restart-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-secure-params="  passwd  " op-secure-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++          </lrm_resource>
++        </lrm_resources>
++      </lrm>
++    </node_state>
++    <node_state id="5" uname="rhel8-5" in_ccm="true" crmd="online" crm-debug-origin="do_state_transition" join="member" expected="member">
++      <transient_attributes id="5">
++        <instance_attributes id="status-5">
++          <nvpair id="status-5-.feature-set" name="#feature-set" value="3.16.2"/>
++          <nvpair id="status-5-connected" name="connected" value="1"/>
++          <nvpair id="status-5-master-stateful-1" name="master-stateful-1" value="5"/>
++        </instance_attributes>
++      </transient_attributes>
++      <lrm id="5">
++        <lrm_resources>
++          <lrm_resource id="r192.168.122.207" type="IPaddr2" class="ocf" provider="heartbeat">
++            <lrm_rsc_op id="r192.168.122.207_last_0" operation_key="r192.168.122.207_monitor_0" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="31:1:7:a2ac5181-c5aa-4331-8e3b-5881893d51c7" transition-magic="0:7;31:1:7:a2ac5181-c5aa-4331-8e3b-5881893d51c7" exit-reason="" on_node="rhel8-5" call-id="63" rc-code="7" op-status="0" interval="0" last-rc-change="1674162178" exec-time="44" queue-time="0" op-digest="455141de0d85faf791392b0857f9dea1"/>
++          </lrm_resource>
++          <lrm_resource id="r192.168.122.208" type="IPaddr2" class="ocf" provider="heartbeat">
++            <lrm_rsc_op id="r192.168.122.208_last_0" operation_key="r192.168.122.208_monitor_0" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="33:1:7:a2ac5181-c5aa-4331-8e3b-5881893d51c7" transition-magic="0:7;33:1:7:a2ac5181-c5aa-4331-8e3b-5881893d51c7" exit-reason="" on_node="rhel8-5" call-id="71" rc-code="7" op-status="0" interval="0" last-rc-change="1674162178" exec-time="47" queue-time="0" op-digest="d62599e347d2c3a524c13e135846a774"/>
++          </lrm_resource>
++          <lrm_resource id="FencingFail" type="fence_dummy" class="stonith">
++            <lrm_rsc_op id="FencingFail_last_0" operation_key="FencingFail_start_0" operation="start" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="42:1:0:cf4a396e-f29c-4391-acd7-ee32f62dd8c7" transition-magic="0:0;42:1:0:cf4a396e-f29c-4391-acd7-ee32f62dd8c7" exit-reason="" on_node="rhel8-5" call-id="86" rc-code="0" op-status="0" interval="0" last-rc-change="1674162244" exec-time="8094" queue-time="0" op-digest="d3c544c746b64c636fc7a3c0ebf35fdd"/>
++          </lrm_resource>
++          <lrm_resource id="lsb-dummy" type="LSBDummy" class="lsb">
++            <lrm_rsc_op id="lsb-dummy_last_0" operation_key="lsb-dummy_monitor_0" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="34:1:7:a2ac5181-c5aa-4331-8e3b-5881893d51c7" transition-magic="0:7;34:1:7:a2ac5181-c5aa-4331-8e3b-5881893d51c7" exit-reason="" on_node="rhel8-5" call-id="75" rc-code="7" op-status="0" interval="0" last-rc-change="1674162178" exec-time="12" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++          </lrm_resource>
++          <lrm_resource id="FencingPass" type="fence_dummy" class="stonith">
++            <lrm_rsc_op id="FencingPass_last_0" operation_key="FencingPass_monitor_0" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="21:1:7:a2ac5181-c5aa-4331-8e3b-5881893d51c7" transition-magic="0:7;21:1:7:a2ac5181-c5aa-4331-8e3b-5881893d51c7" exit-reason="" on_node="rhel8-5" call-id="13" rc-code="7" op-status="0" interval="0" last-rc-change="1674162173" exec-time="0" queue-time="0" op-digest="147576adc6e9926464990826fe2d02ca"/>
++          </lrm_resource>
++          <lrm_resource id="Fencing" type="fence_xvm" class="stonith">
++            <lrm_rsc_op id="Fencing_last_0" operation_key="Fencing_monitor_0" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="20:1:7:a2ac5181-c5aa-4331-8e3b-5881893d51c7" transition-magic="0:7;20:1:7:a2ac5181-c5aa-4331-8e3b-5881893d51c7" exit-reason="" on_node="rhel8-5" call-id="9" rc-code="7" op-status="0" interval="0" last-rc-change="1674162173" exec-time="0" queue-time="0" op-digest="bf974d77f2d4d33e434be1f89e362a52"/>
++          </lrm_resource>
++          <lrm_resource id="petulant" type="pacemaker-cts-dummyd@10" class="service">
++            <lrm_rsc_op id="petulant_last_0" operation_key="petulant_monitor_0" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="32:1:7:a2ac5181-c5aa-4331-8e3b-5881893d51c7" transition-magic="0:7;32:1:7:a2ac5181-c5aa-4331-8e3b-5881893d51c7" exit-reason="" on_node="rhel8-5" call-id="67" rc-code="7" op-status="0" interval="0" last-rc-change="1674162178" exec-time="26" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++          </lrm_resource>
++          <lrm_resource id="ping-1" type="ping" class="ocf" provider="pacemaker">
++            <lrm_rsc_op id="ping-1_last_0" operation_key="ping-1_start_0" operation="start" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="62:1:0:a2ac5181-c5aa-4331-8e3b-5881893d51c7" transition-magic="0:0;62:1:0:a2ac5181-c5aa-4331-8e3b-5881893d51c7" exit-reason="" on_node="rhel8-5" call-id="56" rc-code="0" op-status="0" interval="0" last-rc-change="1674162173" exec-time="2078" queue-time="0" op-digest="a53fc9fb0118a43d3be0fceaf2348d38" op-force-restart="  use_fping failure_score options host_list multiplier name pidfile  " op-restart-digest="b04a44b98b5edbf24eae263f0e6ee0c3"/>
++            <lrm_rsc_op id="ping-1_monitor_60000" operation_key="ping-1_monitor_60000" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="63:1:0:a2ac5181-c5aa-4331-8e3b-5881893d51c7" transition-magic="0:0;63:1:0:a2ac5181-c5aa-4331-8e3b-5881893d51c7" exit-reason="" on_node="rhel8-5" call-id="58" rc-code="0" op-status="0" interval="60000" last-rc-change="1674162176" exec-time="2112" queue-time="0" op-digest="6b1eba5fe19d16fa21bf0501bbe5c0cd"/>
++          </lrm_resource>
++          <lrm_resource id="stateful-1" type="Stateful" class="ocf" provider="pacemaker">
++            <lrm_rsc_op id="stateful-1_last_0" operation_key="stateful-1_start_0" operation="start" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="63:2:0:a2ac5181-c5aa-4331-8e3b-5881893d51c7" transition-magic="0:0;63:2:0:a2ac5181-c5aa-4331-8e3b-5881893d51c7" exit-reason="" on_node="rhel8-5" call-id="76" rc-code="0" op-status="0" interval="0" last-rc-change="1674162181" exec-time="49" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-force-restart="  state  " op-restart-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++            <lrm_rsc_op id="stateful-1_monitor_15000" operation_key="stateful-1_monitor_15000" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="63:3:0:a2ac5181-c5aa-4331-8e3b-5881893d51c7" transition-magic="0:0;63:3:0:a2ac5181-c5aa-4331-8e3b-5881893d51c7" exit-reason="" on_node="rhel8-5" call-id="78" rc-code="0" op-status="0" interval="15000" last-rc-change="1674162181" exec-time="24" queue-time="0" op-digest="873ed4f07792aa8ff18f3254244675ea"/>
++          </lrm_resource>
++          <lrm_resource id="rsc_rhel8-1" type="IPaddr2" class="ocf" provider="heartbeat">
++            <lrm_rsc_op id="rsc_rhel8-1_last_0" operation_key="rsc_rhel8-1_stop_0" operation="stop" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="38:2:0:cf4a396e-f29c-4391-acd7-ee32f62dd8c7" transition-magic="0:0;38:2:0:cf4a396e-f29c-4391-acd7-ee32f62dd8c7" exit-reason="" on_node="rhel8-5" call-id="89" rc-code="0" op-status="0" interval="0" last-rc-change="1674162273" exec-time="54" queue-time="0" op-digest="75df1567eb9457f8f3c4486bbf875846"/>
++          </lrm_resource>
++          <lrm_resource id="rsc_rhel8-2" type="IPaddr2" class="ocf" provider="heartbeat">
++            <lrm_rsc_op id="rsc_rhel8-2_last_0" operation_key="rsc_rhel8-2_monitor_0" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="24:1:7:a2ac5181-c5aa-4331-8e3b-5881893d51c7" transition-magic="0:7;24:1:7:a2ac5181-c5aa-4331-8e3b-5881893d51c7" exit-reason="" on_node="rhel8-5" call-id="25" rc-code="7" op-status="0" interval="0" last-rc-change="1674162173" exec-time="43" queue-time="0" op-digest="ced6f8a1916ebbe555cedafe69985e63"/>
++          </lrm_resource>
++          <lrm_resource id="rsc_rhel8-3" type="IPaddr2" class="ocf" provider="heartbeat">
++            <lrm_rsc_op id="rsc_rhel8-3_last_0" operation_key="rsc_rhel8-3_monitor_0" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="25:1:7:a2ac5181-c5aa-4331-8e3b-5881893d51c7" transition-magic="0:7;25:1:7:a2ac5181-c5aa-4331-8e3b-5881893d51c7" exit-reason="" on_node="rhel8-5" call-id="29" rc-code="7" op-status="0" interval="0" last-rc-change="1674162173" exec-time="43" queue-time="0" op-digest="3a5f279381f73d4be861526d72bb17a3"/>
++          </lrm_resource>
++          <lrm_resource id="rsc_rhel8-4" type="IPaddr2" class="ocf" provider="heartbeat">
++            <lrm_rsc_op id="rsc_rhel8-4_last_0" operation_key="rsc_rhel8-4_monitor_0" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="26:1:7:a2ac5181-c5aa-4331-8e3b-5881893d51c7" transition-magic="0:7;26:1:7:a2ac5181-c5aa-4331-8e3b-5881893d51c7" exit-reason="" on_node="rhel8-5" call-id="33" rc-code="7" op-status="0" interval="0" last-rc-change="1674162173" exec-time="45" queue-time="0" op-digest="b4b6b30b67042d5bc4c1735b0df27dc0"/>
++          </lrm_resource>
++          <lrm_resource id="rsc_rhel8-5" type="IPaddr2" class="ocf" provider="heartbeat">
++            <lrm_rsc_op id="rsc_rhel8-5_last_0" operation_key="rsc_rhel8-5_start_0" operation="start" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="50:1:0:a2ac5181-c5aa-4331-8e3b-5881893d51c7" transition-magic="0:0;50:1:0:a2ac5181-c5aa-4331-8e3b-5881893d51c7" exit-reason="" on_node="rhel8-5" call-id="38" rc-code="0" op-status="0" interval="0" last-rc-change="1674162173" exec-time="69" queue-time="0" op-digest="aca525581410dfda70831f2846b9807d"/>
++            <lrm_rsc_op id="rsc_rhel8-5_monitor_5000" operation_key="rsc_rhel8-5_monitor_5000" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="51:1:0:a2ac5181-c5aa-4331-8e3b-5881893d51c7" transition-magic="0:0;51:1:0:a2ac5181-c5aa-4331-8e3b-5881893d51c7" exit-reason="" on_node="rhel8-5" call-id="40" rc-code="0" op-status="0" interval="5000" last-rc-change="1674162173" exec-time="73" queue-time="0" op-digest="51292f6c89131cf04bf857325f0e4041"/>
++          </lrm_resource>
++          <lrm_resource id="migrator" type="Dummy" class="ocf" provider="pacemaker">
++            <lrm_rsc_op id="migrator_migrate_from_0" operation_key="migrator_migrate_from_0" operation="migrate_from" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="42:16:0:cf4a396e-f29c-4391-acd7-ee32f62dd8c7" transition-magic="0:0;42:16:0:cf4a396e-f29c-4391-acd7-ee32f62dd8c7" exit-reason="" on_node="rhel8-5" call-id="97" rc-code="0" op-status="0" interval="0" last-rc-change="1674162324" exec-time="22" queue-time="0" migrate_source="rhel8-2" migrate_target="rhel8-5" op-digest="5de129d7fe42dbcfe537f2c63b1921b6" op-force-restart="  state  " op-restart-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-secure-params="  passwd  " op-secure-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++            <lrm_rsc_op id="migrator_monitor_10000" operation_key="migrator_monitor_10000" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="40:16:0:cf4a396e-f29c-4391-acd7-ee32f62dd8c7" transition-magic="0:0;40:16:0:cf4a396e-f29c-4391-acd7-ee32f62dd8c7" exit-reason="" on_node="rhel8-5" call-id="99" rc-code="0" op-status="0" interval="10000" last-rc-change="1674162324" exec-time="21" queue-time="0" op-digest="9210327bce4f7670c7b350bf32101791" op-secure-params="  passwd  " op-secure-digest="8f6a313464b7f9e3a31cb448458b700e"/>
++          </lrm_resource>
++        </lrm_resources>
++      </lrm>
++    </node_state>
++    <node_state id="1" uname="rhel8-1" in_ccm="false" crmd="offline" crm-debug-origin="do_state_transition" join="down" expected="down">
++      <lrm id="1">
++        <lrm_resources>
++          <lrm_resource id="r192.168.122.207" type="IPaddr2" class="ocf" provider="heartbeat">
++            <lrm_rsc_op id="r192.168.122.207_last_0" operation_key="r192.168.122.207_monitor_0" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="31:10:7:51efc271-30bb-4fed-801e-bcd0cb1c3fe4" transition-magic="0:7;31:10:7:51efc271-30bb-4fed-801e-bcd0cb1c3fe4" exit-reason="" on_node="rhel8-1" call-id="64" rc-code="7" op-status="0" interval="0" last-rc-change="1674162027" exec-time="44" queue-time="0" op-digest="455141de0d85faf791392b0857f9dea1"/>
++          </lrm_resource>
++          <lrm_resource id="r192.168.122.208" type="IPaddr2" class="ocf" provider="heartbeat">
++            <lrm_rsc_op id="r192.168.122.208_last_0" operation_key="r192.168.122.208_monitor_0" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="33:10:7:51efc271-30bb-4fed-801e-bcd0cb1c3fe4" transition-magic="0:7;33:10:7:51efc271-30bb-4fed-801e-bcd0cb1c3fe4" exit-reason="" on_node="rhel8-1" call-id="72" rc-code="7" op-status="0" interval="0" last-rc-change="1674162028" exec-time="40" queue-time="0" op-digest="d62599e347d2c3a524c13e135846a774"/>
++          </lrm_resource>
++          <lrm_resource id="FencingFail" type="fence_dummy" class="stonith">
++            <lrm_rsc_op id="FencingFail_last_0" operation_key="FencingFail_monitor_0" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="22:10:7:51efc271-30bb-4fed-801e-bcd0cb1c3fe4" transition-magic="0:7;22:10:7:51efc271-30bb-4fed-801e-bcd0cb1c3fe4" exit-reason="" on_node="rhel8-1" call-id="18" rc-code="7" op-status="0" interval="0" last-rc-change="1674162023" exec-time="0" queue-time="0" op-digest="d3c544c746b64c636fc7a3c0ebf35fdd"/>
++          </lrm_resource>
++          <lrm_resource id="lsb-dummy" type="LSBDummy" class="lsb">
++            <lrm_rsc_op id="lsb-dummy_last_0" operation_key="lsb-dummy_monitor_0" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="34:10:7:51efc271-30bb-4fed-801e-bcd0cb1c3fe4" transition-magic="0:7;34:10:7:51efc271-30bb-4fed-801e-bcd0cb1c3fe4" exit-reason="" on_node="rhel8-1" call-id="76" rc-code="7" op-status="0" interval="0" last-rc-change="1674162028" exec-time="12" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++          </lrm_resource>
++          <lrm_resource id="FencingPass" type="fence_dummy" class="stonith">
++            <lrm_rsc_op id="FencingPass_last_0" operation_key="FencingPass_monitor_0" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="21:10:7:51efc271-30bb-4fed-801e-bcd0cb1c3fe4" transition-magic="0:7;21:10:7:51efc271-30bb-4fed-801e-bcd0cb1c3fe4" exit-reason="" on_node="rhel8-1" call-id="14" rc-code="7" op-status="0" interval="0" last-rc-change="1674162023" exec-time="0" queue-time="0" op-digest="147576adc6e9926464990826fe2d02ca"/>
++          </lrm_resource>
++          <lrm_resource id="Fencing" type="fence_xvm" class="stonith">
++            <lrm_rsc_op id="Fencing_last_0" operation_key="Fencing_stop_0" operation="stop" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.16.2" transition-key="22:4:0:a2ac5181-c5aa-4331-8e3b-5881893d51c7" transition-magic="0:0;22:4:0:a2ac5181-c5aa-4331-8e3b-5881893d51c7" exit-reason="" on_node="rhel8-1" call-id="98" rc-code="0" op-status="0" interval="0" last-rc-change="1674162210" exec-time="0" queue-time="0" op-digest="bf974d77f2d4d33e434be1f89e362a52"/>
++            <lrm_rsc_op id="Fencing_monitor_120000" operation_key="Fencing_monitor_120000" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="24:13:0:51efc271-30bb-4fed-801e-bcd0cb1c3fe4" transition-magic="0:0;24:13:0:51efc271-30bb-4fed-801e-bcd0cb1c3fe4" exit-reason="" on_node="rhel8-1" call-id="83" rc-code="0" op-status="0" interval="120000" last-rc-change="1674162031" exec-time="45" queue-time="0" op-digest="24c9c9364f847dcb857d6fb4e1b4d3c8"/>
++          </lrm_resource>
++          <lrm_resource id="petulant" type="pacemaker-cts-dummyd@10" class="service">
++            <lrm_rsc_op id="petulant_last_0" operation_key="petulant_monitor_0" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="32:10:7:51efc271-30bb-4fed-801e-bcd0cb1c3fe4" transition-magic="0:7;32:10:7:51efc271-30bb-4fed-801e-bcd0cb1c3fe4" exit-reason="" on_node="rhel8-1" call-id="68" rc-code="7" op-status="0" interval="0" last-rc-change="1674162028" exec-time="22" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++          </lrm_resource>
++          <lrm_resource id="ping-1" type="ping" class="ocf" provider="pacemaker">
++            <lrm_rsc_op id="ping-1_last_0" operation_key="ping-1_stop_0" operation="stop" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.16.2" transition-key="53:4:0:a2ac5181-c5aa-4331-8e3b-5881893d51c7" transition-magic="0:0;53:4:0:a2ac5181-c5aa-4331-8e3b-5881893d51c7" exit-reason="" on_node="rhel8-1" call-id="105" rc-code="0" op-status="0" interval="0" last-rc-change="1674162210" exec-time="115" queue-time="0" op-digest="a53fc9fb0118a43d3be0fceaf2348d38" op-force-restart="  use_fping failure_score options host_list multiplier name pidfile  " op-restart-digest="b04a44b98b5edbf24eae263f0e6ee0c3"/>
++            <lrm_rsc_op id="ping-1_monitor_60000" operation_key="ping-1_monitor_60000" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="63:10:0:51efc271-30bb-4fed-801e-bcd0cb1c3fe4" transition-magic="0:0;63:10:0:51efc271-30bb-4fed-801e-bcd0cb1c3fe4" exit-reason="" on_node="rhel8-1" call-id="59" rc-code="0" op-status="0" interval="60000" last-rc-change="1674162025" exec-time="2110" queue-time="0" op-digest="6b1eba5fe19d16fa21bf0501bbe5c0cd"/>
++          </lrm_resource>
++          <lrm_resource id="stateful-1" type="Stateful" class="ocf" provider="pacemaker">
++            <lrm_rsc_op id="stateful-1_last_0" operation_key="stateful-1_stop_0" operation="stop" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.16.2" transition-key="68:4:0:a2ac5181-c5aa-4331-8e3b-5881893d51c7" transition-magic="0:0;68:4:0:a2ac5181-c5aa-4331-8e3b-5881893d51c7" exit-reason="" on_node="rhel8-1" call-id="114" rc-code="0" op-status="0" interval="0" last-rc-change="1674162211" exec-time="83" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-force-restart="  state  " op-restart-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++            <lrm_rsc_op id="stateful-1_monitor_15000" operation_key="stateful-1_monitor_15000" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="65:12:0:51efc271-30bb-4fed-801e-bcd0cb1c3fe4" transition-magic="0:0;65:12:0:51efc271-30bb-4fed-801e-bcd0cb1c3fe4" exit-reason="" on_node="rhel8-1" call-id="79" rc-code="0" op-status="0" interval="15000" last-rc-change="1674162030" exec-time="21" queue-time="0" op-digest="873ed4f07792aa8ff18f3254244675ea"/>
++          </lrm_resource>
++          <lrm_resource id="rsc_rhel8-1" type="IPaddr2" class="ocf" provider="heartbeat">
++            <lrm_rsc_op id="rsc_rhel8-1_last_0" operation_key="rsc_rhel8-1_stop_0" operation="stop" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.16.2" transition-key="29:4:0:a2ac5181-c5aa-4331-8e3b-5881893d51c7" transition-magic="0:0;29:4:0:a2ac5181-c5aa-4331-8e3b-5881893d51c7" exit-reason="" on_node="rhel8-1" call-id="100" rc-code="0" op-status="0" interval="0" last-rc-change="1674162210" exec-time="240" queue-time="0" op-digest="75df1567eb9457f8f3c4486bbf875846"/>
++            <lrm_rsc_op id="rsc_rhel8-1_monitor_5000" operation_key="rsc_rhel8-1_monitor_5000" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="43:10:0:51efc271-30bb-4fed-801e-bcd0cb1c3fe4" transition-magic="0:0;43:10:0:51efc271-30bb-4fed-801e-bcd0cb1c3fe4" exit-reason="" on_node="rhel8-1" call-id="25" rc-code="0" op-status="0" interval="5000" last-rc-change="1674162023" exec-time="42" queue-time="0" op-digest="045c3d6f5e29b94dc4e3fbfd6c2c0693"/>
++          </lrm_resource>
++          <lrm_resource id="rsc_rhel8-2" type="IPaddr2" class="ocf" provider="heartbeat">
++            <lrm_rsc_op id="rsc_rhel8-2_last_0" operation_key="rsc_rhel8-2_monitor_0" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="24:10:7:51efc271-30bb-4fed-801e-bcd0cb1c3fe4" transition-magic="0:7;24:10:7:51efc271-30bb-4fed-801e-bcd0cb1c3fe4" exit-reason="" on_node="rhel8-1" call-id="30" rc-code="7" op-status="0" interval="0" last-rc-change="1674162023" exec-time="41" queue-time="0" op-digest="ced6f8a1916ebbe555cedafe69985e63"/>
++          </lrm_resource>
++          <lrm_resource id="rsc_rhel8-3" type="IPaddr2" class="ocf" provider="heartbeat">
++            <lrm_rsc_op id="rsc_rhel8-3_last_0" operation_key="rsc_rhel8-3_monitor_0" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="25:10:7:51efc271-30bb-4fed-801e-bcd0cb1c3fe4" transition-magic="0:7;25:10:7:51efc271-30bb-4fed-801e-bcd0cb1c3fe4" exit-reason="" on_node="rhel8-1" call-id="34" rc-code="7" op-status="0" interval="0" last-rc-change="1674162023" exec-time="41" queue-time="0" op-digest="3a5f279381f73d4be861526d72bb17a3"/>
++          </lrm_resource>
++          <lrm_resource id="rsc_rhel8-4" type="IPaddr2" class="ocf" provider="heartbeat">
++            <lrm_rsc_op id="rsc_rhel8-4_last_0" operation_key="rsc_rhel8-4_monitor_0" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="26:10:7:51efc271-30bb-4fed-801e-bcd0cb1c3fe4" transition-magic="0:7;26:10:7:51efc271-30bb-4fed-801e-bcd0cb1c3fe4" exit-reason="" on_node="rhel8-1" call-id="38" rc-code="7" op-status="0" interval="0" last-rc-change="1674162023" exec-time="40" queue-time="0" op-digest="b4b6b30b67042d5bc4c1735b0df27dc0"/>
++          </lrm_resource>
++          <lrm_resource id="rsc_rhel8-5" type="IPaddr2" class="ocf" provider="heartbeat">
++            <lrm_rsc_op id="rsc_rhel8-5_last_0" operation_key="rsc_rhel8-5_monitor_0" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="27:10:7:51efc271-30bb-4fed-801e-bcd0cb1c3fe4" transition-magic="0:7;27:10:7:51efc271-30bb-4fed-801e-bcd0cb1c3fe4" exit-reason="" on_node="rhel8-1" call-id="42" rc-code="7" op-status="0" interval="0" last-rc-change="1674162023" exec-time="41" queue-time="0" op-digest="aca525581410dfda70831f2846b9807d"/>
++          </lrm_resource>
++          <lrm_resource id="migrator" type="Dummy" class="ocf" provider="pacemaker">
++            <lrm_rsc_op id="migrator_migrate_from_0" operation_key="migrator_migrate_from_0" operation="migrate_from" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="39:11:0:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" transition-magic="0:0;39:11:0:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" exit-reason="" on_node="rhel8-1" call-id="89" rc-code="0" op-status="0" interval="0" last-rc-change="1674162129" exec-time="33" queue-time="0" migrate_source="rhel8-4" migrate_target="rhel8-1" op-digest="5de129d7fe42dbcfe537f2c63b1921b6" op-force-restart="  state  " op-restart-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-secure-params="  passwd  " op-secure-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++            <lrm_rsc_op id="migrator_monitor_10000" operation_key="migrator_monitor_10000" operation="monitor" crm-debug-origin="build_active_RAs" crm_feature_set="3.16.2" transition-key="38:11:0:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" transition-magic="0:0;38:11:0:46805950-c15e-4bfb-9bc7-0ad7b331f8ff" exit-reason="" on_node="rhel8-1" call-id="91" rc-code="0" op-status="0" interval="10000" last-rc-change="1674162129" exec-time="19" queue-time="0" op-digest="9210327bce4f7670c7b350bf32101791" op-secure-params="  passwd  " op-secure-digest="8f6a313464b7f9e3a31cb448458b700e"/>
++            <lrm_rsc_op id="migrator_migrate_to_0" operation_key="migrator_migrate_to_0" operation="migrate_to" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.16.2" transition-key="43:4:0:a2ac5181-c5aa-4331-8e3b-5881893d51c7" transition-magic="0:0;43:4:0:a2ac5181-c5aa-4331-8e3b-5881893d51c7" exit-reason="" on_node="rhel8-1" call-id="109" rc-code="0" op-status="0" interval="0" last-rc-change="1674162210" exec-time="66" queue-time="0" migrate_source="rhel8-1" migrate_target="rhel8-2" op-digest="5de129d7fe42dbcfe537f2c63b1921b6" op-force-restart="  state  " op-restart-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-secure-params="  passwd  " op-secure-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++            <lrm_rsc_op id="migrator_last_0" operation_key="migrator_stop_0" operation="stop" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.16.2" transition-key="40:4:0:a2ac5181-c5aa-4331-8e3b-5881893d51c7" transition-magic="0:0;40:4:0:a2ac5181-c5aa-4331-8e3b-5881893d51c7" exit-reason="" on_node="rhel8-1" call-id="116" rc-code="0" op-status="0" interval="0" last-rc-change="1674162211" exec-time="46" queue-time="0" op-digest="5de129d7fe42dbcfe537f2c63b1921b6"/>
++          </lrm_resource>
++        </lrm_resources>
++      </lrm>
++    </node_state>
++    <node_state remote_node="true" id="remote-rhel8-1" uname="remote-rhel8-1" in_ccm="false" crm-debug-origin="do_state_transition"/>
++  </status>
++</cib>
+-- 
+2.31.1
+
+From 1f9fadbb06baded3fc393cfe30a0cb620aca0829 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Wed, 1 Feb 2023 17:12:13 -0600
+Subject: [PATCH 13/14] Fix: scheduler: handle cleaned migrate_from history
+ correctly
+
+Fixes T623
+---
+ lib/pengine/unpack.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/lib/pengine/unpack.c b/lib/pengine/unpack.c
+index 14dc202..9c99183 100644
+--- a/lib/pengine/unpack.c
++++ b/lib/pengine/unpack.c
+@@ -2990,6 +2990,15 @@ unpack_migrate_to_success(pe_resource_t *rsc, pe_node_t *node, xmlNode *xml_op)
+ 
+     // The migrate_from is pending, complete but erased, or to be scheduled
+ 
++    /* If there is no history at all for the resource on an online target, then
++     * it was likely cleaned. Just return, and we'll schedule a probe. Once we
++     * have the probe result, it will be reflected in target_newer_state.
++     */
++    if ((target_node != NULL) && target_node->details->online
++        && unknown_on_node(rsc, target)) {
++        return;
++    }
++
+     if (active_on_target) {
+         pe_node_t *source_node = pe_find_node(rsc->cluster->nodes, source);
+ 
+-- 
+2.31.1
+
+From d9d1bf19e8522ea29c87f0c39b05828947bc5b0f Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Thu, 2 Feb 2023 15:48:01 -0600
+Subject: [PATCH 14/14] Test: scheduler: update expected output for migration
+ fix
+
+---
+ .../dot/migration-intermediary-cleaned.dot    |  8 --
+ .../exp/migration-intermediary-cleaned.exp    | 88 ++++---------------
+ .../migration-intermediary-cleaned.scores     |  2 +-
+ .../migration-intermediary-cleaned.summary    |  9 +-
+ 4 files changed, 22 insertions(+), 85 deletions(-)
+
+diff --git a/cts/scheduler/dot/migration-intermediary-cleaned.dot b/cts/scheduler/dot/migration-intermediary-cleaned.dot
+index 09568d0..f6eabba 100644
+--- a/cts/scheduler/dot/migration-intermediary-cleaned.dot
++++ b/cts/scheduler/dot/migration-intermediary-cleaned.dot
+@@ -7,15 +7,7 @@
+ "FencingPass_monitor_0 rhel8-2" [ style=bold color="green" fontcolor="black"]
+ "Fencing_monitor_0 rhel8-2" [ style=bold color="green" fontcolor="black"]
+ "lsb-dummy_monitor_0 rhel8-2" [ style=bold color="green" fontcolor="black"]
+-"migrator_monitor_0 rhel8-2" -> "migrator_start_0 rhel8-5" [ style = bold]
+ "migrator_monitor_0 rhel8-2" [ style=bold color="green" fontcolor="black"]
+-"migrator_monitor_10000 rhel8-5" [ style=bold color="green" fontcolor="black"]
+-"migrator_start_0 rhel8-5" -> "migrator_monitor_10000 rhel8-5" [ style = bold]
+-"migrator_start_0 rhel8-5" [ style=bold color="green" fontcolor="black"]
+-"migrator_stop_0 rhel8-2" -> "migrator_start_0 rhel8-5" [ style = bold]
+-"migrator_stop_0 rhel8-2" [ style=bold color="green" fontcolor="black"]
+-"migrator_stop_0 rhel8-5" -> "migrator_start_0 rhel8-5" [ style = bold]
+-"migrator_stop_0 rhel8-5" [ style=bold color="green" fontcolor="black"]
+ "petulant_monitor_0 rhel8-2" [ style=bold color="green" fontcolor="black"]
+ "ping-1_monitor_0 rhel8-2" -> "Connectivity_start_0" [ style = bold]
+ "ping-1_monitor_0 rhel8-2" [ style=bold color="green" fontcolor="black"]
+diff --git a/cts/scheduler/exp/migration-intermediary-cleaned.exp b/cts/scheduler/exp/migration-intermediary-cleaned.exp
+index 28fa776..8b9bb39 100644
+--- a/cts/scheduler/exp/migration-intermediary-cleaned.exp
++++ b/cts/scheduler/exp/migration-intermediary-cleaned.exp
+@@ -148,91 +148,41 @@
+     <inputs/>
+   </synapse>
+   <synapse id="14">
+-    <action_set>
+-      <rsc_op id="53" operation="start" operation_key="migrator_start_0" on_node="rhel8-5" on_node_uuid="5">
+-        <primitive id="migrator" class="ocf" provider="pacemaker" type="Dummy"/>
+-        <attributes CRM_meta_on_node="rhel8-5" CRM_meta_on_node_uuid="5" CRM_meta_timeout="90000"  passwd="whatever"/>
+-      </rsc_op>
+-    </action_set>
+-    <inputs>
+-      <trigger>
+-        <rsc_op id="26" operation="monitor" operation_key="migrator_monitor_0" on_node="rhel8-2" on_node_uuid="2"/>
+-      </trigger>
+-      <trigger>
+-        <rsc_op id="51" operation="stop" operation_key="migrator_stop_0" on_node="rhel8-5" on_node_uuid="5"/>
+-      </trigger>
+-      <trigger>
+-        <rsc_op id="52" operation="stop" operation_key="migrator_stop_0" on_node="rhel8-2" on_node_uuid="2"/>
+-      </trigger>
+-    </inputs>
+-  </synapse>
+-  <synapse id="15">
+-    <action_set>
+-      <rsc_op id="52" operation="stop" operation_key="migrator_stop_0" on_node="rhel8-2" on_node_uuid="2">
+-        <primitive id="migrator" class="ocf" provider="pacemaker" type="Dummy"/>
+-        <attributes CRM_meta_on_node="rhel8-2" CRM_meta_on_node_uuid="2" CRM_meta_timeout="90000"  passwd="whatever"/>
+-      </rsc_op>
+-    </action_set>
+-    <inputs/>
+-  </synapse>
+-  <synapse id="16">
+-    <action_set>
+-      <rsc_op id="51" operation="stop" operation_key="migrator_stop_0" on_node="rhel8-5" on_node_uuid="5">
+-        <primitive id="migrator" class="ocf" provider="pacemaker" type="Dummy"/>
+-        <attributes CRM_meta_on_node="rhel8-5" CRM_meta_on_node_uuid="5" CRM_meta_timeout="90000"  passwd="whatever"/>
+-      </rsc_op>
+-    </action_set>
+-    <inputs/>
+-  </synapse>
+-  <synapse id="17">
+     <action_set>
+       <rsc_op id="26" operation="monitor" operation_key="migrator_monitor_0" on_node="rhel8-2" on_node_uuid="2">
+         <primitive id="migrator" class="ocf" provider="pacemaker" type="Dummy"/>
+-        <attributes CRM_meta_on_node="rhel8-2" CRM_meta_on_node_uuid="2" CRM_meta_timeout="90000"  passwd="whatever"/>
++        <attributes CRM_meta_on_node="rhel8-2" CRM_meta_on_node_uuid="2" CRM_meta_op_target_rc="7" CRM_meta_timeout="90000"  passwd="whatever"/>
+       </rsc_op>
+     </action_set>
+     <inputs/>
+   </synapse>
+-  <synapse id="18">
+-    <action_set>
+-      <rsc_op id="17" operation="monitor" operation_key="migrator_monitor_10000" on_node="rhel8-5" on_node_uuid="5">
+-        <primitive id="migrator" class="ocf" provider="pacemaker" type="Dummy"/>
+-        <attributes CRM_meta_interval="10000" CRM_meta_name="monitor" CRM_meta_on_node="rhel8-5" CRM_meta_on_node_uuid="5" CRM_meta_timeout="90000"  passwd="whatever"/>
+-      </rsc_op>
+-    </action_set>
+-    <inputs>
+-      <trigger>
+-        <rsc_op id="53" operation="start" operation_key="migrator_start_0" on_node="rhel8-5" on_node_uuid="5"/>
+-      </trigger>
+-    </inputs>
+-  </synapse>
+-  <synapse id="19">
++  <synapse id="15">
+     <action_set>
+-      <rsc_op id="61" operation="monitor" operation_key="ping-1_monitor_60000" internal_operation_key="ping-1:3_monitor_60000" on_node="rhel8-2" on_node_uuid="2">
++      <rsc_op id="60" operation="monitor" operation_key="ping-1_monitor_60000" internal_operation_key="ping-1:3_monitor_60000" on_node="rhel8-2" on_node_uuid="2">
+         <primitive id="ping-1" long-id="ping-1:3" class="ocf" provider="pacemaker" type="ping"/>
+         <attributes CRM_meta_clone="3" CRM_meta_clone_max="5" CRM_meta_clone_node_max="1" CRM_meta_globally_unique="false" CRM_meta_interval="60000" CRM_meta_name="monitor" CRM_meta_notify="false" CRM_meta_on_node="rhel8-2" CRM_meta_on_node_uuid="2" CRM_meta_timeout="90000"  debug="true" host_list="192.168.122.80" name="connected"/>
+       </rsc_op>
+     </action_set>
+     <inputs>
+       <trigger>
+-        <rsc_op id="60" operation="start" operation_key="ping-1_start_0" internal_operation_key="ping-1:3_start_0" on_node="rhel8-2" on_node_uuid="2"/>
++        <rsc_op id="59" operation="start" operation_key="ping-1_start_0" internal_operation_key="ping-1:3_start_0" on_node="rhel8-2" on_node_uuid="2"/>
+       </trigger>
+     </inputs>
+   </synapse>
+-  <synapse id="20">
++  <synapse id="16">
+     <action_set>
+-      <rsc_op id="60" operation="start" operation_key="ping-1_start_0" internal_operation_key="ping-1:3_start_0" on_node="rhel8-2" on_node_uuid="2">
++      <rsc_op id="59" operation="start" operation_key="ping-1_start_0" internal_operation_key="ping-1:3_start_0" on_node="rhel8-2" on_node_uuid="2">
+         <primitive id="ping-1" long-id="ping-1:3" class="ocf" provider="pacemaker" type="ping"/>
+         <attributes CRM_meta_clone="3" CRM_meta_clone_max="5" CRM_meta_clone_node_max="1" CRM_meta_globally_unique="false" CRM_meta_notify="false" CRM_meta_on_node="rhel8-2" CRM_meta_on_node_uuid="2" CRM_meta_timeout="90000"  debug="true" host_list="192.168.122.80" name="connected"/>
+       </rsc_op>
+     </action_set>
+     <inputs>
+       <trigger>
+-        <pseudo_event id="62" operation="start" operation_key="Connectivity_start_0"/>
++        <pseudo_event id="61" operation="start" operation_key="Connectivity_start_0"/>
+       </trigger>
+     </inputs>
+   </synapse>
+-  <synapse id="21">
++  <synapse id="17">
+     <action_set>
+       <rsc_op id="27" operation="monitor" operation_key="ping-1_monitor_0" internal_operation_key="ping-1:3_monitor_0" on_node="rhel8-2" on_node_uuid="2">
+         <primitive id="ping-1" long-id="ping-1:3" class="ocf" provider="pacemaker" type="ping"/>
+@@ -241,24 +191,24 @@
+     </action_set>
+     <inputs/>
+   </synapse>
+-  <synapse id="22" priority="1000000">
++  <synapse id="18" priority="1000000">
+     <action_set>
+-      <pseudo_event id="63" operation="running" operation_key="Connectivity_running_0">
++      <pseudo_event id="62" operation="running" operation_key="Connectivity_running_0">
+         <attributes CRM_meta_clone_max="5" CRM_meta_clone_node_max="1" CRM_meta_globally_unique="false" CRM_meta_notify="false" CRM_meta_timeout="90000" />
+       </pseudo_event>
+     </action_set>
+     <inputs>
+       <trigger>
+-        <rsc_op id="60" operation="start" operation_key="ping-1_start_0" internal_operation_key="ping-1:3_start_0" on_node="rhel8-2" on_node_uuid="2"/>
++        <rsc_op id="59" operation="start" operation_key="ping-1_start_0" internal_operation_key="ping-1:3_start_0" on_node="rhel8-2" on_node_uuid="2"/>
+       </trigger>
+       <trigger>
+-        <pseudo_event id="62" operation="start" operation_key="Connectivity_start_0"/>
++        <pseudo_event id="61" operation="start" operation_key="Connectivity_start_0"/>
+       </trigger>
+     </inputs>
+   </synapse>
+-  <synapse id="23">
++  <synapse id="19">
+     <action_set>
+-      <pseudo_event id="62" operation="start" operation_key="Connectivity_start_0">
++      <pseudo_event id="61" operation="start" operation_key="Connectivity_start_0">
+         <attributes CRM_meta_clone_max="5" CRM_meta_clone_node_max="1" CRM_meta_globally_unique="false" CRM_meta_notify="false" CRM_meta_timeout="90000" />
+       </pseudo_event>
+     </action_set>
+@@ -268,7 +218,7 @@
+       </trigger>
+     </inputs>
+   </synapse>
+-  <synapse id="24">
++  <synapse id="20">
+     <action_set>
+       <rsc_op id="28" operation="monitor" operation_key="stateful-1_monitor_0" internal_operation_key="stateful-1:0_monitor_0" on_node="rhel8-2" on_node_uuid="2">
+         <primitive id="stateful-1" long-id="stateful-1:0" class="ocf" provider="pacemaker" type="Stateful"/>
+@@ -277,7 +227,7 @@
+     </action_set>
+     <inputs/>
+   </synapse>
+-  <synapse id="25">
++  <synapse id="21">
+     <action_set>
+       <rsc_op id="29" operation="monitor" operation_key="r192.168.122.207_monitor_0" on_node="rhel8-2" on_node_uuid="2">
+         <primitive id="r192.168.122.207" class="ocf" provider="heartbeat" type="IPaddr2"/>
+@@ -286,7 +236,7 @@
+     </action_set>
+     <inputs/>
+   </synapse>
+-  <synapse id="26">
++  <synapse id="22">
+     <action_set>
+       <rsc_op id="30" operation="monitor" operation_key="petulant_monitor_0" on_node="rhel8-2" on_node_uuid="2">
+         <primitive id="petulant" class="service" type="pacemaker-cts-dummyd@10"/>
+@@ -295,7 +245,7 @@
+     </action_set>
+     <inputs/>
+   </synapse>
+-  <synapse id="27">
++  <synapse id="23">
+     <action_set>
+       <rsc_op id="31" operation="monitor" operation_key="r192.168.122.208_monitor_0" on_node="rhel8-2" on_node_uuid="2">
+         <primitive id="r192.168.122.208" class="ocf" provider="heartbeat" type="IPaddr2"/>
+@@ -304,7 +254,7 @@
+     </action_set>
+     <inputs/>
+   </synapse>
+-  <synapse id="28">
++  <synapse id="24">
+     <action_set>
+       <rsc_op id="32" operation="monitor" operation_key="lsb-dummy_monitor_0" on_node="rhel8-2" on_node_uuid="2">
+         <primitive id="lsb-dummy" class="lsb" type="LSBDummy"/>
+diff --git a/cts/scheduler/scores/migration-intermediary-cleaned.scores b/cts/scheduler/scores/migration-intermediary-cleaned.scores
+index b3b8dff..09f05d1 100644
+--- a/cts/scheduler/scores/migration-intermediary-cleaned.scores
++++ b/cts/scheduler/scores/migration-intermediary-cleaned.scores
+@@ -103,7 +103,7 @@ pcmk__primitive_assign: migrator allocation score on rhel8-1: 0
+ pcmk__primitive_assign: migrator allocation score on rhel8-2: 0
+ pcmk__primitive_assign: migrator allocation score on rhel8-3: 0
+ pcmk__primitive_assign: migrator allocation score on rhel8-4: 0
+-pcmk__primitive_assign: migrator allocation score on rhel8-5: 0
++pcmk__primitive_assign: migrator allocation score on rhel8-5: 1
+ pcmk__primitive_assign: petulant allocation score on rhel8-1: -INFINITY
+ pcmk__primitive_assign: petulant allocation score on rhel8-2: -INFINITY
+ pcmk__primitive_assign: petulant allocation score on rhel8-3: 0
+diff --git a/cts/scheduler/summary/migration-intermediary-cleaned.summary b/cts/scheduler/summary/migration-intermediary-cleaned.summary
+index 5de1355..dd127a8 100644
+--- a/cts/scheduler/summary/migration-intermediary-cleaned.summary
++++ b/cts/scheduler/summary/migration-intermediary-cleaned.summary
+@@ -13,7 +13,7 @@ Current cluster status:
+     * rsc_rhel8-3	(ocf:heartbeat:IPaddr2):	 Started rhel8-3
+     * rsc_rhel8-4	(ocf:heartbeat:IPaddr2):	 Started rhel8-4
+     * rsc_rhel8-5	(ocf:heartbeat:IPaddr2):	 Started rhel8-5
+-    * migrator	(ocf:pacemaker:Dummy):	 Started [ rhel8-5 rhel8-2 ]
++    * migrator	(ocf:pacemaker:Dummy):	 Started rhel8-5
+     * Clone Set: Connectivity [ping-1]:
+       * Started: [ rhel8-3 rhel8-4 rhel8-5 ]
+       * Stopped: [ rhel8-1 rhel8-2 ]
+@@ -30,7 +30,6 @@ Current cluster status:
+ Transition Summary:
+   * Move       rsc_rhel8-1     ( rhel8-3 -> rhel8-2 )
+   * Move       rsc_rhel8-2     ( rhel8-4 -> rhel8-2 )
+-  * Restart    migrator        (            rhel8-5 )
+   * Start      ping-1:3        (            rhel8-2 )
+ 
+ Executing Cluster Transition:
+@@ -44,8 +43,6 @@ Executing Cluster Transition:
+   * Resource action: rsc_rhel8-3     monitor on rhel8-2
+   * Resource action: rsc_rhel8-4     monitor on rhel8-2
+   * Resource action: rsc_rhel8-5     monitor on rhel8-2
+-  * Resource action: migrator        stop on rhel8-2
+-  * Resource action: migrator        stop on rhel8-5
+   * Resource action: migrator        monitor on rhel8-2
+   * Resource action: ping-1          monitor on rhel8-2
+   * Pseudo action:   Connectivity_start_0
+@@ -56,8 +53,6 @@ Executing Cluster Transition:
+   * Resource action: lsb-dummy       monitor on rhel8-2
+   * Resource action: rsc_rhel8-1     start on rhel8-2
+   * Resource action: rsc_rhel8-2     start on rhel8-2
+-  * Resource action: migrator        start on rhel8-5
+-  * Resource action: migrator        monitor=10000 on rhel8-5
+   * Resource action: ping-1          start on rhel8-2
+   * Pseudo action:   Connectivity_running_0
+   * Resource action: rsc_rhel8-1     monitor=5000 on rhel8-2
+@@ -79,7 +74,7 @@ Revised Cluster Status:
+     * rsc_rhel8-3	(ocf:heartbeat:IPaddr2):	 Started rhel8-3
+     * rsc_rhel8-4	(ocf:heartbeat:IPaddr2):	 Started rhel8-4
+     * rsc_rhel8-5	(ocf:heartbeat:IPaddr2):	 Started rhel8-5
+-    * migrator	(ocf:pacemaker:Dummy):	 Started [ rhel8-2 rhel8-5 ]
++    * migrator	(ocf:pacemaker:Dummy):	 Started rhel8-5
+     * Clone Set: Connectivity [ping-1]:
+       * Started: [ rhel8-2 rhel8-3 rhel8-4 rhel8-5 ]
+       * Stopped: [ rhel8-1 ]
+-- 
+2.31.1
+

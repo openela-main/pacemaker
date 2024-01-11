@@ -1,0 +1,45 @@
+From f5263c9401c9c38d4e039149deddcc0da0c184ba Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Thu, 3 Aug 2023 12:17:08 -0500
+Subject: [PATCH] Fix: attrd: avoid race condition when shutting down
+
+This addresses a race condition that can occur when the DC and the attribute
+writer are different nodes, and shutting down at the same time. When the DC
+controller leaves its Corosync process group, the remaining nodes erase its
+transient node attributes (including "shutdown") from the CIB. However if the
+(former) DC's attrd is still up, it can win the attribute writer election
+called after the original writer leaves. As the election winner, it writes out
+all its attributes to the CIB, including "shutdown". The next time it rejoins
+the cluster, it will be immediately shut down.
+
+Fixes T138
+---
+ daemons/attrd/attrd_elections.c | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/daemons/attrd/attrd_elections.c b/daemons/attrd/attrd_elections.c
+index 3b6b55a0f59..6f4916888a9 100644
+--- a/daemons/attrd/attrd_elections.c
++++ b/daemons/attrd/attrd_elections.c
+@@ -22,12 +22,20 @@ attrd_election_cb(gpointer user_data)
+ {
+     attrd_declare_winner();
+ 
++    if (attrd_requesting_shutdown() || attrd_shutting_down()) {
++        /* This node is shutting down or about to, meaning its attributes will
++         * be removed (and may have already been removed from the CIB by a
++         * controller). Don't sync or write its attributes in this case.
++         */
++        return G_SOURCE_REMOVE;
++    }
++
+     /* Update the peers after an election */
+     attrd_peer_sync(NULL, NULL);
+ 
+     /* Update the CIB after an election */
+     attrd_write_attributes(true, false);
+-    return FALSE;
++    return G_SOURCE_REMOVE;
+ }
+ 
+ void
