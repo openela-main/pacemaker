@@ -17,12 +17,12 @@ diff --git a/daemons/controld/controld_execd.c b/daemons/controld/controld_execd
 index 530e4346c8..a90e8d833e 100644
 --- a/daemons/controld/controld_execd.c
 +++ b/daemons/controld/controld_execd.c
-@@ -1728,7 +1728,9 @@
+@@ -1400,7 +1400,9 @@ metadata_complete(int pid, const pcmk__action_result_t *result, void *user_data)
          md = controld_cache_metadata(lrm_state->metadata_cache, data->rsc,
                                       result->action_stdout);
      }
 -    do_lrm_rsc_op(lrm_state, data->rsc, data->input_xml, md);
-+    if (!pcmk_is_set(fsa_input_register, R_HA_DISCONNECTED)) {
++    if (!pcmk_is_set(controld_globals.fsa_input_register, R_HA_DISCONNECTED)) {
 +        do_lrm_rsc_op(lrm_state, data->rsc, data->input_xml, md);
 +    }
      free_metadata_cb_data(data);
@@ -44,7 +44,7 @@ diff --git a/daemons/controld/controld_execd_state.c b/daemons/controld/controld
 index 8c68bfca08..4a87a9b332 100644
 --- a/daemons/controld/controld_execd_state.c
 +++ b/daemons/controld/controld_execd_state.c
-@@ -131,12 +131,6 @@
+@@ -132,12 +132,6 @@ lrm_state_create(const char *node_name)
      return state;
  }
  
@@ -57,7 +57,7 @@ index 8c68bfca08..4a87a9b332 100644
  static gboolean
  remote_proxy_remove_by_node(gpointer key, gpointer value, gpointer user_data)
  {
-@@ -764,7 +758,7 @@
+@@ -799,7 +793,7 @@ lrm_state_unregister_rsc(lrm_state_t * lrm_state,
      }
  
      if (is_remote_lrmd_ra(NULL, NULL, rsc_id)) {
@@ -70,18 +70,18 @@ diff --git a/daemons/controld/controld_lrm.h b/daemons/controld/controld_lrm.h
 index 25f3db3316..c3113e49c3 100644
 --- a/daemons/controld/controld_lrm.h
 +++ b/daemons/controld/controld_lrm.h
-@@ -114,11 +114,6 @@
- lrm_state_t *lrm_state_create(const char *node_name);
+@@ -108,11 +108,6 @@ gboolean lrm_state_init_local(void);
+  */
+ void lrm_state_destroy_all(void);
  
- /*!
+-/*!
 - * \brief Destroy executor connection by node name
 - */
 -void lrm_state_destroy(const char *node_name);
 -
--/*!
+ /*!
   * \brief Find lrm_state data by node name
   */
- lrm_state_t *lrm_state_find(const char *node_name);
 
 From 1b915f1ce38756431f7faa142565e3e07aade194 Mon Sep 17 00:00:00 2001
 From: Ken Gaillot <kgaillot@redhat.com>
@@ -98,7 +98,7 @@ diff --git a/daemons/controld/controld_execd_state.c b/daemons/controld/controld
 index 4a87a9b332..b90cc5e635 100644
 --- a/daemons/controld/controld_execd_state.c
 +++ b/daemons/controld/controld_execd_state.c
-@@ -246,7 +246,7 @@
+@@ -301,7 +301,7 @@ lrm_state_destroy_all(void)
  lrm_state_t *
  lrm_state_find(const char *node_name)
  {
@@ -107,7 +107,7 @@ index 4a87a9b332..b90cc5e635 100644
          return NULL;
      }
      return g_hash_table_lookup(lrm_state_table, node_name);
-@@ -257,6 +257,8 @@
+@@ -312,6 +312,8 @@ lrm_state_find_or_create(const char *node_name)
  {
      lrm_state_t *lrm_state;
  
@@ -116,7 +116,7 @@ index 4a87a9b332..b90cc5e635 100644
      lrm_state = g_hash_table_lookup(lrm_state_table, node_name);
      if (!lrm_state) {
          lrm_state = lrm_state_create(node_name);
-@@ -268,6 +270,9 @@
+@@ -323,6 +325,9 @@ lrm_state_find_or_create(const char *node_name)
  GList *
  lrm_state_get_list(void)
  {
@@ -134,14 +134,14 @@ Subject: [PATCH 4/4] Log: controller: improve messages for resource history
  updates
 
 ---
- daemons/controld/controld_execd.c | 11 +++++++++--
+ daemons/controld/controld_cib.c | 11 +++++++++--
  1 file changed, 9 insertions(+), 2 deletions(-)
 
-diff --git a/daemons/controld/controld_execd.c b/daemons/controld/controld_execd.c
+diff --git a/daemons/controld/controld_cib.c b/daemons/controld/controld_cib.c
 index 22ac42486f..c9dde0b748 100644
---- a/daemons/controld/controld_execd.c
-+++ b/daemons/controld/controld_execd.c
-@@ -2408,10 +2408,17 @@
+--- a/daemons/controld/controld_cib.c
++++ b/daemons/controld/controld_cib.c
+@@ -861,10 +861,17 @@ cib_rsc_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, void *use
          case pcmk_ok:
          case -pcmk_err_diff_failed:
          case -pcmk_err_diff_resync:
@@ -160,4 +160,4 @@ index 22ac42486f..c9dde0b748 100644
 +            }
      }
  
-     if (call_id == last_resource_update) {
+     if (call_id == pending_rsc_update) {

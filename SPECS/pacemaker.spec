@@ -35,19 +35,13 @@
 ## Upstream pacemaker version, and its package version (specversion
 ## can be incremented to build packages reliably considered "newer"
 ## than previously built packages with the same pcmkversion)
-%global pcmkversion 2.1.5
-%global specversion 9
+%global pcmkversion 2.1.6
+%global specversion 8
 
 ## Upstream commit (full commit ID, abbreviated commit ID, or tag) to build
-%global commit a3f44794f94e1571c6ba0042915ade369b4ce4b1
+%global commit 6fdc9deea294bbad629b003c6ae036aaed8e3ee0
 
-## Since git v2.11, the extent of abbreviation is autoscaled by default
-## (used to be constant of 7), so we need to convey it for non-tags, too.
-%if (0%{?fedora} >= 26) || (0%{?rhel} >= 9)
 %global commit_abbrev 9
-%else
-%global commit_abbrev 7
-%endif
 
 ## Nagios source control identifiers
 %global nagios_name nagios-agents-metadata
@@ -248,12 +242,12 @@
 Name:          pacemaker
 Summary:       Scalable High-Availability cluster resource manager
 Version:       %{pcmkversion}
-Release:       %{pcmk_release}.3%{?dist}
+Release:       %{pcmk_release}%{?dist}
 %if %{defined _unitdir}
-License:       GPLv2+ and LGPLv2+
+License:       GPL-2.0-or-later AND LGPL-2.1-or-later
 %else
 # initscript is Revised BSD
-License:       GPLv2+ and LGPLv2+ and BSD
+License:       GPL-2.0-or-later AND LGPL-2.1-or-later AND BSD-3-Clause
 %endif
 Url:           https://www.clusterlabs.org/
 
@@ -269,17 +263,15 @@ Source0:       https://codeload.github.com/%{github_owner}/%{name}/tar.gz/%{arch
 Source1:       nagios-agents-metadata-%{nagios_hash}.tar.gz
 
 # upstream commits
-Patch001:      001-sync-points.patch
-Patch002:      002-remote-regression.patch
-Patch003:      003-history-cleanup.patch
-Patch004:      004-g_source_remove.patch
-Patch005:      005-query-null.patch
-Patch006:      006-watchdog-fencing-topology.patch
-Patch007:      007-attrd-dampen.patch
-Patch008:      008-controller-reply.patch
-Patch009:      009-glib-assertions.patch
-Patch010:      010-attrd-shutdown.patch
-Patch011:      011-attrd-shutdown-2.patch
+Patch001:      001-remote-start-state.patch
+Patch002:      002-group-colocation-constraint.patch
+Patch003:      003-clone-shuffle.patch
+Patch004:      004-clone-rsc-display.patch
+Patch005:      005-attrd-dampen.patch
+Patch006:      006-controller-reply.patch
+Patch007:      007-glib-assertions.patch
+Patch008:      008-attrd-shutdown.patch
+Patch009:      009-attrd-shutdown-2.patch
 
 # downstream-only commits
 #Patch1xx:      1xx-xxxx.patch
@@ -304,6 +296,7 @@ ExclusiveArch: aarch64 i686 ppc64le s390x x86_64
 
 Requires:      %{python_path}
 BuildRequires: %{python_name}-devel
+BuildRequires: %{python_name}-setuptools
 
 # Pacemaker requires a minimum libqb functionality
 Requires:      libqb >= 0.17.0
@@ -394,7 +387,7 @@ Available rpmbuild rebuild options:
                 stonithd
 
 %package cli
-License:       GPLv2+ and LGPLv2+
+License:       GPL-2.0-or-later AND LGPL-2.1-or-later
 Summary:       Command line tools for controlling Pacemaker clusters
 Requires:      %{pkgname_pcmk_libs}%{?_isa} = %{version}-%{release}
 # For crm_report
@@ -414,7 +407,7 @@ to query and control the cluster from machines that may, or may not,
 be part of the cluster.
 
 %package -n %{pkgname_pcmk_libs}
-License:       GPLv2+ and LGPLv2+
+License:       GPL-2.0-or-later AND LGPL-2.1-or-later
 Summary:       Core Pacemaker libraries
 Requires(pre): %{pkgname_shadow_utils}
 Requires:      %{name}-schemas = %{version}-%{release}
@@ -431,7 +424,7 @@ The %{pkgname_pcmk_libs} package contains shared libraries needed for cluster
 nodes and those just running the CLI tools.
 
 %package cluster-libs
-License:       GPLv2+ and LGPLv2+
+License:       GPL-2.0-or-later AND LGPL-2.1-or-later
 Summary:       Cluster Libraries used by Pacemaker
 Requires:      %{pkgname_pcmk_libs}%{?_isa} = %{version}-%{release}
 
@@ -442,12 +435,26 @@ manager.
 The %{name}-cluster-libs package contains cluster-aware shared
 libraries needed for nodes that will form part of the cluster nodes.
 
+%package -n %{python_name}-%{name}
+License:       LGPL-2.1-or-later
+Summary:       Python libraries for Pacemaker
+Requires:      %{python_path}
+Requires:      %{pkgname_pcmk_libs} = %{version}-%{release}
+BuildArch:     noarch
+
+%description -n %{python_name}-%{name}
+Pacemaker is an advanced, scalable High-Availability cluster resource
+manager.
+
+The %{python_name}-%{name} package contains a Python library that can be used
+to interface with Pacemaker.
+
 %package remote
 %if %{defined _unitdir}
-License:       GPLv2+ and LGPLv2+
+License:       GPL-2.0-or-later AND LGPL-2.1-or-later
 %else
 # initscript is Revised BSD
-License:       GPLv2+ and LGPLv2+ and BSD
+License:       GPL-2.0-or-later AND LGPL-2.1-or-later AND BSD-3-Clause
 %endif
 Summary:       Pacemaker remote executor daemon for non-cluster nodes
 Requires:      %{pkgname_pcmk_libs}%{?_isa} = %{version}-%{release}
@@ -470,7 +477,7 @@ which is capable of extending pacemaker functionality to remote
 nodes not running the full corosync/cluster stack.
 
 %package -n %{pkgname_pcmk_libs}-devel
-License:       GPLv2+ and LGPLv2+
+License:       GPL-2.0-or-later AND LGPL-2.1-or-later
 Summary:       Pacemaker development package
 Requires:      %{pkgname_pcmk_libs}%{?_isa} = %{version}-%{release}
 Requires:      %{name}-cluster-libs%{?_isa} = %{version}-%{release}
@@ -493,11 +500,12 @@ The %{pkgname_pcmk_libs}-devel package contains headers and shared libraries
 for developing tools for Pacemaker.
 
 %package       cts
-License:       GPLv2+ and LGPLv2+
+License:       GPL-2.0-or-later AND LGPL-2.1-or-later
 Summary:       Test framework for cluster-related technologies like Pacemaker
 Requires:      %{python_path}
 Requires:      %{pkgname_pcmk_libs} = %{version}-%{release}
 Requires:      %{name}-cli = %{version}-%{release}
+Requires:      %{python_name}-%{name} = %{version}-%{release}
 Requires:      %{pkgname_procps}
 Requires:      psmisc
 Requires:      %{python_name}-psutil
@@ -525,7 +533,7 @@ Pacemaker is an advanced, scalable High-Availability cluster resource
 manager.
 
 %package       schemas
-License:       GPLv2+
+License:       GPL-2.0-or-later
 Summary:       Schemas and upgrade stylesheets for Pacemaker
 BuildArch:     noarch
 
@@ -607,6 +615,10 @@ sed -i 's|^runpath_var=LD_RUN_PATH|runpath_var=DIE_RPATH_DIE|g' libtool
 
 make %{_smp_mflags} V=1
 
+pushd python
+%py3_build
+popd
+
 %check
 make %{_smp_mflags} check
 { cts/cts-scheduler --run load-stopped-loop \
@@ -624,6 +636,10 @@ exit $?  # TODO remove when rpm<4.14 compatibility irrelevant
 make install \
   DESTDIR=%{buildroot} V=1 docdir=%{pcmk_docdir} \
   %{?_python_bytecompile_extra:%{?py_byte_compile:am__py_compile=true}}
+
+pushd python
+%py3_install
+popd
 
 %if %{with upstart_job}
 mkdir -p ${RPM_BUILD_ROOT}%{_sysconfdir}/init
@@ -875,17 +891,21 @@ exit 0
 %dir %{ocf_root}/resource.d
 %{ocf_root}/resource.d/pacemaker
 
-%doc %{_mandir}/man7/*
+%doc %{_mandir}/man7/*pacemaker*
 %exclude %{_mandir}/man7/pacemaker-controld.*
 %exclude %{_mandir}/man7/pacemaker-schedulerd.*
 %exclude %{_mandir}/man7/pacemaker-fenced.*
 %exclude %{_mandir}/man7/ocf_pacemaker_controld.*
 %exclude %{_mandir}/man7/ocf_pacemaker_remote.*
-%doc %{_mandir}/man8/*
+%doc %{_mandir}/man8/crm*.8.gz
 %exclude %{_mandir}/man8/crm_master.*
-%exclude %{_mandir}/man8/fence_watchdog.*
-%exclude %{_mandir}/man8/pacemakerd.*
-%exclude %{_mandir}/man8/pacemaker-remoted.*
+%doc %{_mandir}/man8/attrd_updater.*
+%doc %{_mandir}/man8/cibadmin.*
+%if %{with cibsecrets}
+    %doc %{_mandir}/man8/cibsecret.*
+%endif
+%doc %{_mandir}/man8/iso8601.*
+%doc %{_mandir}/man8/stonith_admin.*
 
 %license licenses/GPLv2
 %doc COPYING
@@ -916,6 +936,14 @@ exit 0
 %doc COPYING
 %doc ChangeLog
 
+%files -n %{python_name}-%{name}
+%{python3_sitelib}/pacemaker/
+%{python3_sitelib}/pacemaker-*.egg-info
+%exclude %{python3_sitelib}/pacemaker/_cts/
+%license licenses/LGPLv2.1
+%doc COPYING
+%doc ChangeLog
+
 %files remote
 %config(noreplace) %{_sysconfdir}/sysconfig/pacemaker
 %if %{defined _unitdir}
@@ -941,6 +969,7 @@ exit 0
 
 %files cts
 %{python_site}/cts
+%{python3_sitelib}/pacemaker/_cts/
 %{_datadir}/pacemaker/tests
 
 %{_libexecdir}/pacemaker/cts-log-watcher
@@ -952,8 +981,16 @@ exit 0
 
 %files -n %{pkgname_pcmk_libs}-devel
 %{_includedir}/pacemaker
-%{_libdir}/*.so
-%{_libdir}/pkgconfig/*.pc
+%{_libdir}/libcib.so
+%{_libdir}/liblrmd.so
+%{_libdir}/libcrmservice.so
+%{_libdir}/libcrmcommon.so
+%{_libdir}/libpe_status.so
+%{_libdir}/libpe_rules.so
+%{_libdir}/libpacemaker.so
+%{_libdir}/libstonithd.so
+%{_libdir}/libcrmcluster.so
+%{_libdir}/pkgconfig/*pacemaker*.pc
 %license licenses/LGPLv2.1
 %doc COPYING
 %doc ChangeLog
@@ -973,24 +1010,52 @@ exit 0
 %license %{nagios_name}-%{nagios_hash}/COPYING
 
 %changelog
-* Wed Aug 30 2023 Chris Lumens <clumens@redhat.com> - 2.1.5-9.3
+* Tue Aug 29 2023 Chris Lumens <clumens@redhat.com> - 2.1.6-8
 - Fix an additional shutdown race between attrd and the controller
-- Related: rhbz2229013
+- Related: rhbz2228955
 
-* Tue Aug 8 2023 Chris Lumens <clumens@redhat.com> - 2.1.5-8.3
+* Mon Aug 7 2023 Chris Lumens <clumens@redhat.com> - 2.1.6-7
 - Fix attrd race condition when shutting down
-- Resolves: rhbz2229013
+- Resolves: rhbz2228955
 
-* Wed Aug 2 2023 Chris Lumens <clumens@redhat.com> - 2.1.5-8.2
-- Apply dampening when creating attributes with attrd_updater -U
+* Thu Jul 27 2023 Chris Lumens <clumens@redhat.com> - 2.1.6-6
 - Wait for a reply from various controller commands
-- Resolves: rhbz2224070
-- Resolves: rhbz2225668
+- Resolves: rhbz2225631
+- Related: rhbz2189300
 
-* Fri May 5 2023 Klaus Wenninger <kwenning@redhat.com> - 2.1.5-8.1
-- Fix overall timeout calculation if watchdog and another fencing
-  device share a topology level
-- Resolves: rhbz2187419
+* Tue Jul 25 2023 Chris Lumens <clumens@redhat.com> - 2.1.6-5
+- Apply dampening when creating attributes with attrd_updater -U
+- Resolves: rhbz2224046
+- Related: rhbz2189300
+
+* Wed Jul 19 2023 Chris Lumens <clumens@redhat.com> - 2.1.6-4
+- Clone instances should not shuffle unnecessarily
+- Fix a bug in clone resource description display
+- Resolves: rhbz1931023
+- Resolves: rhbz1688149
+- Related: rhbz2106642
+- Related: rhbz2189300
+
+* Mon Jul 10 2023 Chris Lumens <clumens@redhat.com> - 2.1.6-3
+- Fix moving groups when there's a constraint for a single group member
+- Resolves: rhbz2218232
+- Resolves: rhbz2189300
+
+* Wed Jun 21 2023 Chris Lumens <clumens@redhat.com> - 2.1.6-2
+- Support start state for Pacemaker Remote nodes
+- Resolves: rhbz1502795
+
+* Thu May 25 2023 Chris Lumens <clumens@redhat.com> - 2.1.6-1
+- Rebase pacemaker on upstream 2.1.6 final release
+- Resolves: rhbz1578820
+- Resolves: rhbz1632951
+- Resolves: rhbz1876173
+- Resolves: rhbz2010084
+- Resolves: rhbz2030869
+- Resolves: rhbz2078611
+- Resolves: rhbz2106642
+- Resolves: rhbz2160206
+- Resolves: rhbz2168633
 
 * Wed Feb 22 2023 Chris Lumens <clumens@redhat.com> - 2.1.5-8
 - Rebuild with new release due to build system problems

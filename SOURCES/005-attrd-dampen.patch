@@ -12,7 +12,7 @@ diff --git a/tools/attrd_updater.c b/tools/attrd_updater.c
 index b615a3575..4688b9ff6 100644
 --- a/tools/attrd_updater.c
 +++ b/tools/attrd_updater.c
-@@ -445,7 +445,7 @@
+@@ -501,7 +501,7 @@ send_attrd_update(char command, const char *attr_node, const char *attr_name,
  
          case 'U':
              rc = pcmk__attrd_api_update(NULL, attr_node, attr_name, attr_value,

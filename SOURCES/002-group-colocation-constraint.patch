@@ -1,0 +1,2661 @@
+From 6d438daa021eaef4ca41b84009b9d6fc11173826 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Thu, 20 Apr 2023 11:01:41 -0500
+Subject: [PATCH 01/17] Refactor: scheduler: drop redundant argument from
+ pcmk__new_colocation()
+
+---
+ lib/pacemaker/libpacemaker_private.h  |  2 +-
+ lib/pacemaker/pcmk_sched_bundle.c     |  5 ++---
+ lib/pacemaker/pcmk_sched_colocation.c | 27 +++++++++++----------------
+ lib/pacemaker/pcmk_sched_group.c      |  3 +--
+ lib/pacemaker/pcmk_sched_primitive.c  |  3 +--
+ 5 files changed, 16 insertions(+), 24 deletions(-)
+
+diff --git a/lib/pacemaker/libpacemaker_private.h b/lib/pacemaker/libpacemaker_private.h
+index 192d5a703ff..a6c13220e1d 100644
+--- a/lib/pacemaker/libpacemaker_private.h
++++ b/lib/pacemaker/libpacemaker_private.h
+@@ -483,7 +483,7 @@ G_GNUC_INTERNAL
+ void pcmk__new_colocation(const char *id, const char *node_attr, int score,
+                           pe_resource_t *dependent, pe_resource_t *primary,
+                           const char *dependent_role, const char *primary_role,
+-                          bool influence, pe_working_set_t *data_set);
++                          bool influence);
+ 
+ G_GNUC_INTERNAL
+ void pcmk__block_colocation_dependents(pe_action_t *action,
+diff --git a/lib/pacemaker/pcmk_sched_bundle.c b/lib/pacemaker/pcmk_sched_bundle.c
+index 5682744395a..6024da68fb7 100644
+--- a/lib/pacemaker/pcmk_sched_bundle.c
++++ b/lib/pacemaker/pcmk_sched_bundle.c
+@@ -83,7 +83,7 @@ pcmk__bundle_allocate(pe_resource_t *rsc, const pe_node_t *prefer)
+             pcmk__new_colocation("child-remote-with-docker-remote", NULL,
+                                  INFINITY, replica->remote,
+                                  container_host->details->remote_rsc, NULL,
+-                                 NULL, true, rsc->cluster);
++                                 NULL, true);
+         }
+ 
+         if (replica->remote) {
+@@ -252,8 +252,7 @@ pcmk__bundle_internal_constraints(pe_resource_t *rsc)
+                               pe_order_implies_first|pe_order_preserve);
+ 
+             pcmk__new_colocation("ip-with-docker", NULL, INFINITY, replica->ip,
+-                                 replica->container, NULL, NULL, true,
+-                                 rsc->cluster);
++                                 replica->container, NULL, NULL, true);
+         }
+ 
+         if (replica->remote) {
+diff --git a/lib/pacemaker/pcmk_sched_colocation.c b/lib/pacemaker/pcmk_sched_colocation.c
+index eeef4f1ca55..7d41f4d03e5 100644
+--- a/lib/pacemaker/pcmk_sched_colocation.c
++++ b/lib/pacemaker/pcmk_sched_colocation.c
+@@ -297,13 +297,12 @@ anti_colocation_order(pe_resource_t *first_rsc, int first_role,
+  * \param[in]     dependent_role  Current role of \p dependent
+  * \param[in]     primary_role    Current role of \p primary
+  * \param[in]     influence       Whether colocation constraint has influence
+- * \param[in,out] data_set        Cluster working set to add constraint to
+  */
+ void
+ pcmk__new_colocation(const char *id, const char *node_attr, int score,
+                      pe_resource_t *dependent, pe_resource_t *primary,
+                      const char *dependent_role, const char *primary_role,
+-                     bool influence, pe_working_set_t *data_set)
++                     bool influence)
+ {
+     pcmk__colocation_t *new_con = NULL;
+ 
+@@ -351,8 +350,8 @@ pcmk__new_colocation(const char *id, const char *node_attr, int score,
+     pcmk__add_this_with(&(dependent->rsc_cons), new_con);
+     pcmk__add_with_this(&(primary->rsc_cons_lhs), new_con);
+ 
+-    data_set->colocation_constraints = g_list_append(data_set->colocation_constraints,
+-                                                     new_con);
++    dependent->cluster->colocation_constraints = g_list_append(
++        dependent->cluster->colocation_constraints, new_con);
+ 
+     if (score <= -INFINITY) {
+         anti_colocation_order(dependent, new_con->dependent_role, primary,
+@@ -433,7 +432,7 @@ unpack_colocation_set(xmlNode *set, int score, const char *coloc_id,
+                 pcmk__new_colocation(set_id, NULL, local_score, resource,
+                                      with, role, role,
+                                      unpack_influence(coloc_id, resource,
+-                                                      influence_s), data_set);
++                                                      influence_s));
+             }
+             with = resource;
+         }
+@@ -451,7 +450,7 @@ unpack_colocation_set(xmlNode *set, int score, const char *coloc_id,
+                 pcmk__new_colocation(set_id, NULL, local_score, last,
+                                      resource, role, role,
+                                      unpack_influence(coloc_id, last,
+-                                                      influence_s), data_set);
++                                                      influence_s));
+             }
+ 
+             last = resource;
+@@ -484,8 +483,7 @@ unpack_colocation_set(xmlNode *set, int score, const char *coloc_id,
+                 pe_rsc_trace(resource, "Anti-Colocating %s with %s", resource->id,
+                              with->id);
+                 pcmk__new_colocation(set_id, NULL, local_score,
+-                                     resource, with, role, role,
+-                                     influence, data_set);
++                                     resource, with, role, role, influence);
+             }
+         }
+     }
+@@ -535,8 +533,7 @@ colocate_rsc_sets(const char *id, xmlNode *set1, xmlNode *set2, int score,
+ 
+     if ((rsc_1 != NULL) && (rsc_2 != NULL)) {
+         pcmk__new_colocation(id, NULL, score, rsc_1, rsc_2, role_1, role_2,
+-                             unpack_influence(id, rsc_1, influence_s),
+-                             data_set);
++                             unpack_influence(id, rsc_1, influence_s));
+ 
+     } else if (rsc_1 != NULL) {
+         bool influence = unpack_influence(id, rsc_1, influence_s);
+@@ -546,7 +543,7 @@ colocate_rsc_sets(const char *id, xmlNode *set1, xmlNode *set2, int score,
+ 
+             EXPAND_CONSTRAINT_IDREF(id, rsc_2, ID(xml_rsc));
+             pcmk__new_colocation(id, NULL, score, rsc_1, rsc_2, role_1,
+-                                 role_2, influence, data_set);
++                                 role_2, influence);
+         }
+ 
+     } else if (rsc_2 != NULL) {
+@@ -556,8 +553,7 @@ colocate_rsc_sets(const char *id, xmlNode *set1, xmlNode *set2, int score,
+             EXPAND_CONSTRAINT_IDREF(id, rsc_1, ID(xml_rsc));
+             pcmk__new_colocation(id, NULL, score, rsc_1, rsc_2, role_1,
+                                  role_2,
+-                                 unpack_influence(id, rsc_1, influence_s),
+-                                 data_set);
++                                 unpack_influence(id, rsc_1, influence_s));
+         }
+ 
+     } else {
+@@ -576,8 +572,7 @@ colocate_rsc_sets(const char *id, xmlNode *set1, xmlNode *set2, int score,
+ 
+                 EXPAND_CONSTRAINT_IDREF(id, rsc_2, ID(xml_rsc_2));
+                 pcmk__new_colocation(id, NULL, score, rsc_1, rsc_2,
+-                                     role_1, role_2, influence,
+-                                     data_set);
++                                     role_1, role_2, influence);
+             }
+         }
+     }
+@@ -678,7 +673,7 @@ unpack_simple_colocation(xmlNode *xml_obj, const char *id,
+ 
+     pcmk__new_colocation(id, attr, score_i, dependent, primary,
+                          dependent_role, primary_role,
+-                         unpack_influence(id, dependent, influence_s), data_set);
++                         unpack_influence(id, dependent, influence_s));
+ }
+ 
+ // \return Standard Pacemaker return code
+diff --git a/lib/pacemaker/pcmk_sched_group.c b/lib/pacemaker/pcmk_sched_group.c
+index cb139f7ddf9..c1392e07a4c 100644
+--- a/lib/pacemaker/pcmk_sched_group.c
++++ b/lib/pacemaker/pcmk_sched_group.c
+@@ -171,8 +171,7 @@ member_internal_constraints(gpointer data, gpointer user_data)
+         // Colocate this member with the previous one
+         pcmk__new_colocation("group:internal_colocation", NULL, INFINITY,
+                              member, member_data->previous_member, NULL, NULL,
+-                             pcmk_is_set(member->flags, pe_rsc_critical),
+-                             member->cluster);
++                             pcmk_is_set(member->flags, pe_rsc_critical));
+     }
+ 
+     if (member_data->promotable) {
+diff --git a/lib/pacemaker/pcmk_sched_primitive.c b/lib/pacemaker/pcmk_sched_primitive.c
+index aefbf9aa140..4e3eca3e18a 100644
+--- a/lib/pacemaker/pcmk_sched_primitive.c
++++ b/lib/pacemaker/pcmk_sched_primitive.c
+@@ -999,8 +999,7 @@ pcmk__primitive_internal_constraints(pe_resource_t *rsc)
+                 score = INFINITY; /* Force them to run on the same host */
+             }
+             pcmk__new_colocation("resource-with-container", NULL, score, rsc,
+-                                 rsc->container, NULL, NULL, true,
+-                                 rsc->cluster);
++                                 rsc->container, NULL, NULL, true);
+         }
+     }
+ 
+
+From c6efbe4bc45795f6991b600fc0a70b6a46c10fc3 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Mon, 26 Jun 2023 11:50:57 -0500
+Subject: [PATCH 02/17] Low: scheduler: improve error-checking when creating
+ colocations
+
+---
+ lib/pacemaker/pcmk_sched_colocation.c | 20 ++++++++++++--------
+ 1 file changed, 12 insertions(+), 8 deletions(-)
+
+diff --git a/lib/pacemaker/pcmk_sched_colocation.c b/lib/pacemaker/pcmk_sched_colocation.c
+index 7d41f4d03e5..d591550fb97 100644
+--- a/lib/pacemaker/pcmk_sched_colocation.c
++++ b/lib/pacemaker/pcmk_sched_colocation.c
+@@ -306,21 +306,24 @@ pcmk__new_colocation(const char *id, const char *node_attr, int score,
+ {
+     pcmk__colocation_t *new_con = NULL;
+ 
+-    if (score == 0) {
+-        crm_trace("Ignoring colocation '%s' because score is 0", id);
+-        return;
+-    }
++    CRM_CHECK(id != NULL, return);
++
+     if ((dependent == NULL) || (primary == NULL)) {
+         pcmk__config_err("Ignoring colocation '%s' because resource "
+                          "does not exist", id);
+         return;
+     }
+ 
+-    new_con = calloc(1, sizeof(pcmk__colocation_t));
+-    if (new_con == NULL) {
++    if (score == 0) {
++        pe_rsc_trace(dependent,
++                     "Ignoring colocation '%s' (%s with %s) because score is 0",
++                     id, dependent->id, primary->id);
+         return;
+     }
+ 
++    new_con = calloc(1, sizeof(pcmk__colocation_t));
++    CRM_ASSERT(new_con != NULL);
++
+     if (pcmk__str_eq(dependent_role, RSC_ROLE_STARTED_S,
+                      pcmk__str_null_matches|pcmk__str_casei)) {
+         dependent_role = RSC_ROLE_UNKNOWN_S;
+@@ -344,8 +347,9 @@ pcmk__new_colocation(const char *id, const char *node_attr, int score,
+         node_attr = CRM_ATTR_UNAME;
+     }
+ 
+-    pe_rsc_trace(dependent, "%s ==> %s (%s %d)",
+-                 dependent->id, primary->id, node_attr, score);
++    pe_rsc_trace(dependent, "Added colocation %s (%s with %s @%s using %s)",
++                 new_con->id, dependent->id, primary->id,
++                 pcmk_readable_score(score), node_attr);
+ 
+     pcmk__add_this_with(&(dependent->rsc_cons), new_con);
+     pcmk__add_with_this(&(primary->rsc_cons_lhs), new_con);
+
+From 589403f548459eeddfd5188ba70723ecf9987d2b Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Mon, 26 Jun 2023 12:19:44 -0500
+Subject: [PATCH 03/17] Refactor: scheduler: use flag group instead of bool for
+ colocation influence
+
+... so we can add more flags
+---
+ include/pcmki/pcmki_scheduler.h       |  2 +-
+ lib/pacemaker/libpacemaker_private.h  | 13 +++++-
+ lib/pacemaker/pcmk_sched_bundle.c     |  5 ++-
+ lib/pacemaker/pcmk_sched_colocation.c | 61 ++++++++++++++-------------
+ lib/pacemaker/pcmk_sched_group.c      |  8 +++-
+ lib/pacemaker/pcmk_sched_primitive.c  |  3 +-
+ 6 files changed, 55 insertions(+), 37 deletions(-)
+
+diff --git a/include/pcmki/pcmki_scheduler.h b/include/pcmki/pcmki_scheduler.h
+index dde50a57e32..53de7e1f52e 100644
+--- a/include/pcmki/pcmki_scheduler.h
++++ b/include/pcmki/pcmki_scheduler.h
+@@ -29,7 +29,7 @@ typedef struct {
+     int primary_role;   // Colocation applies only if primary has this role
+ 
+     int score;
+-    bool influence; // Whether dependent influences active primary placement
++    uint32_t flags;     // Group of enum pcmk__coloc_flags
+ } pcmk__colocation_t;
+ 
+ void pcmk__unpack_constraints(pe_working_set_t *data_set);
+diff --git a/lib/pacemaker/libpacemaker_private.h b/lib/pacemaker/libpacemaker_private.h
+index a6c13220e1d..51de9d3e9a9 100644
+--- a/lib/pacemaker/libpacemaker_private.h
++++ b/lib/pacemaker/libpacemaker_private.h
+@@ -16,6 +16,14 @@
+ 
+ #include <crm/pengine/pe_types.h> // pe_action_t, pe_node_t, pe_working_set_t
+ 
++// Colocation flags
++enum pcmk__coloc_flags {
++    pcmk__coloc_none        = 0U,
++
++    // Primary is affected even if already active
++    pcmk__coloc_influence   = (1U << 0),
++};
++
+ // Flags to modify the behavior of add_colocated_node_scores()
+ enum pcmk__coloc_select {
+     // With no other flags, apply all "with this" colocations
+@@ -483,7 +491,7 @@ G_GNUC_INTERNAL
+ void pcmk__new_colocation(const char *id, const char *node_attr, int score,
+                           pe_resource_t *dependent, pe_resource_t *primary,
+                           const char *dependent_role, const char *primary_role,
+-                          bool influence);
++                          uint32_t flags);
+ 
+ G_GNUC_INTERNAL
+ void pcmk__block_colocation_dependents(pe_action_t *action,
+@@ -530,7 +538,8 @@ pcmk__colocation_has_influence(const pcmk__colocation_t *colocation,
+     /* The dependent in a colocation influences the primary's location
+      * if the influence option is true or the primary is not yet active.
+      */
+-    return colocation->influence || (rsc->running_on == NULL);
++    return pcmk_is_set(colocation->flags, pcmk__coloc_influence)
++           || (rsc->running_on == NULL);
+ }
+ 
+ 
+diff --git a/lib/pacemaker/pcmk_sched_bundle.c b/lib/pacemaker/pcmk_sched_bundle.c
+index 6024da68fb7..ca3c21a9977 100644
+--- a/lib/pacemaker/pcmk_sched_bundle.c
++++ b/lib/pacemaker/pcmk_sched_bundle.c
+@@ -83,7 +83,7 @@ pcmk__bundle_allocate(pe_resource_t *rsc, const pe_node_t *prefer)
+             pcmk__new_colocation("child-remote-with-docker-remote", NULL,
+                                  INFINITY, replica->remote,
+                                  container_host->details->remote_rsc, NULL,
+-                                 NULL, true);
++                                 NULL, pcmk__coloc_influence);
+         }
+ 
+         if (replica->remote) {
+@@ -252,7 +252,8 @@ pcmk__bundle_internal_constraints(pe_resource_t *rsc)
+                               pe_order_implies_first|pe_order_preserve);
+ 
+             pcmk__new_colocation("ip-with-docker", NULL, INFINITY, replica->ip,
+-                                 replica->container, NULL, NULL, true);
++                                 replica->container, NULL, NULL,
++                                 pcmk__coloc_influence);
+         }
+ 
+         if (replica->remote) {
+diff --git a/lib/pacemaker/pcmk_sched_colocation.c b/lib/pacemaker/pcmk_sched_colocation.c
+index d591550fb97..dbdefadfd10 100644
+--- a/lib/pacemaker/pcmk_sched_colocation.c
++++ b/lib/pacemaker/pcmk_sched_colocation.c
+@@ -296,13 +296,13 @@ anti_colocation_order(pe_resource_t *first_rsc, int first_role,
+  * \param[in,out] primary         Resource to colocate \p dependent with
+  * \param[in]     dependent_role  Current role of \p dependent
+  * \param[in]     primary_role    Current role of \p primary
+- * \param[in]     influence       Whether colocation constraint has influence
++ * \param[in]     flags           Group of enum pcmk__coloc_flags
+  */
+ void
+ pcmk__new_colocation(const char *id, const char *node_attr, int score,
+                      pe_resource_t *dependent, pe_resource_t *primary,
+                      const char *dependent_role, const char *primary_role,
+-                     bool influence)
++                     uint32_t flags)
+ {
+     pcmk__colocation_t *new_con = NULL;
+ 
+@@ -341,7 +341,7 @@ pcmk__new_colocation(const char *id, const char *node_attr, int score,
+     new_con->dependent_role = text2role(dependent_role);
+     new_con->primary_role = text2role(primary_role);
+     new_con->node_attribute = node_attr;
+-    new_con->influence = influence;
++    new_con->flags = flags;
+ 
+     if (node_attr == NULL) {
+         node_attr = CRM_ATTR_UNAME;
+@@ -373,10 +373,11 @@ pcmk__new_colocation(const char *id, const char *node_attr, int score,
+  * \param[in] rsc          Resource involved in constraint (for default)
+  * \param[in] influence_s  String value of influence option
+  *
+- * \return true if string evaluates true, false if string evaluates false,
+- *         or value of resource's critical option if string is NULL or invalid
++ * \return pcmk__coloc_influence if string evaluates true, or string is NULL or
++ *         invalid and resource's critical option evaluates true, otherwise
++ *         pcmk__coloc_none
+  */
+-static bool
++static uint32_t
+ unpack_influence(const char *coloc_id, const pe_resource_t *rsc,
+                  const char *influence_s)
+ {
+@@ -388,10 +389,13 @@ unpack_influence(const char *coloc_id, const pe_resource_t *rsc,
+                              XML_COLOC_ATTR_INFLUENCE " (using default)",
+                              coloc_id);
+         } else {
+-            return (influence_i != 0);
++            return (influence_i == 0)? pcmk__coloc_none : pcmk__coloc_influence;
+         }
+     }
+-    return pcmk_is_set(rsc->flags, pe_rsc_critical);
++    if (pcmk_is_set(rsc->flags, pe_rsc_critical)) {
++        return pcmk__coloc_influence;
++    }
++    return pcmk__coloc_none;
+ }
+ 
+ static void
+@@ -406,7 +410,7 @@ unpack_colocation_set(xmlNode *set, int score, const char *coloc_id,
+     const char *ordering = crm_element_value(set, "ordering");
+     int local_score = score;
+     bool sequential = false;
+-
++    uint32_t flags = pcmk__coloc_none;
+     const char *score_s = crm_element_value(set, XML_RULE_ATTR_SCORE);
+ 
+     if (score_s) {
+@@ -433,10 +437,9 @@ unpack_colocation_set(xmlNode *set, int score, const char *coloc_id,
+             EXPAND_CONSTRAINT_IDREF(set_id, resource, ID(xml_rsc));
+             if (with != NULL) {
+                 pe_rsc_trace(resource, "Colocating %s with %s", resource->id, with->id);
++                flags = unpack_influence(coloc_id, resource, influence_s);
+                 pcmk__new_colocation(set_id, NULL, local_score, resource,
+-                                     with, role, role,
+-                                     unpack_influence(coloc_id, resource,
+-                                                      influence_s));
++                                     with, role, role, flags);
+             }
+             with = resource;
+         }
+@@ -451,12 +454,10 @@ unpack_colocation_set(xmlNode *set, int score, const char *coloc_id,
+             if (last != NULL) {
+                 pe_rsc_trace(resource, "Colocating %s with %s",
+                              last->id, resource->id);
++                flags = unpack_influence(coloc_id, resource, influence_s);
+                 pcmk__new_colocation(set_id, NULL, local_score, last,
+-                                     resource, role, role,
+-                                     unpack_influence(coloc_id, last,
+-                                                      influence_s));
++                                     resource, role, role, flags);
+             }
+-
+             last = resource;
+         }
+ 
+@@ -470,11 +471,10 @@ unpack_colocation_set(xmlNode *set, int score, const char *coloc_id,
+              xml_rsc != NULL; xml_rsc = crm_next_same_xml(xml_rsc)) {
+ 
+             xmlNode *xml_rsc_with = NULL;
+-            bool influence = true;
+ 
+             EXPAND_CONSTRAINT_IDREF(set_id, resource, ID(xml_rsc));
+-            influence = unpack_influence(coloc_id, resource, influence_s);
+ 
++            flags = unpack_influence(coloc_id, resource, influence_s);
+             for (xml_rsc_with = first_named_child(set, XML_TAG_RESOURCE_REF);
+                  xml_rsc_with != NULL;
+                  xml_rsc_with = crm_next_same_xml(xml_rsc_with)) {
+@@ -487,7 +487,7 @@ unpack_colocation_set(xmlNode *set, int score, const char *coloc_id,
+                 pe_rsc_trace(resource, "Anti-Colocating %s with %s", resource->id,
+                              with->id);
+                 pcmk__new_colocation(set_id, NULL, local_score,
+-                                     resource, with, role, role, influence);
++                                     resource, with, role, role, flags);
+             }
+         }
+     }
+@@ -506,6 +506,7 @@ colocate_rsc_sets(const char *id, xmlNode *set1, xmlNode *set2, int score,
+ 
+     int rc = pcmk_rc_ok;
+     bool sequential = false;
++    uint32_t flags = pcmk__coloc_none;
+ 
+     if (score == 0) {
+         crm_trace("Ignoring colocation '%s' between sets because score is 0",
+@@ -536,18 +537,18 @@ colocate_rsc_sets(const char *id, xmlNode *set1, xmlNode *set2, int score,
+     }
+ 
+     if ((rsc_1 != NULL) && (rsc_2 != NULL)) {
++        flags = unpack_influence(id, rsc_1, influence_s);
+         pcmk__new_colocation(id, NULL, score, rsc_1, rsc_2, role_1, role_2,
+-                             unpack_influence(id, rsc_1, influence_s));
++                             flags);
+ 
+     } else if (rsc_1 != NULL) {
+-        bool influence = unpack_influence(id, rsc_1, influence_s);
+-
++        flags = unpack_influence(id, rsc_1, influence_s);
+         for (xml_rsc = first_named_child(set2, XML_TAG_RESOURCE_REF);
+              xml_rsc != NULL; xml_rsc = crm_next_same_xml(xml_rsc)) {
+ 
+             EXPAND_CONSTRAINT_IDREF(id, rsc_2, ID(xml_rsc));
+             pcmk__new_colocation(id, NULL, score, rsc_1, rsc_2, role_1,
+-                                 role_2, influence);
++                                 role_2, flags);
+         }
+ 
+     } else if (rsc_2 != NULL) {
+@@ -555,9 +556,9 @@ colocate_rsc_sets(const char *id, xmlNode *set1, xmlNode *set2, int score,
+              xml_rsc != NULL; xml_rsc = crm_next_same_xml(xml_rsc)) {
+ 
+             EXPAND_CONSTRAINT_IDREF(id, rsc_1, ID(xml_rsc));
++            flags = unpack_influence(id, rsc_1, influence_s);
+             pcmk__new_colocation(id, NULL, score, rsc_1, rsc_2, role_1,
+-                                 role_2,
+-                                 unpack_influence(id, rsc_1, influence_s));
++                                 role_2, flags);
+         }
+ 
+     } else {
+@@ -565,18 +566,17 @@ colocate_rsc_sets(const char *id, xmlNode *set1, xmlNode *set2, int score,
+              xml_rsc != NULL; xml_rsc = crm_next_same_xml(xml_rsc)) {
+ 
+             xmlNode *xml_rsc_2 = NULL;
+-            bool influence = true;
+ 
+             EXPAND_CONSTRAINT_IDREF(id, rsc_1, ID(xml_rsc));
+-            influence = unpack_influence(id, rsc_1, influence_s);
+ 
++            flags = unpack_influence(id, rsc_1, influence_s);
+             for (xml_rsc_2 = first_named_child(set2, XML_TAG_RESOURCE_REF);
+                  xml_rsc_2 != NULL;
+                  xml_rsc_2 = crm_next_same_xml(xml_rsc_2)) {
+ 
+                 EXPAND_CONSTRAINT_IDREF(id, rsc_2, ID(xml_rsc_2));
+                 pcmk__new_colocation(id, NULL, score, rsc_1, rsc_2,
+-                                     role_1, role_2, influence);
++                                     role_1, role_2, flags);
+             }
+         }
+     }
+@@ -587,6 +587,7 @@ unpack_simple_colocation(xmlNode *xml_obj, const char *id,
+                          const char *influence_s, pe_working_set_t *data_set)
+ {
+     int score_i = 0;
++    uint32_t flags = pcmk__coloc_none;
+ 
+     const char *score = crm_element_value(xml_obj, XML_RULE_ATTR_SCORE);
+     const char *dependent_id = crm_element_value(xml_obj,
+@@ -675,9 +676,9 @@ unpack_simple_colocation(xmlNode *xml_obj, const char *id,
+         score_i = char2score(score);
+     }
+ 
++    flags = unpack_influence(id, dependent, influence_s);
+     pcmk__new_colocation(id, attr, score_i, dependent, primary,
+-                         dependent_role, primary_role,
+-                         unpack_influence(id, dependent, influence_s));
++                         dependent_role, primary_role, flags);
+ }
+ 
+ // \return Standard Pacemaker return code
+diff --git a/lib/pacemaker/pcmk_sched_group.c b/lib/pacemaker/pcmk_sched_group.c
+index c1392e07a4c..72f088a2709 100644
+--- a/lib/pacemaker/pcmk_sched_group.c
++++ b/lib/pacemaker/pcmk_sched_group.c
+@@ -168,10 +168,16 @@ member_internal_constraints(gpointer data, gpointer user_data)
+         }
+ 
+     } else if (member_data->colocated) {
++        uint32_t flags = pcmk__coloc_none;
++
++        if (pcmk_is_set(member->flags, pe_rsc_critical)) {
++            flags |= pcmk__coloc_influence;
++        }
++
+         // Colocate this member with the previous one
+         pcmk__new_colocation("group:internal_colocation", NULL, INFINITY,
+                              member, member_data->previous_member, NULL, NULL,
+-                             pcmk_is_set(member->flags, pe_rsc_critical));
++                             flags);
+     }
+ 
+     if (member_data->promotable) {
+diff --git a/lib/pacemaker/pcmk_sched_primitive.c b/lib/pacemaker/pcmk_sched_primitive.c
+index 4e3eca3e18a..ff7052f6c79 100644
+--- a/lib/pacemaker/pcmk_sched_primitive.c
++++ b/lib/pacemaker/pcmk_sched_primitive.c
+@@ -999,7 +999,8 @@ pcmk__primitive_internal_constraints(pe_resource_t *rsc)
+                 score = INFINITY; /* Force them to run on the same host */
+             }
+             pcmk__new_colocation("resource-with-container", NULL, score, rsc,
+-                                 rsc->container, NULL, NULL, true);
++                                 rsc->container, NULL, NULL,
++                                 pcmk__coloc_influence);
+         }
+     }
+ 
+
+From 2f8d4186e16fb026176f1ddb774eb38940c90390 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Mon, 26 Jun 2023 12:33:49 -0500
+Subject: [PATCH 04/17] Refactor: scheduler: prefix all internal colocation IDs
+ with "#"
+
+... to ensure they're easily distinguished from user-configured colocations
+in log messages.
+---
+ lib/pacemaker/pcmk_sched_bundle.c    | 6 +++---
+ lib/pacemaker/pcmk_sched_group.c     | 5 ++---
+ lib/pacemaker/pcmk_sched_primitive.c | 2 +-
+ 3 files changed, 6 insertions(+), 7 deletions(-)
+
+diff --git a/lib/pacemaker/pcmk_sched_bundle.c b/lib/pacemaker/pcmk_sched_bundle.c
+index ca3c21a9977..b4beb0d488f 100644
+--- a/lib/pacemaker/pcmk_sched_bundle.c
++++ b/lib/pacemaker/pcmk_sched_bundle.c
+@@ -80,7 +80,7 @@ pcmk__bundle_allocate(pe_resource_t *rsc, const pe_node_t *prefer)
+              * host because pacemaker-remoted only supports a single
+              * active connection
+              */
+-            pcmk__new_colocation("child-remote-with-docker-remote", NULL,
++            pcmk__new_colocation("#replica-remote-with-host-remote", NULL,
+                                  INFINITY, replica->remote,
+                                  container_host->details->remote_rsc, NULL,
+                                  NULL, pcmk__coloc_influence);
+@@ -251,14 +251,14 @@ pcmk__bundle_internal_constraints(pe_resource_t *rsc)
+             pcmk__order_stops(replica->container, replica->ip,
+                               pe_order_implies_first|pe_order_preserve);
+ 
+-            pcmk__new_colocation("ip-with-docker", NULL, INFINITY, replica->ip,
++            pcmk__new_colocation("#ip-with-container", NULL, INFINITY, replica->ip,
+                                  replica->container, NULL, NULL,
+                                  pcmk__coloc_influence);
+         }
+ 
+         if (replica->remote) {
+             /* This handles ordering and colocating remote relative to container
+-             * (via "resource-with-container"). Since IP is also ordered and
++             * (via "#resource-with-container"). Since IP is also ordered and
+              * colocated relative to the container, we don't need to do anything
+              * explicit here with IP.
+              */
+diff --git a/lib/pacemaker/pcmk_sched_group.c b/lib/pacemaker/pcmk_sched_group.c
+index 72f088a2709..1b6c5c416ab 100644
+--- a/lib/pacemaker/pcmk_sched_group.c
++++ b/lib/pacemaker/pcmk_sched_group.c
+@@ -175,9 +175,8 @@ member_internal_constraints(gpointer data, gpointer user_data)
+         }
+ 
+         // Colocate this member with the previous one
+-        pcmk__new_colocation("group:internal_colocation", NULL, INFINITY,
+-                             member, member_data->previous_member, NULL, NULL,
+-                             flags);
++        pcmk__new_colocation("#group-members", NULL, INFINITY, member,
++                             member_data->previous_member, NULL, NULL, flags);
+     }
+ 
+     if (member_data->promotable) {
+diff --git a/lib/pacemaker/pcmk_sched_primitive.c b/lib/pacemaker/pcmk_sched_primitive.c
+index ff7052f6c79..d6b39e38c5f 100644
+--- a/lib/pacemaker/pcmk_sched_primitive.c
++++ b/lib/pacemaker/pcmk_sched_primitive.c
+@@ -998,7 +998,7 @@ pcmk__primitive_internal_constraints(pe_resource_t *rsc)
+             } else {
+                 score = INFINITY; /* Force them to run on the same host */
+             }
+-            pcmk__new_colocation("resource-with-container", NULL, score, rsc,
++            pcmk__new_colocation("#resource-with-container", NULL, score, rsc,
+                                  rsc->container, NULL, NULL,
+                                  pcmk__coloc_influence);
+         }
+
+From 93230be27fb4c156a1cc15daf161e2206961421e Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Mon, 26 Jun 2023 16:25:02 -0500
+Subject: [PATCH 05/17] Refactor: scheduler: don't use macro for finding
+ constraint resource
+
+It obscured what was happening
+---
+ lib/pacemaker/pcmk_sched_colocation.c | 105 ++++++++++++++++++++------
+ 1 file changed, 81 insertions(+), 24 deletions(-)
+
+diff --git a/lib/pacemaker/pcmk_sched_colocation.c b/lib/pacemaker/pcmk_sched_colocation.c
+index dbdefadfd10..4d8fe74c206 100644
+--- a/lib/pacemaker/pcmk_sched_colocation.c
++++ b/lib/pacemaker/pcmk_sched_colocation.c
+@@ -21,14 +21,6 @@
+ #include "crm/msg_xml.h"
+ #include "libpacemaker_private.h"
+ 
+-#define EXPAND_CONSTRAINT_IDREF(__set, __rsc, __name) do {                      \
+-        __rsc = pcmk__find_constraint_resource(data_set->resources, __name);    \
+-        if (__rsc == NULL) {                                                    \
+-            pcmk__config_err("%s: No resource found for %s", __set, __name);    \
+-            return;                                                             \
+-        }                                                                       \
+-    } while(0)
+-
+ // Used to temporarily mark a node as unusable
+ #define INFINITY_HACK   (INFINITY * -100)
+ 
+@@ -411,6 +403,7 @@ unpack_colocation_set(xmlNode *set, int score, const char *coloc_id,
+     int local_score = score;
+     bool sequential = false;
+     uint32_t flags = pcmk__coloc_none;
++    const char *xml_rsc_id = NULL;
+     const char *score_s = crm_element_value(set, XML_RULE_ATTR_SCORE);
+ 
+     if (score_s) {
+@@ -434,7 +427,14 @@ unpack_colocation_set(xmlNode *set, int score, const char *coloc_id,
+         for (xml_rsc = first_named_child(set, XML_TAG_RESOURCE_REF);
+              xml_rsc != NULL; xml_rsc = crm_next_same_xml(xml_rsc)) {
+ 
+-            EXPAND_CONSTRAINT_IDREF(set_id, resource, ID(xml_rsc));
++            xml_rsc_id = ID(xml_rsc);
++            resource = pcmk__find_constraint_resource(data_set->resources,
++                                                      xml_rsc_id);
++            if (resource == NULL) {
++                pcmk__config_err("%s: No resource found for %s",
++                                 set_id, xml_rsc_id);
++                return;
++            }
+             if (with != NULL) {
+                 pe_rsc_trace(resource, "Colocating %s with %s", resource->id, with->id);
+                 flags = unpack_influence(coloc_id, resource, influence_s);
+@@ -450,7 +450,14 @@ unpack_colocation_set(xmlNode *set, int score, const char *coloc_id,
+         for (xml_rsc = first_named_child(set, XML_TAG_RESOURCE_REF);
+              xml_rsc != NULL; xml_rsc = crm_next_same_xml(xml_rsc)) {
+ 
+-            EXPAND_CONSTRAINT_IDREF(set_id, resource, ID(xml_rsc));
++            xml_rsc_id = ID(xml_rsc);
++            resource = pcmk__find_constraint_resource(data_set->resources,
++                                                      xml_rsc_id);
++            if (resource == NULL) {
++                pcmk__config_err("%s: No resource found for %s",
++                                 set_id, xml_rsc_id);
++                return;
++            }
+             if (last != NULL) {
+                 pe_rsc_trace(resource, "Colocating %s with %s",
+                              last->id, resource->id);
+@@ -472,18 +479,30 @@ unpack_colocation_set(xmlNode *set, int score, const char *coloc_id,
+ 
+             xmlNode *xml_rsc_with = NULL;
+ 
+-            EXPAND_CONSTRAINT_IDREF(set_id, resource, ID(xml_rsc));
+-
++            xml_rsc_id = ID(xml_rsc);
++            resource = pcmk__find_constraint_resource(data_set->resources,
++                                                      xml_rsc_id);
++            if (resource == NULL) {
++                pcmk__config_err("%s: No resource found for %s",
++                                 set_id, xml_rsc_id);
++                return;
++            }
+             flags = unpack_influence(coloc_id, resource, influence_s);
+             for (xml_rsc_with = first_named_child(set, XML_TAG_RESOURCE_REF);
+                  xml_rsc_with != NULL;
+                  xml_rsc_with = crm_next_same_xml(xml_rsc_with)) {
+ 
+-                if (pcmk__str_eq(resource->id, ID(xml_rsc_with),
+-                                 pcmk__str_casei)) {
++                xml_rsc_id = ID(xml_rsc_with);
++                if (pcmk__str_eq(resource->id, xml_rsc_id, pcmk__str_none)) {
+                     break;
+                 }
+-                EXPAND_CONSTRAINT_IDREF(set_id, with, ID(xml_rsc_with));
++                with = pcmk__find_constraint_resource(data_set->resources,
++                                                      xml_rsc_id);
++                if (with == NULL) {
++                    pcmk__config_err("%s: No resource found for %s",
++                                     set_id, xml_rsc_id);
++                    return;
++                }
+                 pe_rsc_trace(resource, "Anti-Colocating %s with %s", resource->id,
+                              with->id);
+                 pcmk__new_colocation(set_id, NULL, local_score,
+@@ -501,6 +520,7 @@ colocate_rsc_sets(const char *id, xmlNode *set1, xmlNode *set2, int score,
+     pe_resource_t *rsc_1 = NULL;
+     pe_resource_t *rsc_2 = NULL;
+ 
++    const char *xml_rsc_id = NULL;
+     const char *role_1 = crm_element_value(set1, "role");
+     const char *role_2 = crm_element_value(set2, "role");
+ 
+@@ -519,21 +539,30 @@ colocate_rsc_sets(const char *id, xmlNode *set1, xmlNode *set2, int score,
+         // Get the first one
+         xml_rsc = first_named_child(set1, XML_TAG_RESOURCE_REF);
+         if (xml_rsc != NULL) {
+-            EXPAND_CONSTRAINT_IDREF(id, rsc_1, ID(xml_rsc));
++            xml_rsc_id = ID(xml_rsc);
++            rsc_1 = pcmk__find_constraint_resource(data_set->resources,
++                                                   xml_rsc_id);
++            if (rsc_1 == NULL) {
++                pcmk__config_err("%s: No resource found for %s",
++                                 id, xml_rsc_id);
++                return;
++            }
+         }
+     }
+ 
+     rc = pcmk__xe_get_bool_attr(set2, "sequential", &sequential);
+     if (rc != pcmk_rc_ok || sequential) {
+         // Get the last one
+-        const char *rid = NULL;
+-
+         for (xml_rsc = first_named_child(set2, XML_TAG_RESOURCE_REF);
+              xml_rsc != NULL; xml_rsc = crm_next_same_xml(xml_rsc)) {
+ 
+-            rid = ID(xml_rsc);
++            xml_rsc_id = ID(xml_rsc);
++        }
++        rsc_2 = pcmk__find_constraint_resource(data_set->resources, xml_rsc_id);
++        if (rsc_2 == NULL) {
++            pcmk__config_err("%s: No resource found for %s", id, xml_rsc_id);
++            return;
+         }
+-        EXPAND_CONSTRAINT_IDREF(id, rsc_2, rid);
+     }
+ 
+     if ((rsc_1 != NULL) && (rsc_2 != NULL)) {
+@@ -546,7 +575,14 @@ colocate_rsc_sets(const char *id, xmlNode *set1, xmlNode *set2, int score,
+         for (xml_rsc = first_named_child(set2, XML_TAG_RESOURCE_REF);
+              xml_rsc != NULL; xml_rsc = crm_next_same_xml(xml_rsc)) {
+ 
+-            EXPAND_CONSTRAINT_IDREF(id, rsc_2, ID(xml_rsc));
++            xml_rsc_id = ID(xml_rsc);
++            rsc_2 = pcmk__find_constraint_resource(data_set->resources,
++                                                   xml_rsc_id);
++            if (rsc_2 == NULL) {
++                pcmk__config_err("%s: No resource found for %s",
++                                 id, xml_rsc_id);
++                return;
++            }
+             pcmk__new_colocation(id, NULL, score, rsc_1, rsc_2, role_1,
+                                  role_2, flags);
+         }
+@@ -555,7 +591,14 @@ colocate_rsc_sets(const char *id, xmlNode *set1, xmlNode *set2, int score,
+         for (xml_rsc = first_named_child(set1, XML_TAG_RESOURCE_REF);
+              xml_rsc != NULL; xml_rsc = crm_next_same_xml(xml_rsc)) {
+ 
+-            EXPAND_CONSTRAINT_IDREF(id, rsc_1, ID(xml_rsc));
++            xml_rsc_id = ID(xml_rsc);
++            rsc_1 = pcmk__find_constraint_resource(data_set->resources,
++                                                   xml_rsc_id);
++            if (rsc_1 == NULL) {
++                pcmk__config_err("%s: No resource found for %s",
++                                 id, xml_rsc_id);
++                return;
++            }
+             flags = unpack_influence(id, rsc_1, influence_s);
+             pcmk__new_colocation(id, NULL, score, rsc_1, rsc_2, role_1,
+                                  role_2, flags);
+@@ -567,14 +610,28 @@ colocate_rsc_sets(const char *id, xmlNode *set1, xmlNode *set2, int score,
+ 
+             xmlNode *xml_rsc_2 = NULL;
+ 
+-            EXPAND_CONSTRAINT_IDREF(id, rsc_1, ID(xml_rsc));
++            xml_rsc_id = ID(xml_rsc);
++            rsc_1 = pcmk__find_constraint_resource(data_set->resources,
++                                                   xml_rsc_id);
++            if (rsc_1 == NULL) {
++                pcmk__config_err("%s: No resource found for %s",
++                                 id, xml_rsc_id);
++                return;
++            }
+ 
+             flags = unpack_influence(id, rsc_1, influence_s);
+             for (xml_rsc_2 = first_named_child(set2, XML_TAG_RESOURCE_REF);
+                  xml_rsc_2 != NULL;
+                  xml_rsc_2 = crm_next_same_xml(xml_rsc_2)) {
+ 
+-                EXPAND_CONSTRAINT_IDREF(id, rsc_2, ID(xml_rsc_2));
++                xml_rsc_id = ID(xml_rsc_2);
++                rsc_2 = pcmk__find_constraint_resource(data_set->resources,
++                                                       xml_rsc_id);
++                if (rsc_2 == NULL) {
++                    pcmk__config_err("%s: No resource found for %s",
++                                     id, xml_rsc_id);
++                    return;
++                }
+                 pcmk__new_colocation(id, NULL, score, rsc_1, rsc_2,
+                                      role_1, role_2, flags);
+             }
+
+From 23393992a75905f6bd4636f71263c15338c1556f Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Tue, 27 Jun 2023 10:15:19 -0500
+Subject: [PATCH 06/17] Refactor: scheduler: use bool for "group ordering" in
+ colocation sets
+
+... for readability
+---
+ lib/pacemaker/pcmk_sched_colocation.c | 13 ++++++++-----
+ 1 file changed, 8 insertions(+), 5 deletions(-)
+
+diff --git a/lib/pacemaker/pcmk_sched_colocation.c b/lib/pacemaker/pcmk_sched_colocation.c
+index 4d8fe74c206..4c8bca56e86 100644
+--- a/lib/pacemaker/pcmk_sched_colocation.c
++++ b/lib/pacemaker/pcmk_sched_colocation.c
+@@ -399,7 +399,7 @@ unpack_colocation_set(xmlNode *set, int score, const char *coloc_id,
+     pe_resource_t *resource = NULL;
+     const char *set_id = ID(set);
+     const char *role = crm_element_value(set, "role");
+-    const char *ordering = crm_element_value(set, "ordering");
++    bool with_previous = false;
+     int local_score = score;
+     bool sequential = false;
+     uint32_t flags = pcmk__coloc_none;
+@@ -415,15 +415,18 @@ unpack_colocation_set(xmlNode *set, int score, const char *coloc_id,
+         return;
+     }
+ 
+-    if (ordering == NULL) {
+-        ordering = "group";
++    /* The "ordering" attribute specifies whether resources in a positive-score
++     * set are colocated with the previous or next resource.
++     */
++    if (pcmk__str_eq(crm_element_value(set, "ordering"), "group",
++                     pcmk__str_null_matches|pcmk__str_casei)) {
++        with_previous = true;
+     }
+ 
+     if (pcmk__xe_get_bool_attr(set, "sequential", &sequential) == pcmk_rc_ok && !sequential) {
+         return;
+ 
+-    } else if ((local_score > 0)
+-               && pcmk__str_eq(ordering, "group", pcmk__str_casei)) {
++    } else if ((local_score > 0) && with_previous) {
+         for (xml_rsc = first_named_child(set, XML_TAG_RESOURCE_REF);
+              xml_rsc != NULL; xml_rsc = crm_next_same_xml(xml_rsc)) {
+ 
+
+From e42ec03e0fe488a80172e79b319a3084854332de Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Tue, 27 Jun 2023 10:18:22 -0500
+Subject: [PATCH 07/17] Refactor: scheduler: simplify unpacking a colocation
+ set (slightly)
+
+---
+ lib/pacemaker/pcmk_sched_colocation.c | 56 ++++++++++-----------------
+ 1 file changed, 20 insertions(+), 36 deletions(-)
+
+diff --git a/lib/pacemaker/pcmk_sched_colocation.c b/lib/pacemaker/pcmk_sched_colocation.c
+index 4c8bca56e86..e8f01e49a27 100644
+--- a/lib/pacemaker/pcmk_sched_colocation.c
++++ b/lib/pacemaker/pcmk_sched_colocation.c
+@@ -395,7 +395,7 @@ unpack_colocation_set(xmlNode *set, int score, const char *coloc_id,
+                       const char *influence_s, pe_working_set_t *data_set)
+ {
+     xmlNode *xml_rsc = NULL;
+-    pe_resource_t *with = NULL;
++    pe_resource_t *other = NULL;
+     pe_resource_t *resource = NULL;
+     const char *set_id = ID(set);
+     const char *role = crm_element_value(set, "role");
+@@ -426,30 +426,7 @@ unpack_colocation_set(xmlNode *set, int score, const char *coloc_id,
+     if (pcmk__xe_get_bool_attr(set, "sequential", &sequential) == pcmk_rc_ok && !sequential) {
+         return;
+ 
+-    } else if ((local_score > 0) && with_previous) {
+-        for (xml_rsc = first_named_child(set, XML_TAG_RESOURCE_REF);
+-             xml_rsc != NULL; xml_rsc = crm_next_same_xml(xml_rsc)) {
+-
+-            xml_rsc_id = ID(xml_rsc);
+-            resource = pcmk__find_constraint_resource(data_set->resources,
+-                                                      xml_rsc_id);
+-            if (resource == NULL) {
+-                pcmk__config_err("%s: No resource found for %s",
+-                                 set_id, xml_rsc_id);
+-                return;
+-            }
+-            if (with != NULL) {
+-                pe_rsc_trace(resource, "Colocating %s with %s", resource->id, with->id);
+-                flags = unpack_influence(coloc_id, resource, influence_s);
+-                pcmk__new_colocation(set_id, NULL, local_score, resource,
+-                                     with, role, role, flags);
+-            }
+-            with = resource;
+-        }
+-
+     } else if (local_score > 0) {
+-        pe_resource_t *last = NULL;
+-
+         for (xml_rsc = first_named_child(set, XML_TAG_RESOURCE_REF);
+              xml_rsc != NULL; xml_rsc = crm_next_same_xml(xml_rsc)) {
+ 
+@@ -461,14 +438,21 @@ unpack_colocation_set(xmlNode *set, int score, const char *coloc_id,
+                                  set_id, xml_rsc_id);
+                 return;
+             }
+-            if (last != NULL) {
+-                pe_rsc_trace(resource, "Colocating %s with %s",
+-                             last->id, resource->id);
++            if (other != NULL) {
+                 flags = unpack_influence(coloc_id, resource, influence_s);
+-                pcmk__new_colocation(set_id, NULL, local_score, last,
+-                                     resource, role, role, flags);
++                if (with_previous) {
++                    pe_rsc_trace(resource, "Colocating %s with %s in set %s",
++                                 resource->id, other->id, set_id);
++                    pcmk__new_colocation(set_id, NULL, local_score, resource,
++                                         other, role, role, flags);
++                } else {
++                    pe_rsc_trace(resource, "Colocating %s with %s in set %s",
++                                 other->id, resource->id, set_id);
++                    pcmk__new_colocation(set_id, NULL, local_score, other,
++                                         resource, role, role, flags);
++                }
+             }
+-            last = resource;
++            other = resource;
+         }
+ 
+     } else {
+@@ -499,17 +483,17 @@ unpack_colocation_set(xmlNode *set, int score, const char *coloc_id,
+                 if (pcmk__str_eq(resource->id, xml_rsc_id, pcmk__str_none)) {
+                     break;
+                 }
+-                with = pcmk__find_constraint_resource(data_set->resources,
+-                                                      xml_rsc_id);
+-                if (with == NULL) {
++                other = pcmk__find_constraint_resource(data_set->resources,
++                                                       xml_rsc_id);
++                if (other == NULL) {
+                     pcmk__config_err("%s: No resource found for %s",
+                                      set_id, xml_rsc_id);
+                     return;
+                 }
+-                pe_rsc_trace(resource, "Anti-Colocating %s with %s", resource->id,
+-                             with->id);
++                pe_rsc_trace(resource, "Anti-Colocating %s with %s",
++                             resource->id, other->id);
+                 pcmk__new_colocation(set_id, NULL, local_score,
+-                                     resource, with, role, role, flags);
++                                     resource, other, role, role, flags);
+             }
+         }
+     }
+
+From a26ebb380b4bcf1f4fb8a2d69d4b8c8af306dfec Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Mon, 26 Jun 2023 14:56:53 -0500
+Subject: [PATCH 08/17] Feature: CIB: deprecate "ordering" attribute of
+ "resource_set"
+
+It's undocumented, and makes sets even more confusing than they already are,
+especially since it only applies when the score is positive.
+---
+ include/crm/pengine/internal.h        | 1 +
+ lib/pacemaker/pcmk_sched_colocation.c | 9 +++++++--
+ 2 files changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/include/crm/pengine/internal.h b/include/crm/pengine/internal.h
+index 1b5f6f1d8d9..53cbb54de5e 100644
+--- a/include/crm/pengine/internal.h
++++ b/include/crm/pengine/internal.h
+@@ -170,6 +170,7 @@ enum pe_warn_once_e {
+     pe_wo_group_coloc   = (1 << 12),
+     pe_wo_upstart       = (1 << 13),
+     pe_wo_nagios        = (1 << 14),
++    pe_wo_set_ordering  = (1 << 15),
+ };
+ 
+ extern uint32_t pe_wo;
+diff --git a/lib/pacemaker/pcmk_sched_colocation.c b/lib/pacemaker/pcmk_sched_colocation.c
+index e8f01e49a27..36558f38c4e 100644
+--- a/lib/pacemaker/pcmk_sched_colocation.c
++++ b/lib/pacemaker/pcmk_sched_colocation.c
+@@ -415,12 +415,17 @@ unpack_colocation_set(xmlNode *set, int score, const char *coloc_id,
+         return;
+     }
+ 
+-    /* The "ordering" attribute specifies whether resources in a positive-score
+-     * set are colocated with the previous or next resource.
++    /* @COMPAT The deprecated "ordering" attribute specifies whether resources
++     * in a positive-score set are colocated with the previous or next resource.
+      */
+     if (pcmk__str_eq(crm_element_value(set, "ordering"), "group",
+                      pcmk__str_null_matches|pcmk__str_casei)) {
+         with_previous = true;
++    } else {
++        pe_warn_once(pe_wo_set_ordering,
++                     "Support for 'ordering' other than 'group' in "
++                     XML_CONS_TAG_RSC_SET " (such as %s) is deprecated and "
++                     "will be removed in a future release", set_id);
+     }
+ 
+     if (pcmk__xe_get_bool_attr(set, "sequential", &sequential) == pcmk_rc_ok && !sequential) {
+
+From f18f365c0995df68599ec2c241f81bae54d2bd38 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Mon, 26 Jun 2023 15:05:21 -0500
+Subject: [PATCH 09/17] Log: scheduler: improve logs when unpacking colocation
+ sets
+
+---
+ lib/pacemaker/pcmk_sched_colocation.c | 54 +++++++++++++++++----------
+ 1 file changed, 34 insertions(+), 20 deletions(-)
+
+diff --git a/lib/pacemaker/pcmk_sched_colocation.c b/lib/pacemaker/pcmk_sched_colocation.c
+index 36558f38c4e..7555afbc522 100644
+--- a/lib/pacemaker/pcmk_sched_colocation.c
++++ b/lib/pacemaker/pcmk_sched_colocation.c
+@@ -439,8 +439,9 @@ unpack_colocation_set(xmlNode *set, int score, const char *coloc_id,
+             resource = pcmk__find_constraint_resource(data_set->resources,
+                                                       xml_rsc_id);
+             if (resource == NULL) {
+-                pcmk__config_err("%s: No resource found for %s",
+-                                 set_id, xml_rsc_id);
++                // Should be possible only with validation disabled
++                pcmk__config_err("Ignoring %s and later resources in set %s: "
++                                 "No such resource", xml_rsc_id, set_id);
+                 return;
+             }
+             if (other != NULL) {
+@@ -475,8 +476,9 @@ unpack_colocation_set(xmlNode *set, int score, const char *coloc_id,
+             resource = pcmk__find_constraint_resource(data_set->resources,
+                                                       xml_rsc_id);
+             if (resource == NULL) {
+-                pcmk__config_err("%s: No resource found for %s",
+-                                 set_id, xml_rsc_id);
++                // Should be possible only with validation disabled
++                pcmk__config_err("Ignoring %s and later resources in set %s: "
++                                 "No such resource", xml_rsc_id, set_id);
+                 return;
+             }
+             flags = unpack_influence(coloc_id, resource, influence_s);
+@@ -490,11 +492,7 @@ unpack_colocation_set(xmlNode *set, int score, const char *coloc_id,
+                 }
+                 other = pcmk__find_constraint_resource(data_set->resources,
+                                                        xml_rsc_id);
+-                if (other == NULL) {
+-                    pcmk__config_err("%s: No resource found for %s",
+-                                     set_id, xml_rsc_id);
+-                    return;
+-                }
++                CRM_ASSERT(other != NULL); // We already processed it
+                 pe_rsc_trace(resource, "Anti-Colocating %s with %s",
+                              resource->id, other->id);
+                 pcmk__new_colocation(set_id, NULL, local_score,
+@@ -527,7 +525,7 @@ colocate_rsc_sets(const char *id, xmlNode *set1, xmlNode *set2, int score,
+     }
+ 
+     rc = pcmk__xe_get_bool_attr(set1, "sequential", &sequential);
+-    if (rc != pcmk_rc_ok || sequential) {
++    if ((rc != pcmk_rc_ok) || sequential) {
+         // Get the first one
+         xml_rsc = first_named_child(set1, XML_TAG_RESOURCE_REF);
+         if (xml_rsc != NULL) {
+@@ -535,15 +533,17 @@ colocate_rsc_sets(const char *id, xmlNode *set1, xmlNode *set2, int score,
+             rsc_1 = pcmk__find_constraint_resource(data_set->resources,
+                                                    xml_rsc_id);
+             if (rsc_1 == NULL) {
+-                pcmk__config_err("%s: No resource found for %s",
+-                                 id, xml_rsc_id);
++                // Should be possible only with validation disabled
++                pcmk__config_err("Ignoring colocation of set %s with set %s "
++                                 "because first resource %s not found",
++                                 ID(set1), ID(set2), xml_rsc_id);
+                 return;
+             }
+         }
+     }
+ 
+     rc = pcmk__xe_get_bool_attr(set2, "sequential", &sequential);
+-    if (rc != pcmk_rc_ok || sequential) {
++    if ((rc != pcmk_rc_ok) || sequential) {
+         // Get the last one
+         for (xml_rsc = first_named_child(set2, XML_TAG_RESOURCE_REF);
+              xml_rsc != NULL; xml_rsc = crm_next_same_xml(xml_rsc)) {
+@@ -552,7 +552,10 @@ colocate_rsc_sets(const char *id, xmlNode *set1, xmlNode *set2, int score,
+         }
+         rsc_2 = pcmk__find_constraint_resource(data_set->resources, xml_rsc_id);
+         if (rsc_2 == NULL) {
+-            pcmk__config_err("%s: No resource found for %s", id, xml_rsc_id);
++            // Should be possible only with validation disabled
++            pcmk__config_err("Ignoring colocation of set %s with set %s "
++                             "because last resource %s not found",
++                             ID(set1), ID(set2), xml_rsc_id);
+             return;
+         }
+     }
+@@ -573,6 +576,10 @@ colocate_rsc_sets(const char *id, xmlNode *set1, xmlNode *set2, int score,
+             if (rsc_2 == NULL) {
+                 pcmk__config_err("%s: No resource found for %s",
+                                  id, xml_rsc_id);
++                // Should be possible only with validation disabled
++                pcmk__config_err("Ignoring resource %s and later in set %s "
++                                 "for colocation with set %s: No such resource",
++                                 xml_rsc_id, set2, set1);
+                 return;
+             }
+             pcmk__new_colocation(id, NULL, score, rsc_1, rsc_2, role_1,
+@@ -587,8 +594,10 @@ colocate_rsc_sets(const char *id, xmlNode *set1, xmlNode *set2, int score,
+             rsc_1 = pcmk__find_constraint_resource(data_set->resources,
+                                                    xml_rsc_id);
+             if (rsc_1 == NULL) {
+-                pcmk__config_err("%s: No resource found for %s",
+-                                 id, xml_rsc_id);
++                // Should be possible only with validation disabled
++                pcmk__config_err("Ignoring resource %s and later in set %s "
++                                 "for colocation with set %s: No such resource",
++                                 xml_rsc_id, set1, set2);
+                 return;
+             }
+             flags = unpack_influence(id, rsc_1, influence_s);
+@@ -606,8 +615,10 @@ colocate_rsc_sets(const char *id, xmlNode *set1, xmlNode *set2, int score,
+             rsc_1 = pcmk__find_constraint_resource(data_set->resources,
+                                                    xml_rsc_id);
+             if (rsc_1 == NULL) {
+-                pcmk__config_err("%s: No resource found for %s",
+-                                 id, xml_rsc_id);
++                // Should be possible only with validation disabled
++                pcmk__config_err("Ignoring resource %s and later in set %s "
++                                 "for colocation with set %s: No such resource",
++                                 xml_rsc_id, set1, set2);
+                 return;
+             }
+ 
+@@ -620,8 +631,11 @@ colocate_rsc_sets(const char *id, xmlNode *set1, xmlNode *set2, int score,
+                 rsc_2 = pcmk__find_constraint_resource(data_set->resources,
+                                                        xml_rsc_id);
+                 if (rsc_2 == NULL) {
+-                    pcmk__config_err("%s: No resource found for %s",
+-                                     id, xml_rsc_id);
++                    // Should be possible only with validation disabled
++                    pcmk__config_err("Ignoring resource %s and later in set %s "
++                                     "for colocation with %s in set %s: "
++                                     "No such resource",
++                                     xml_rsc_id, set2, ID(xml_rsc), set1);
+                     return;
+                 }
+                 pcmk__new_colocation(id, NULL, score, rsc_1, rsc_2,
+
+From 19e9a9d3b30e857f98459b7f5c4f4938e48e4261 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Mon, 26 Jun 2023 16:25:17 -0500
+Subject: [PATCH 10/17] Refactor: scheduler: mark explicitly configured
+ colocations
+
+---
+ lib/pacemaker/libpacemaker_private.h  |  3 +++
+ lib/pacemaker/pcmk_sched_colocation.c | 18 +++++++++++-------
+ 2 files changed, 14 insertions(+), 7 deletions(-)
+
+diff --git a/lib/pacemaker/libpacemaker_private.h b/lib/pacemaker/libpacemaker_private.h
+index 51de9d3e9a9..a49d55d3c41 100644
+--- a/lib/pacemaker/libpacemaker_private.h
++++ b/lib/pacemaker/libpacemaker_private.h
+@@ -22,6 +22,9 @@ enum pcmk__coloc_flags {
+ 
+     // Primary is affected even if already active
+     pcmk__coloc_influence   = (1U << 0),
++
++    // Colocation was explicitly configured in CIB
++    pcmk__coloc_explicit    = (1U << 1),
+ };
+ 
+ // Flags to modify the behavior of add_colocated_node_scores()
+diff --git a/lib/pacemaker/pcmk_sched_colocation.c b/lib/pacemaker/pcmk_sched_colocation.c
+index 7555afbc522..e0b39b59e81 100644
+--- a/lib/pacemaker/pcmk_sched_colocation.c
++++ b/lib/pacemaker/pcmk_sched_colocation.c
+@@ -445,7 +445,8 @@ unpack_colocation_set(xmlNode *set, int score, const char *coloc_id,
+                 return;
+             }
+             if (other != NULL) {
+-                flags = unpack_influence(coloc_id, resource, influence_s);
++                flags = pcmk__coloc_explicit
++                        | unpack_influence(coloc_id, resource, influence_s);
+                 if (with_previous) {
+                     pe_rsc_trace(resource, "Colocating %s with %s in set %s",
+                                  resource->id, other->id, set_id);
+@@ -481,7 +482,8 @@ unpack_colocation_set(xmlNode *set, int score, const char *coloc_id,
+                                  "No such resource", xml_rsc_id, set_id);
+                 return;
+             }
+-            flags = unpack_influence(coloc_id, resource, influence_s);
++            flags = pcmk__coloc_explicit
++                    | unpack_influence(coloc_id, resource, influence_s);
+             for (xml_rsc_with = first_named_child(set, XML_TAG_RESOURCE_REF);
+                  xml_rsc_with != NULL;
+                  xml_rsc_with = crm_next_same_xml(xml_rsc_with)) {
+@@ -561,12 +563,12 @@ colocate_rsc_sets(const char *id, xmlNode *set1, xmlNode *set2, int score,
+     }
+ 
+     if ((rsc_1 != NULL) && (rsc_2 != NULL)) {
+-        flags = unpack_influence(id, rsc_1, influence_s);
++        flags = pcmk__coloc_explicit | unpack_influence(id, rsc_1, influence_s);
+         pcmk__new_colocation(id, NULL, score, rsc_1, rsc_2, role_1, role_2,
+                              flags);
+ 
+     } else if (rsc_1 != NULL) {
+-        flags = unpack_influence(id, rsc_1, influence_s);
++        flags = pcmk__coloc_explicit | unpack_influence(id, rsc_1, influence_s);
+         for (xml_rsc = first_named_child(set2, XML_TAG_RESOURCE_REF);
+              xml_rsc != NULL; xml_rsc = crm_next_same_xml(xml_rsc)) {
+ 
+@@ -600,7 +602,8 @@ colocate_rsc_sets(const char *id, xmlNode *set1, xmlNode *set2, int score,
+                                  xml_rsc_id, set1, set2);
+                 return;
+             }
+-            flags = unpack_influence(id, rsc_1, influence_s);
++            flags = pcmk__coloc_explicit
++                    | unpack_influence(id, rsc_1, influence_s);
+             pcmk__new_colocation(id, NULL, score, rsc_1, rsc_2, role_1,
+                                  role_2, flags);
+         }
+@@ -622,7 +625,8 @@ colocate_rsc_sets(const char *id, xmlNode *set1, xmlNode *set2, int score,
+                 return;
+             }
+ 
+-            flags = unpack_influence(id, rsc_1, influence_s);
++            flags = pcmk__coloc_explicit
++                    | unpack_influence(id, rsc_1, influence_s);
+             for (xml_rsc_2 = first_named_child(set2, XML_TAG_RESOURCE_REF);
+                  xml_rsc_2 != NULL;
+                  xml_rsc_2 = crm_next_same_xml(xml_rsc_2)) {
+@@ -739,7 +743,7 @@ unpack_simple_colocation(xmlNode *xml_obj, const char *id,
+         score_i = char2score(score);
+     }
+ 
+-    flags = unpack_influence(id, dependent, influence_s);
++    flags = pcmk__coloc_explicit | unpack_influence(id, dependent, influence_s);
+     pcmk__new_colocation(id, attr, score_i, dependent, primary,
+                          dependent_role, primary_role, flags);
+ }
+
+From 4f9e2bc6fb1dd78d5784d918a85bb2028f01d265 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Tue, 27 Jun 2023 10:24:58 -0500
+Subject: [PATCH 11/17] Test: scheduler: add regression test for colocation
+ with an inner group member
+
+As of this commit, the behavior is incorrect.
+---
+ cts/cts-scheduler.in                          |   4 +
+ .../dot/coloc-with-inner-group-member.dot     |   8 +
+ .../exp/coloc-with-inner-group-member.exp     |  38 +++
+ .../coloc-with-inner-group-member.scores      |  46 ++++
+ .../coloc-with-inner-group-member.summary     |  33 +++
+ .../xml/coloc-with-inner-group-member.xml     | 258 ++++++++++++++++++
+ 6 files changed, 387 insertions(+)
+ create mode 100644 cts/scheduler/dot/coloc-with-inner-group-member.dot
+ create mode 100644 cts/scheduler/exp/coloc-with-inner-group-member.exp
+ create mode 100644 cts/scheduler/scores/coloc-with-inner-group-member.scores
+ create mode 100644 cts/scheduler/summary/coloc-with-inner-group-member.summary
+ create mode 100644 cts/scheduler/xml/coloc-with-inner-group-member.xml
+
+diff --git a/cts/cts-scheduler.in b/cts/cts-scheduler.in
+index ee0cb7b4722..de455105985 100644
+--- a/cts/cts-scheduler.in
++++ b/cts/cts-scheduler.in
+@@ -80,6 +80,10 @@ TESTS = [
+         [ "group-dependents", "Account for the location preferences of things colocated with a group" ],
+         [ "group-stop-ordering", "Ensure blocked group member stop does not force other member stops" ],
+         [ "colocate-unmanaged-group", "Respect mandatory colocations even if earlier group member is unmanaged" ],
++        [
++            "coloc-with-inner-group-member",
++            "Consider explicit colocations with inner group members"
++        ],
+     ],
+     [
+         [ "rsc_dep1", "Must not" ],
+diff --git a/cts/scheduler/dot/coloc-with-inner-group-member.dot b/cts/scheduler/dot/coloc-with-inner-group-member.dot
+new file mode 100644
+index 00000000000..77e1a8e6e40
+--- /dev/null
++++ b/cts/scheduler/dot/coloc-with-inner-group-member.dot
+@@ -0,0 +1,8 @@
++ digraph "g" {
++"grp_stop_0" -> "grp_stopped_0" [ style = bold]
++"grp_stop_0" -> "vip_stop_0 rhel8-3" [ style = bold]
++"grp_stop_0" [ style=bold color="green" fontcolor="orange"]
++"grp_stopped_0" [ style=bold color="green" fontcolor="orange"]
++"vip_stop_0 rhel8-3" -> "grp_stopped_0" [ style = bold]
++"vip_stop_0 rhel8-3" [ style=bold color="green" fontcolor="black"]
++}
+diff --git a/cts/scheduler/exp/coloc-with-inner-group-member.exp b/cts/scheduler/exp/coloc-with-inner-group-member.exp
+new file mode 100644
+index 00000000000..e6d94d5fe7f
+--- /dev/null
++++ b/cts/scheduler/exp/coloc-with-inner-group-member.exp
+@@ -0,0 +1,38 @@
++<transition_graph cluster-delay="60s" stonith-timeout="60s" failed-stop-offset="INFINITY" failed-start-offset="1"  transition_id="0">
++  <synapse id="0">
++    <action_set>
++      <pseudo_event id="18" operation="stopped" operation_key="grp_stopped_0">
++        <attributes CRM_meta_timeout="90000" />
++      </pseudo_event>
++    </action_set>
++    <inputs>
++      <trigger>
++        <rsc_op id="14" operation="stop" operation_key="vip_stop_0" on_node="rhel8-3" on_node_uuid="3"/>
++      </trigger>
++      <trigger>
++        <pseudo_event id="17" operation="stop" operation_key="grp_stop_0"/>
++      </trigger>
++    </inputs>
++  </synapse>
++  <synapse id="1">
++    <action_set>
++      <pseudo_event id="17" operation="stop" operation_key="grp_stop_0">
++        <attributes CRM_meta_timeout="90000" />
++      </pseudo_event>
++    </action_set>
++    <inputs/>
++  </synapse>
++  <synapse id="2">
++    <action_set>
++      <rsc_op id="14" operation="stop" operation_key="vip_stop_0" on_node="rhel8-3" on_node_uuid="3">
++        <primitive id="vip" class="ocf" provider="pacemaker" type="Dummy"/>
++        <attributes CRM_meta_name="stop" CRM_meta_on_node="rhel8-3" CRM_meta_on_node_uuid="3" CRM_meta_timeout="20000" />
++      </rsc_op>
++    </action_set>
++    <inputs>
++      <trigger>
++        <pseudo_event id="17" operation="stop" operation_key="grp_stop_0"/>
++      </trigger>
++    </inputs>
++  </synapse>
++</transition_graph>
+diff --git a/cts/scheduler/scores/coloc-with-inner-group-member.scores b/cts/scheduler/scores/coloc-with-inner-group-member.scores
+new file mode 100644
+index 00000000000..10fe944cb42
+--- /dev/null
++++ b/cts/scheduler/scores/coloc-with-inner-group-member.scores
+@@ -0,0 +1,46 @@
++
++pcmk__group_assign: bar allocation score on rhel8-1: 0
++pcmk__group_assign: bar allocation score on rhel8-2: 0
++pcmk__group_assign: bar allocation score on rhel8-3: 0
++pcmk__group_assign: bar allocation score on rhel8-4: 0
++pcmk__group_assign: bar allocation score on rhel8-5: 0
++pcmk__group_assign: foo allocation score on rhel8-1: 0
++pcmk__group_assign: foo allocation score on rhel8-2: 0
++pcmk__group_assign: foo allocation score on rhel8-3: 0
++pcmk__group_assign: foo allocation score on rhel8-4: 0
++pcmk__group_assign: foo allocation score on rhel8-5: 0
++pcmk__group_assign: grp allocation score on rhel8-1: 0
++pcmk__group_assign: grp allocation score on rhel8-2: 0
++pcmk__group_assign: grp allocation score on rhel8-3: 0
++pcmk__group_assign: grp allocation score on rhel8-4: 0
++pcmk__group_assign: grp allocation score on rhel8-5: 0
++pcmk__group_assign: vip allocation score on rhel8-1: 0
++pcmk__group_assign: vip allocation score on rhel8-2: 0
++pcmk__group_assign: vip allocation score on rhel8-3: 0
++pcmk__group_assign: vip allocation score on rhel8-4: 0
++pcmk__group_assign: vip allocation score on rhel8-5: 0
++pcmk__primitive_assign: Fencing allocation score on rhel8-1: 0
++pcmk__primitive_assign: Fencing allocation score on rhel8-2: 0
++pcmk__primitive_assign: Fencing allocation score on rhel8-3: 0
++pcmk__primitive_assign: Fencing allocation score on rhel8-4: 0
++pcmk__primitive_assign: Fencing allocation score on rhel8-5: 0
++pcmk__primitive_assign: bar allocation score on rhel8-1: -INFINITY
++pcmk__primitive_assign: bar allocation score on rhel8-2: -INFINITY
++pcmk__primitive_assign: bar allocation score on rhel8-3: -INFINITY
++pcmk__primitive_assign: bar allocation score on rhel8-4: 0
++pcmk__primitive_assign: bar allocation score on rhel8-5: -INFINITY
++pcmk__primitive_assign: foo allocation score on rhel8-1: 0
++pcmk__primitive_assign: foo allocation score on rhel8-2: 0
++pcmk__primitive_assign: foo allocation score on rhel8-3: 0
++pcmk__primitive_assign: foo allocation score on rhel8-4: 0
++pcmk__primitive_assign: foo allocation score on rhel8-5: 0
++pcmk__primitive_assign: vip allocation score on rhel8-1: -INFINITY
++pcmk__primitive_assign: vip allocation score on rhel8-2: -INFINITY
++pcmk__primitive_assign: vip allocation score on rhel8-3: -INFINITY
++pcmk__primitive_assign: vip allocation score on rhel8-4: -INFINITY
++pcmk__primitive_assign: vip allocation score on rhel8-5: -INFINITY
++pcmk__primitive_assign: vip-dep allocation score on rhel8-1: 0
++pcmk__primitive_assign: vip-dep allocation score on rhel8-2: 0
++pcmk__primitive_assign: vip-dep allocation score on rhel8-3: 0
++pcmk__primitive_assign: vip-dep allocation score on rhel8-4: 0
++pcmk__primitive_assign: vip-dep allocation score on rhel8-5: 0
+diff --git a/cts/scheduler/summary/coloc-with-inner-group-member.summary b/cts/scheduler/summary/coloc-with-inner-group-member.summary
+new file mode 100644
+index 00000000000..3e87f0867ef
+--- /dev/null
++++ b/cts/scheduler/summary/coloc-with-inner-group-member.summary
+@@ -0,0 +1,33 @@
++Using the original execution date of: 2023-06-20 20:45:06Z
++Current cluster status:
++  * Node List:
++    * Online: [ rhel8-1 rhel8-2 rhel8-3 rhel8-4 rhel8-5 ]
++
++  * Full List of Resources:
++    * Fencing	(stonith:fence_xvm):	 Started rhel8-1
++    * vip-dep	(ocf:pacemaker:Dummy):	 Started rhel8-3
++    * Resource Group: grp:
++      * foo	(ocf:pacemaker:Dummy):	 Started rhel8-4
++      * bar	(ocf:pacemaker:Dummy):	 Started rhel8-4
++      * vip	(ocf:pacemaker:Dummy):	 Started rhel8-3
++
++Transition Summary:
++  * Stop       vip     ( rhel8-3 )  due to node availability
++
++Executing Cluster Transition:
++  * Pseudo action:   grp_stop_0
++  * Resource action: vip             stop on rhel8-3
++  * Pseudo action:   grp_stopped_0
++Using the original execution date of: 2023-06-20 20:45:06Z
++
++Revised Cluster Status:
++  * Node List:
++    * Online: [ rhel8-1 rhel8-2 rhel8-3 rhel8-4 rhel8-5 ]
++
++  * Full List of Resources:
++    * Fencing	(stonith:fence_xvm):	 Started rhel8-1
++    * vip-dep	(ocf:pacemaker:Dummy):	 Started rhel8-3
++    * Resource Group: grp:
++      * foo	(ocf:pacemaker:Dummy):	 Started rhel8-4
++      * bar	(ocf:pacemaker:Dummy):	 Started rhel8-4
++      * vip	(ocf:pacemaker:Dummy):	 Stopped
+diff --git a/cts/scheduler/xml/coloc-with-inner-group-member.xml b/cts/scheduler/xml/coloc-with-inner-group-member.xml
+new file mode 100644
+index 00000000000..c07edecb81a
+--- /dev/null
++++ b/cts/scheduler/xml/coloc-with-inner-group-member.xml
+@@ -0,0 +1,258 @@
++<cib crm_feature_set="3.17.4" validate-with="pacemaker-3.0" epoch="78" num_updates="0" admin_epoch="0" cib-last-written="Tue Jun 20 15:45:06 2023" update-origin="rhel8-1" update-client="cibadmin" update-user="root" have-quorum="true" dc-uuid="2" execution-date="1687293906">
++  <!-- The essential elements of this test are:
++       * A group (grp) has three members (foo, bar, and vip).
++       * The last group member (vip) is colocated with a separate primitive
++         (vip-dep).
++       * The primitive and the last group member are active on the same node
++         (rhel8-3), while the first two group members are active on a different
++         node (rhel8-4).
++
++       In this situation, the first two group members should move to the
++       primitive's node.
++    -->
++  <configuration>
++    <crm_config>
++      <cluster_property_set id="cib-bootstrap-options">
++        <nvpair id="cts-stonith-enabled" name="stonith-enabled" value="1"/>
++        <nvpair id="cts-start-failure-is-fatal" name="start-failure-is-fatal" value="false"/>
++        <nvpair id="cts-pe-input-series-max" name="pe-input-series-max" value="5000"/>
++        <nvpair id="cts-shutdown-escalation" name="shutdown-escalation" value="5min"/>
++        <nvpair id="cts-batch-limit" name="batch-limit" value="10"/>
++        <nvpair id="cts-dc-deadtime" name="dc-deadtime" value="5s"/>
++        <nvpair id="cts-no-quorum-policy" name="no-quorum-policy" value="stop"/>
++        <nvpair id="cib-bootstrap-options-have-watchdog" name="have-watchdog" value="false"/>
++        <nvpair id="cib-bootstrap-options-dc-version" name="dc-version" value="2.1.6-1202.32f7557415.git.el8-32f7557415"/>
++        <nvpair id="cib-bootstrap-options-cluster-infrastructure" name="cluster-infrastructure" value="corosync"/>
++        <nvpair id="cib-bootstrap-options-cluster-name" name="cluster-name" value="rhel8-lab"/>
++      </cluster_property_set>
++    </crm_config>
++    <nodes>
++      <node id="5" uname="rhel8-5">
++        <instance_attributes id="rhel8-5-1">
++          <nvpair id="rhel8-5-1-cts-fencing" name="cts-fencing" value="levels-and"/>
++        </instance_attributes>
++      </node>
++      <node id="1" uname="rhel8-1"/>
++      <node id="3" uname="rhel8-3"/>
++      <node id="4" uname="rhel8-4"/>
++      <node id="2" uname="rhel8-2"/>
++    </nodes>
++    <resources>
++      <primitive class="stonith" id="Fencing" type="fence_xvm">
++        <meta_attributes id="Fencing-meta">
++          <nvpair id="Fencing-migration-threshold" name="migration-threshold" value="5"/>
++        </meta_attributes>
++        <instance_attributes id="Fencing-params">
++          <nvpair id="Fencing-pcmk_host_map" name="pcmk_host_map" value="remote-rhel8-1:rhel8-1;remote-rhel8-2:rhel8-2;remote-rhel8-3:rhel8-3;remote-rhel8-4:rhel8-4;remote-rhel8-5:rhel8-5;"/>
++          <nvpair id="Fencing-key_file" name="key_file" value="/etc/pacemaker/fence_xvm.key"/>
++          <nvpair id="Fencing-multicast_address" name="multicast_address" value="239.255.100.100"/>
++          <nvpair id="Fencing-pcmk_host_list" name="pcmk_host_list" value="rhel8-1 remote-rhel8-1 rhel8-2 remote-rhel8-2 rhel8-3 remote-rhel8-3 rhel8-4 remote-rhel8-4 rhel8-5 remote-rhel8-5"/>
++        </instance_attributes>
++        <operations>
++          <op id="Fencing-monitor-120s" interval="120s" name="monitor" timeout="120s"/>
++          <op id="Fencing-stop-0" interval="0" name="stop" timeout="60s"/>
++          <op id="Fencing-start-0" interval="0" name="start" timeout="60s"/>
++        </operations>
++      </primitive>
++      <primitive class="ocf" id="vip-dep" provider="pacemaker" type="Dummy">
++        <operations>
++          <op id="vip-dep-migrate_from-interval-0s" interval="0s" name="migrate_from" timeout="20s"/>
++          <op id="vip-dep-migrate_to-interval-0s" interval="0s" name="migrate_to" timeout="20s"/>
++          <op id="vip-dep-monitor-interval-10s" interval="10s" name="monitor" timeout="20s"/>
++          <op id="vip-dep-reload-interval-0s" interval="0s" name="reload" timeout="20s"/>
++          <op id="vip-dep-reload-agent-interval-0s" interval="0s" name="reload-agent" timeout="20s"/>
++          <op id="vip-dep-start-interval-0s" interval="0s" name="start" timeout="20s"/>
++          <op id="vip-dep-stop-interval-0s" interval="0s" name="stop" timeout="20s"/>
++        </operations>
++      </primitive>
++      <group id="grp">
++        <primitive class="ocf" id="foo" provider="pacemaker" type="Dummy">
++          <operations>
++            <op id="foo-migrate_from-interval-0s" interval="0s" name="migrate_from" timeout="20s"/>
++            <op id="foo-migrate_to-interval-0s" interval="0s" name="migrate_to" timeout="20s"/>
++            <op id="foo-monitor-interval-10s" interval="10s" name="monitor" timeout="20s"/>
++            <op id="foo-reload-interval-0s" interval="0s" name="reload" timeout="20s"/>
++            <op id="foo-reload-agent-interval-0s" interval="0s" name="reload-agent" timeout="20s"/>
++            <op id="foo-start-interval-0s" interval="0s" name="start" timeout="20s"/>
++            <op id="foo-stop-interval-0s" interval="0s" name="stop" timeout="20s"/>
++          </operations>
++        </primitive>
++        <primitive class="ocf" id="bar" provider="pacemaker" type="Dummy">
++          <operations>
++            <op id="bar-migrate_from-interval-0s" interval="0s" name="migrate_from" timeout="20s"/>
++            <op id="bar-migrate_to-interval-0s" interval="0s" name="migrate_to" timeout="20s"/>
++            <op id="bar-monitor-interval-10s" interval="10s" name="monitor" timeout="20s"/>
++            <op id="bar-reload-interval-0s" interval="0s" name="reload" timeout="20s"/>
++            <op id="bar-reload-agent-interval-0s" interval="0s" name="reload-agent" timeout="20s"/>
++            <op id="bar-start-interval-0s" interval="0s" name="start" timeout="20s"/>
++            <op id="bar-stop-interval-0s" interval="0s" name="stop" timeout="20s"/>
++          </operations>
++        </primitive>
++        <primitive class="ocf" id="vip" provider="pacemaker" type="Dummy">
++          <operations>
++            <op id="vip-migrate_from-interval-0s" interval="0s" name="migrate_from" timeout="20s"/>
++            <op id="vip-migrate_to-interval-0s" interval="0s" name="migrate_to" timeout="20s"/>
++            <op id="vip-monitor-interval-10s" interval="10s" name="monitor" timeout="20s"/>
++            <op id="vip-reload-interval-0s" interval="0s" name="reload" timeout="20s"/>
++            <op id="vip-reload-agent-interval-0s" interval="0s" name="reload-agent" timeout="20s"/>
++            <op id="vip-start-interval-0s" interval="0s" name="start" timeout="20s"/>
++            <op id="vip-stop-interval-0s" interval="0s" name="stop" timeout="20s"/>
++          </operations>
++        </primitive>
++      </group>
++    </resources>
++    <constraints>
++      <rsc_order first="vip-dep" first-action="start" id="order-vip-dep-vip-mandatory" then="vip" then-action="start"/>
++      <rsc_colocation id="colocation-vip-vip-dep-INFINITY" rsc="vip" score="INFINITY" with-rsc="vip-dep"/>
++    </constraints>
++    <fencing-topology/>
++    <op_defaults>
++      <meta_attributes id="cts-op_defaults-meta">
++        <nvpair id="cts-op_defaults-timeout" name="timeout" value="90s"/>
++      </meta_attributes>
++    </op_defaults>
++    <alerts>
++      <alert id="alert-1" path="/var/lib/pacemaker/notify.sh">
++        <recipient id="alert-1-recipient-1" value="/run/crm/alert.log"/>
++      </alert>
++    </alerts>
++  </configuration>
++  <status>
++    <node_state id="2" uname="rhel8-2" in_ccm="true" crmd="online" crm-debug-origin="controld_update_resource_history" join="member" expected="member">
++      <lrm id="2">
++        <lrm_resources>
++          <lrm_resource id="Fencing" class="stonith" type="fence_xvm">
++            <lrm_rsc_op id="Fencing_last_0" operation_key="Fencing_monitor_0" operation="monitor" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.17.4" transition-key="4:0:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" transition-magic="0:7;4:0:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" exit-reason="" on_node="rhel8-2" call-id="9" rc-code="7" op-status="0" interval="0" last-rc-change="1687293860" exec-time="1" queue-time="0" op-digest="bf974d77f2d4d33e434be1f89e362a52"/>
++          </lrm_resource>
++          <lrm_resource id="vip-dep" class="ocf" provider="pacemaker" type="Dummy">
++            <lrm_rsc_op id="vip-dep_last_0" operation_key="vip-dep_monitor_0" operation="monitor" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.17.4" transition-key="3:1:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" transition-magic="0:7;3:1:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" exit-reason="" on_node="rhel8-2" call-id="21" rc-code="7" op-status="0" interval="0" last-rc-change="1687293879" exec-time="25" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-force-restart="  state  " op-restart-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-secure-params="  passwd  " op-secure-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++          </lrm_resource>
++          <lrm_resource id="vip" class="ocf" provider="pacemaker" type="Dummy">
++            <lrm_rsc_op id="vip_last_0" operation_key="vip_monitor_0" operation="monitor" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.17.4" transition-key="4:2:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" transition-magic="0:7;4:2:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" exit-reason="" on_node="rhel8-2" call-id="25" rc-code="7" op-status="0" interval="0" last-rc-change="1687293885" exec-time="36" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-force-restart="  state  " op-restart-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-secure-params="  passwd  " op-secure-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++          </lrm_resource>
++          <lrm_resource id="foo" class="ocf" provider="pacemaker" type="Dummy">
++            <lrm_rsc_op id="foo_last_0" operation_key="foo_monitor_0" operation="monitor" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.17.4" transition-key="5:5:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" transition-magic="0:7;5:5:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" exit-reason="" on_node="rhel8-2" call-id="29" rc-code="7" op-status="0" interval="0" last-rc-change="1687293893" exec-time="36" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-force-restart="  state  " op-restart-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-secure-params="  passwd  " op-secure-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++          </lrm_resource>
++          <lrm_resource id="bar" class="ocf" provider="pacemaker" type="Dummy">
++            <lrm_rsc_op id="bar_last_0" operation_key="bar_monitor_0" operation="monitor" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.17.4" transition-key="6:6:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" transition-magic="0:7;6:6:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" exit-reason="" on_node="rhel8-2" call-id="33" rc-code="7" op-status="0" interval="0" last-rc-change="1687293894" exec-time="30" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-force-restart="  state  " op-restart-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-secure-params="  passwd  " op-secure-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++          </lrm_resource>
++        </lrm_resources>
++      </lrm>
++      <transient_attributes id="2">
++        <instance_attributes id="status-2">
++          <nvpair id="status-2-.feature-set" name="#feature-set" value="3.17.4"/>
++        </instance_attributes>
++      </transient_attributes>
++    </node_state>
++    <node_state id="5" uname="rhel8-5" in_ccm="true" crmd="online" crm-debug-origin="controld_update_resource_history" join="member" expected="member">
++      <lrm id="5">
++        <lrm_resources>
++          <lrm_resource id="Fencing" class="stonith" type="fence_xvm">
++            <lrm_rsc_op id="Fencing_last_0" operation_key="Fencing_monitor_0" operation="monitor" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.17.4" transition-key="13:0:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" transition-magic="0:7;13:0:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" exit-reason="" on_node="rhel8-5" call-id="9" rc-code="7" op-status="0" interval="0" last-rc-change="1687293860" exec-time="1" queue-time="0" op-digest="bf974d77f2d4d33e434be1f89e362a52"/>
++          </lrm_resource>
++          <lrm_resource id="vip-dep" class="ocf" provider="pacemaker" type="Dummy">
++            <lrm_rsc_op id="vip-dep_last_0" operation_key="vip-dep_monitor_0" operation="monitor" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.17.4" transition-key="6:1:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" transition-magic="0:7;6:1:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" exit-reason="" on_node="rhel8-5" call-id="21" rc-code="7" op-status="0" interval="0" last-rc-change="1687293879" exec-time="27" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-force-restart="  state  " op-restart-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-secure-params="  passwd  " op-secure-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++          </lrm_resource>
++          <lrm_resource id="vip" class="ocf" provider="pacemaker" type="Dummy">
++            <lrm_rsc_op id="vip_last_0" operation_key="vip_monitor_0" operation="monitor" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.17.4" transition-key="7:2:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" transition-magic="0:7;7:2:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" exit-reason="" on_node="rhel8-5" call-id="25" rc-code="7" op-status="0" interval="0" last-rc-change="1687293885" exec-time="39" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-force-restart="  state  " op-restart-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-secure-params="  passwd  " op-secure-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++          </lrm_resource>
++          <lrm_resource id="foo" class="ocf" provider="pacemaker" type="Dummy">
++            <lrm_rsc_op id="foo_last_0" operation_key="foo_monitor_0" operation="monitor" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.17.4" transition-key="8:5:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" transition-magic="0:7;8:5:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" exit-reason="" on_node="rhel8-5" call-id="29" rc-code="7" op-status="0" interval="0" last-rc-change="1687293893" exec-time="40" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-force-restart="  state  " op-restart-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-secure-params="  passwd  " op-secure-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++          </lrm_resource>
++          <lrm_resource id="bar" class="ocf" provider="pacemaker" type="Dummy">
++            <lrm_rsc_op id="bar_last_0" operation_key="bar_monitor_0" operation="monitor" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.17.4" transition-key="9:6:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" transition-magic="0:7;9:6:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" exit-reason="" on_node="rhel8-5" call-id="33" rc-code="7" op-status="0" interval="0" last-rc-change="1687293894" exec-time="32" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-force-restart="  state  " op-restart-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-secure-params="  passwd  " op-secure-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++          </lrm_resource>
++        </lrm_resources>
++      </lrm>
++      <transient_attributes id="5">
++        <instance_attributes id="status-5">
++          <nvpair id="status-5-.feature-set" name="#feature-set" value="3.17.4"/>
++        </instance_attributes>
++      </transient_attributes>
++    </node_state>
++    <node_state id="1" uname="rhel8-1" in_ccm="true" crmd="online" crm-debug-origin="controld_update_resource_history" join="member" expected="member">
++      <lrm id="1">
++        <lrm_resources>
++          <lrm_resource id="Fencing" class="stonith" type="fence_xvm">
++            <lrm_rsc_op id="Fencing_last_0" operation_key="Fencing_start_0" operation="start" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.17.4" transition-key="16:0:0:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" transition-magic="0:0;16:0:0:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" exit-reason="" on_node="rhel8-1" call-id="14" rc-code="0" op-status="0" interval="0" last-rc-change="1687293860" exec-time="52" queue-time="0" op-digest="bf974d77f2d4d33e434be1f89e362a52"/>
++            <lrm_rsc_op id="Fencing_monitor_120000" operation_key="Fencing_monitor_120000" operation="monitor" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.17.4" transition-key="17:0:0:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" transition-magic="0:0;17:0:0:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" exit-reason="" on_node="rhel8-1" call-id="16" rc-code="0" op-status="0" interval="120000" last-rc-change="1687293860" exec-time="35" queue-time="0" op-digest="24c9c9364f847dcb857d6fb4e1b4d3c8"/>
++          </lrm_resource>
++          <lrm_resource id="vip-dep" class="ocf" provider="pacemaker" type="Dummy">
++            <lrm_rsc_op id="vip-dep_last_0" operation_key="vip-dep_monitor_0" operation="monitor" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.17.4" transition-key="2:1:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" transition-magic="0:7;2:1:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" exit-reason="" on_node="rhel8-1" call-id="25" rc-code="7" op-status="0" interval="0" last-rc-change="1687293879" exec-time="57" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-force-restart="  state  " op-restart-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-secure-params="  passwd  " op-secure-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++          </lrm_resource>
++          <lrm_resource id="vip" class="ocf" provider="pacemaker" type="Dummy">
++            <lrm_rsc_op id="vip_last_0" operation_key="vip_monitor_0" operation="monitor" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.17.4" transition-key="3:2:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" transition-magic="0:7;3:2:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" exit-reason="" on_node="rhel8-1" call-id="29" rc-code="7" op-status="0" interval="0" last-rc-change="1687293885" exec-time="34" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-force-restart="  state  " op-restart-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-secure-params="  passwd  " op-secure-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++          </lrm_resource>
++          <lrm_resource id="foo" class="ocf" provider="pacemaker" type="Dummy">
++            <lrm_rsc_op id="foo_last_0" operation_key="foo_monitor_0" operation="monitor" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.17.4" transition-key="4:5:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" transition-magic="0:7;4:5:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" exit-reason="" on_node="rhel8-1" call-id="33" rc-code="7" op-status="0" interval="0" last-rc-change="1687293893" exec-time="62" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-force-restart="  state  " op-restart-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-secure-params="  passwd  " op-secure-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++          </lrm_resource>
++          <lrm_resource id="bar" class="ocf" provider="pacemaker" type="Dummy">
++            <lrm_rsc_op id="bar_last_0" operation_key="bar_monitor_0" operation="monitor" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.17.4" transition-key="5:6:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" transition-magic="0:7;5:6:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" exit-reason="" on_node="rhel8-1" call-id="37" rc-code="7" op-status="0" interval="0" last-rc-change="1687293894" exec-time="70" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-force-restart="  state  " op-restart-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-secure-params="  passwd  " op-secure-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++          </lrm_resource>
++        </lrm_resources>
++      </lrm>
++      <transient_attributes id="1">
++        <instance_attributes id="status-1">
++          <nvpair id="status-1-.feature-set" name="#feature-set" value="3.17.4"/>
++        </instance_attributes>
++      </transient_attributes>
++    </node_state>
++    <node_state id="3" uname="rhel8-3" in_ccm="true" crmd="online" crm-debug-origin="controld_update_resource_history" join="member" expected="member">
++      <lrm id="3">
++        <lrm_resources>
++          <lrm_resource id="Fencing" class="stonith" type="fence_xvm">
++            <lrm_rsc_op id="Fencing_last_0" operation_key="Fencing_monitor_0" operation="monitor" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.17.4" transition-key="7:0:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" transition-magic="0:7;7:0:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" exit-reason="" on_node="rhel8-3" call-id="9" rc-code="7" op-status="0" interval="0" last-rc-change="1687293860" exec-time="1" queue-time="0" op-digest="bf974d77f2d4d33e434be1f89e362a52"/>
++          </lrm_resource>
++          <lrm_resource id="vip-dep" class="ocf" provider="pacemaker" type="Dummy">
++            <lrm_rsc_op id="vip-dep_last_0" operation_key="vip-dep_start_0" operation="start" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.17.4" transition-key="11:1:0:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" transition-magic="0:0;11:1:0:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" exit-reason="" on_node="rhel8-3" call-id="22" rc-code="0" op-status="0" interval="0" last-rc-change="1687293879" exec-time="19" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-force-restart="  state  " op-restart-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-secure-params="  passwd  " op-secure-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++            <lrm_rsc_op id="vip-dep_monitor_10000" operation_key="vip-dep_monitor_10000" operation="monitor" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.17.4" transition-key="12:1:0:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" transition-magic="0:0;12:1:0:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" exit-reason="" on_node="rhel8-3" call-id="24" rc-code="0" op-status="0" interval="10000" last-rc-change="1687293879" exec-time="18" queue-time="0" op-digest="4811cef7f7f94e3a35a70be7916cb2fd" op-secure-params="  passwd  " op-secure-digest="4811cef7f7f94e3a35a70be7916cb2fd"/>
++          </lrm_resource>
++          <lrm_resource id="vip" class="ocf" provider="pacemaker" type="Dummy">
++            <lrm_rsc_op id="vip_last_0" operation_key="vip_start_0" operation="start" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.17.4" transition-key="11:4:0:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" transition-magic="0:0;11:4:0:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" exit-reason="" on_node="rhel8-3" call-id="30" rc-code="0" op-status="0" interval="0" last-rc-change="1687293893" exec-time="20" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-force-restart="  state  " op-restart-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-secure-params="  passwd  " op-secure-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++            <lrm_rsc_op id="vip_monitor_10000" operation_key="vip_monitor_10000" operation="monitor" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.17.4" transition-key="12:4:0:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" transition-magic="0:0;12:4:0:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" exit-reason="" on_node="rhel8-3" call-id="32" rc-code="0" op-status="0" interval="10000" last-rc-change="1687293893" exec-time="20" queue-time="0" op-digest="4811cef7f7f94e3a35a70be7916cb2fd" op-secure-params="  passwd  " op-secure-digest="4811cef7f7f94e3a35a70be7916cb2fd"/>
++          </lrm_resource>
++          <lrm_resource id="foo" class="ocf" provider="pacemaker" type="Dummy">
++            <lrm_rsc_op id="foo_last_0" operation_key="foo_monitor_0" operation="monitor" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.17.4" transition-key="6:5:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" transition-magic="0:7;6:5:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" exit-reason="" on_node="rhel8-3" call-id="37" rc-code="7" op-status="0" interval="0" last-rc-change="1687293893" exec-time="34" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-force-restart="  state  " op-restart-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-secure-params="  passwd  " op-secure-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++          </lrm_resource>
++          <lrm_resource id="bar" class="ocf" provider="pacemaker" type="Dummy">
++            <lrm_rsc_op id="bar_last_0" operation_key="bar_monitor_0" operation="monitor" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.17.4" transition-key="7:6:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" transition-magic="0:7;7:6:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" exit-reason="" on_node="rhel8-3" call-id="41" rc-code="7" op-status="0" interval="0" last-rc-change="1687293894" exec-time="45" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-force-restart="  state  " op-restart-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-secure-params="  passwd  " op-secure-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++          </lrm_resource>
++        </lrm_resources>
++      </lrm>
++      <transient_attributes id="3">
++        <instance_attributes id="status-3">
++          <nvpair id="status-3-.feature-set" name="#feature-set" value="3.17.4"/>
++        </instance_attributes>
++      </transient_attributes>
++    </node_state>
++    <node_state id="4" uname="rhel8-4" in_ccm="true" crmd="online" crm-debug-origin="controld_update_resource_history" join="member" expected="member">
++      <lrm id="4">
++        <lrm_resources>
++          <lrm_resource id="Fencing" class="stonith" type="fence_xvm">
++            <lrm_rsc_op id="Fencing_last_0" operation_key="Fencing_monitor_0" operation="monitor" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.17.4" transition-key="10:0:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" transition-magic="0:7;10:0:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" exit-reason="" on_node="rhel8-4" call-id="10" rc-code="7" op-status="0" interval="0" last-rc-change="1687293860" exec-time="5" queue-time="0" op-digest="bf974d77f2d4d33e434be1f89e362a52"/>
++          </lrm_resource>
++          <lrm_resource id="vip-dep" class="ocf" provider="pacemaker" type="Dummy">
++            <lrm_rsc_op id="vip-dep_last_0" operation_key="vip-dep_monitor_0" operation="monitor" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.17.4" transition-key="5:1:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" transition-magic="0:7;5:1:7:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" exit-reason="" on_node="rhel8-4" call-id="22" rc-code="7" op-status="0" interval="0" last-rc-change="1687293879" exec-time="26" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-force-restart="  state  " op-restart-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-secure-params="  passwd  " op-secure-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++          </lrm_resource>
++          <lrm_resource id="vip" class="ocf" provider="pacemaker" type="Dummy">
++            <lrm_rsc_op id="vip_last_0" operation_key="vip_stop_0" operation="stop" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.17.4" transition-key="10:4:0:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" transition-magic="0:0;10:4:0:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" exit-reason="" on_node="rhel8-4" call-id="32" rc-code="0" op-status="0" interval="0" last-rc-change="1687293893" exec-time="29" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-force-restart="  state  " op-restart-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-secure-params="  passwd  " op-secure-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++            <lrm_rsc_op id="vip_monitor_10000" operation_key="vip_monitor_10000" operation="monitor" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.17.4" transition-key="15:2:0:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" transition-magic="0:0;15:2:0:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" exit-reason="" on_node="rhel8-4" call-id="29" rc-code="0" op-status="0" interval="10000" last-rc-change="1687293885" exec-time="18" queue-time="0" op-digest="4811cef7f7f94e3a35a70be7916cb2fd" op-secure-params="  passwd  " op-secure-digest="4811cef7f7f94e3a35a70be7916cb2fd"/>
++          </lrm_resource>
++          <lrm_resource id="foo" class="ocf" provider="pacemaker" type="Dummy">
++            <lrm_rsc_op id="foo_last_0" operation_key="foo_start_0" operation="start" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.17.4" transition-key="17:5:0:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" transition-magic="0:0;17:5:0:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" exit-reason="" on_node="rhel8-4" call-id="39" rc-code="0" op-status="0" interval="0" last-rc-change="1687293893" exec-time="14" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-force-restart="  state  " op-restart-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-secure-params="  passwd  " op-secure-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++            <lrm_rsc_op id="foo_monitor_10000" operation_key="foo_monitor_10000" operation="monitor" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.17.4" transition-key="18:5:0:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" transition-magic="0:0;18:5:0:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" exit-reason="" on_node="rhel8-4" call-id="41" rc-code="0" op-status="0" interval="10000" last-rc-change="1687293893" exec-time="18" queue-time="0" op-digest="4811cef7f7f94e3a35a70be7916cb2fd" op-secure-params="  passwd  " op-secure-digest="4811cef7f7f94e3a35a70be7916cb2fd"/>
++          </lrm_resource>
++          <lrm_resource id="bar" class="ocf" provider="pacemaker" type="Dummy">
++            <lrm_rsc_op id="bar_last_0" operation_key="bar_start_0" operation="start" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.17.4" transition-key="20:6:0:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" transition-magic="0:0;20:6:0:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" exit-reason="" on_node="rhel8-4" call-id="47" rc-code="0" op-status="0" interval="0" last-rc-change="1687293894" exec-time="16" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-force-restart="  state  " op-restart-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8" op-secure-params="  passwd  " op-secure-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++            <lrm_rsc_op id="bar_monitor_10000" operation_key="bar_monitor_10000" operation="monitor" crm-debug-origin="controld_update_resource_history" crm_feature_set="3.17.4" transition-key="21:6:0:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" transition-magic="0:0;21:6:0:72d50bf3-3ecf-4bdb-af9c-fd66cdae2841" exit-reason="" on_node="rhel8-4" call-id="49" rc-code="0" op-status="0" interval="10000" last-rc-change="1687293894" exec-time="19" queue-time="0" op-digest="4811cef7f7f94e3a35a70be7916cb2fd" op-secure-params="  passwd  " op-secure-digest="4811cef7f7f94e3a35a70be7916cb2fd"/>
++          </lrm_resource>
++        </lrm_resources>
++      </lrm>
++      <transient_attributes id="4">
++        <instance_attributes id="status-4">
++          <nvpair id="status-4-.feature-set" name="#feature-set" value="3.17.4"/>
++        </instance_attributes>
++      </transient_attributes>
++    </node_state>
++  </status>
++</cib>
+
+From 7fa4999f96d7541ee0dad248477c3e7d4affff00 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Tue, 20 Jun 2023 19:23:18 -0500
+Subject: [PATCH 12/17] Fix: scheduler: consider explicit colocations with
+ group members
+
+Previously, a group's colocations would include only colocations explicitly
+with the group itself, and with its first member (for "group with" colocations)
+or last member (for "with group" colocations). Explicit colocations with a
+different group member could cause incorrect node assignment.
+
+Fixes T679
+---
+ lib/pacemaker/pcmk_sched_group.c     | 70 +++++++++++++++++++++-------
+ lib/pacemaker/pcmk_sched_primitive.c | 52 ++++++++++++++-------
+ 2 files changed, 90 insertions(+), 32 deletions(-)
+
+diff --git a/lib/pacemaker/pcmk_sched_group.c b/lib/pacemaker/pcmk_sched_group.c
+index 1b6c5c416ab..95e2d77aa5f 100644
+--- a/lib/pacemaker/pcmk_sched_group.c
++++ b/lib/pacemaker/pcmk_sched_group.c
+@@ -674,16 +674,36 @@ pcmk__with_group_colocations(const pe_resource_t *rsc,
+     }
+ 
+     /* "With this" colocations are needed only for the group itself and for its
+-     * last member. Add the group's colocations plus any relevant
+-     * parent colocations if cloned.
++     * last member. (Previous members will chain via the group internal
++     * colocations.)
+      */
+-    if ((rsc == orig_rsc) || (orig_rsc == pe__last_group_member(rsc))) {
+-        crm_trace("Adding 'with %s' colocations to list for %s",
+-                  rsc->id, orig_rsc->id);
+-        pcmk__add_with_this_list(list, rsc->rsc_cons_lhs);
+-        if (rsc->parent != NULL) { // Cloned group
+-            rsc->parent->cmds->with_this_colocations(rsc->parent, orig_rsc,
+-                                                     list);
++    if ((orig_rsc != rsc) && (orig_rsc != pe__last_group_member(rsc))) {
++        return;
++    }
++
++    pe_rsc_trace(rsc, "Adding 'with %s' colocations to list for %s",
++                 rsc->id, orig_rsc->id);
++
++    // Add the group's own colocations
++    pcmk__add_with_this_list(list, rsc->rsc_cons_lhs);
++
++    // If cloned, add any relevant colocations with the clone
++    if (rsc->parent != NULL) {
++        rsc->parent->cmds->with_this_colocations(rsc->parent, orig_rsc,
++                                                 list);
++    }
++
++    if (!pe__group_flag_is_set(rsc, pe__group_colocated)) {
++        // @COMPAT Non-colocated groups are deprecated
++        return;
++    }
++
++    // Add explicit colocations with the group's (other) children
++    for (GList *iter = rsc->children; iter != NULL; iter = iter->next) {
++        pe_resource_t *member = iter->data;
++
++        if (member != orig_rsc) {
++            member->cmds->with_this_colocations(member, orig_rsc, list);
+         }
+     }
+ }
+@@ -693,6 +713,8 @@ void
+ pcmk__group_with_colocations(const pe_resource_t *rsc,
+                              const pe_resource_t *orig_rsc, GList **list)
+ {
++    const pe_resource_t *member = NULL;
++
+     CRM_CHECK((rsc != NULL) && (rsc->variant == pe_group)
+               && (orig_rsc != NULL) && (list != NULL),
+               return);
+@@ -702,18 +724,35 @@ pcmk__group_with_colocations(const pe_resource_t *rsc,
+         return;
+     }
+ 
+-    /* Colocations for the group itself, or for its first member, consist of the
+-     * group's colocations plus any relevant parent colocations if cloned.
++    /* "This with" colocations are normally needed only for the group itself and
++     * for its first member.
+      */
+     if ((rsc == orig_rsc)
+         || (orig_rsc == (const pe_resource_t *) rsc->children->data)) {
+-        crm_trace("Adding '%s with' colocations to list for %s",
+-                  rsc->id, orig_rsc->id);
++        pe_rsc_trace(rsc, "Adding '%s with' colocations to list for %s",
++                     rsc->id, orig_rsc->id);
++
++        // Add the group's own colocations
+         pcmk__add_this_with_list(list, rsc->rsc_cons);
+-        if (rsc->parent != NULL) { // Cloned group
++
++        // If cloned, add any relevant colocations involving the clone
++        if (rsc->parent != NULL) {
+             rsc->parent->cmds->this_with_colocations(rsc->parent, orig_rsc,
+                                                      list);
+         }
++
++        if (!pe__group_flag_is_set(rsc, pe__group_colocated)) {
++            // @COMPAT Non-colocated groups are deprecated
++            return;
++        }
++
++        // Add explicit colocations involving the group's (other) children
++        for (GList *iter = rsc->children; iter != NULL; iter = iter->next) {
++            member = iter->data;
++            if (member != orig_rsc) {
++                member->cmds->this_with_colocations(member, orig_rsc, list);
++            }
++        }
+         return;
+     }
+ 
+@@ -723,8 +762,7 @@ pcmk__group_with_colocations(const pe_resource_t *rsc,
+      * happen, so the group's mandatory colocations must be explicitly added.
+      */
+     for (GList *iter = rsc->children; iter != NULL; iter = iter->next) {
+-        const pe_resource_t *member = (const pe_resource_t *) iter->data;
+-
++        member = iter->data;
+         if (orig_rsc == member) {
+             break; // We've seen all earlier members, and none are unmanaged
+         }
+diff --git a/lib/pacemaker/pcmk_sched_primitive.c b/lib/pacemaker/pcmk_sched_primitive.c
+index d6b39e38c5f..bfc6fc7fedd 100644
+--- a/lib/pacemaker/pcmk_sched_primitive.c
++++ b/lib/pacemaker/pcmk_sched_primitive.c
+@@ -1069,15 +1069,25 @@ void
+ pcmk__with_primitive_colocations(const pe_resource_t *rsc,
+                                  const pe_resource_t *orig_rsc, GList **list)
+ {
+-    // Primitives don't have children, so rsc should also be orig_rsc
+-    CRM_CHECK((rsc != NULL) && (rsc->variant == pe_native)
+-              && (rsc == orig_rsc) && (list != NULL),
+-              return);
++    CRM_ASSERT((rsc != NULL) && (rsc->variant == pe_native) && (list != NULL));
+ 
+-    // Add primitive's own colocations plus any relevant ones from parent
+-    pcmk__add_with_this_list(list, rsc->rsc_cons_lhs);
+-    if (rsc->parent != NULL) {
+-        rsc->parent->cmds->with_this_colocations(rsc->parent, rsc, list);
++    if (rsc == orig_rsc) {
++        /* For the resource itself, add all of its own colocations and relevant
++         * colocations from its parent (if any).
++         */
++        pcmk__add_with_this_list(list, rsc->rsc_cons_lhs);
++        if (rsc->parent != NULL) {
++            rsc->parent->cmds->with_this_colocations(rsc->parent, rsc, list);
++        }
++    } else {
++        // For an ancestor, add only explicitly configured constraints
++        for (GList *iter = rsc->rsc_cons_lhs; iter != NULL; iter = iter->next) {
++            pcmk__colocation_t *colocation = iter->data;
++
++            if (pcmk_is_set(colocation->flags, pcmk__coloc_explicit)) {
++                pcmk__add_with_this(list, colocation);
++            }
++        }
+     }
+ }
+ 
+@@ -1088,15 +1098,25 @@ void
+ pcmk__primitive_with_colocations(const pe_resource_t *rsc,
+                                  const pe_resource_t *orig_rsc, GList **list)
+ {
+-    // Primitives don't have children, so rsc should also be orig_rsc
+-    CRM_CHECK((rsc != NULL) && (rsc->variant == pe_native)
+-              && (rsc == orig_rsc) && (list != NULL),
+-              return);
++    CRM_ASSERT((rsc != NULL) && (rsc->variant == pe_native) && (list != NULL));
+ 
+-    // Add primitive's own colocations plus any relevant ones from parent
+-    pcmk__add_this_with_list(list, rsc->rsc_cons);
+-    if (rsc->parent != NULL) {
+-        rsc->parent->cmds->this_with_colocations(rsc->parent, rsc, list);
++    if (rsc == orig_rsc) {
++        /* For the resource itself, add all of its own colocations and relevant
++         * colocations from its parent (if any).
++         */
++        pcmk__add_this_with_list(list, rsc->rsc_cons);
++        if (rsc->parent != NULL) {
++            rsc->parent->cmds->this_with_colocations(rsc->parent, rsc, list);
++        }
++    } else {
++        // For an ancestor, add only explicitly configured constraints
++        for (GList *iter = rsc->rsc_cons; iter != NULL; iter = iter->next) {
++            pcmk__colocation_t *colocation = iter->data;
++
++            if (pcmk_is_set(colocation->flags, pcmk__coloc_explicit)) {
++                pcmk__add_this_with(list, colocation);
++            }
++        }
+     }
+ }
+ 
+
+From e9e734eabf147a827c8bc6731da4c54b2a4d8658 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Tue, 27 Jun 2023 10:31:18 -0500
+Subject: [PATCH 13/17] Test: scheduler: update test output for group
+ colocation fix
+
+---
+ .../dot/coloc-with-inner-group-member.dot     |  32 ++++
+ .../exp/coloc-with-inner-group-member.exp     | 176 +++++++++++++++++-
+ .../coloc-with-inner-group-member.scores      |  14 +-
+ .../coloc-with-inner-group-member.summary     |  20 +-
+ 4 files changed, 225 insertions(+), 17 deletions(-)
+
+diff --git a/cts/scheduler/dot/coloc-with-inner-group-member.dot b/cts/scheduler/dot/coloc-with-inner-group-member.dot
+index 77e1a8e6e40..a3bad7aab12 100644
+--- a/cts/scheduler/dot/coloc-with-inner-group-member.dot
++++ b/cts/scheduler/dot/coloc-with-inner-group-member.dot
+@@ -1,8 +1,40 @@
+  digraph "g" {
++"bar_monitor_10000 rhel8-3" [ style=bold color="green" fontcolor="black"]
++"bar_start_0 rhel8-3" -> "bar_monitor_10000 rhel8-3" [ style = bold]
++"bar_start_0 rhel8-3" -> "grp_running_0" [ style = bold]
++"bar_start_0 rhel8-3" -> "vip_start_0 rhel8-3" [ style = bold]
++"bar_start_0 rhel8-3" [ style=bold color="green" fontcolor="black"]
++"bar_stop_0 rhel8-4" -> "bar_start_0 rhel8-3" [ style = bold]
++"bar_stop_0 rhel8-4" -> "foo_stop_0 rhel8-4" [ style = bold]
++"bar_stop_0 rhel8-4" -> "grp_stopped_0" [ style = bold]
++"bar_stop_0 rhel8-4" [ style=bold color="green" fontcolor="black"]
++"foo_monitor_10000 rhel8-3" [ style=bold color="green" fontcolor="black"]
++"foo_start_0 rhel8-3" -> "bar_start_0 rhel8-3" [ style = bold]
++"foo_start_0 rhel8-3" -> "foo_monitor_10000 rhel8-3" [ style = bold]
++"foo_start_0 rhel8-3" -> "grp_running_0" [ style = bold]
++"foo_start_0 rhel8-3" [ style=bold color="green" fontcolor="black"]
++"foo_stop_0 rhel8-4" -> "foo_start_0 rhel8-3" [ style = bold]
++"foo_stop_0 rhel8-4" -> "grp_stopped_0" [ style = bold]
++"foo_stop_0 rhel8-4" [ style=bold color="green" fontcolor="black"]
++"grp_running_0" [ style=bold color="green" fontcolor="orange"]
++"grp_start_0" -> "bar_start_0 rhel8-3" [ style = bold]
++"grp_start_0" -> "foo_start_0 rhel8-3" [ style = bold]
++"grp_start_0" -> "grp_running_0" [ style = bold]
++"grp_start_0" -> "vip_start_0 rhel8-3" [ style = bold]
++"grp_start_0" [ style=bold color="green" fontcolor="orange"]
++"grp_stop_0" -> "bar_stop_0 rhel8-4" [ style = bold]
++"grp_stop_0" -> "foo_stop_0 rhel8-4" [ style = bold]
+ "grp_stop_0" -> "grp_stopped_0" [ style = bold]
+ "grp_stop_0" -> "vip_stop_0 rhel8-3" [ style = bold]
+ "grp_stop_0" [ style=bold color="green" fontcolor="orange"]
++"grp_stopped_0" -> "grp_start_0" [ style = bold]
+ "grp_stopped_0" [ style=bold color="green" fontcolor="orange"]
++"vip_monitor_10000 rhel8-3" [ style=bold color="green" fontcolor="black"]
++"vip_start_0 rhel8-3" -> "grp_running_0" [ style = bold]
++"vip_start_0 rhel8-3" -> "vip_monitor_10000 rhel8-3" [ style = bold]
++"vip_start_0 rhel8-3" [ style=bold color="green" fontcolor="black"]
++"vip_stop_0 rhel8-3" -> "bar_stop_0 rhel8-4" [ style = bold]
+ "vip_stop_0 rhel8-3" -> "grp_stopped_0" [ style = bold]
++"vip_stop_0 rhel8-3" -> "vip_start_0 rhel8-3" [ style = bold]
+ "vip_stop_0 rhel8-3" [ style=bold color="green" fontcolor="black"]
+ }
+diff --git a/cts/scheduler/exp/coloc-with-inner-group-member.exp b/cts/scheduler/exp/coloc-with-inner-group-member.exp
+index e6d94d5fe7f..bb8f779feb1 100644
+--- a/cts/scheduler/exp/coloc-with-inner-group-member.exp
++++ b/cts/scheduler/exp/coloc-with-inner-group-member.exp
+@@ -1,22 +1,28 @@
+ <transition_graph cluster-delay="60s" stonith-timeout="60s" failed-stop-offset="INFINITY" failed-start-offset="1"  transition_id="0">
+   <synapse id="0">
+     <action_set>
+-      <pseudo_event id="18" operation="stopped" operation_key="grp_stopped_0">
++      <pseudo_event id="21" operation="stopped" operation_key="grp_stopped_0">
+         <attributes CRM_meta_timeout="90000" />
+       </pseudo_event>
+     </action_set>
+     <inputs>
+       <trigger>
+-        <rsc_op id="14" operation="stop" operation_key="vip_stop_0" on_node="rhel8-3" on_node_uuid="3"/>
++        <rsc_op id="10" operation="stop" operation_key="foo_stop_0" on_node="rhel8-4" on_node_uuid="4"/>
+       </trigger>
+       <trigger>
+-        <pseudo_event id="17" operation="stop" operation_key="grp_stop_0"/>
++        <rsc_op id="13" operation="stop" operation_key="bar_stop_0" on_node="rhel8-4" on_node_uuid="4"/>
++      </trigger>
++      <trigger>
++        <rsc_op id="16" operation="stop" operation_key="vip_stop_0" on_node="rhel8-3" on_node_uuid="3"/>
++      </trigger>
++      <trigger>
++        <pseudo_event id="20" operation="stop" operation_key="grp_stop_0"/>
+       </trigger>
+     </inputs>
+   </synapse>
+   <synapse id="1">
+     <action_set>
+-      <pseudo_event id="17" operation="stop" operation_key="grp_stop_0">
++      <pseudo_event id="20" operation="stop" operation_key="grp_stop_0">
+         <attributes CRM_meta_timeout="90000" />
+       </pseudo_event>
+     </action_set>
+@@ -24,14 +30,172 @@
+   </synapse>
+   <synapse id="2">
+     <action_set>
+-      <rsc_op id="14" operation="stop" operation_key="vip_stop_0" on_node="rhel8-3" on_node_uuid="3">
++      <pseudo_event id="19" operation="running" operation_key="grp_running_0">
++        <attributes CRM_meta_timeout="90000" />
++      </pseudo_event>
++    </action_set>
++    <inputs>
++      <trigger>
++        <rsc_op id="11" operation="start" operation_key="foo_start_0" on_node="rhel8-3" on_node_uuid="3"/>
++      </trigger>
++      <trigger>
++        <rsc_op id="14" operation="start" operation_key="bar_start_0" on_node="rhel8-3" on_node_uuid="3"/>
++      </trigger>
++      <trigger>
++        <rsc_op id="17" operation="start" operation_key="vip_start_0" on_node="rhel8-3" on_node_uuid="3"/>
++      </trigger>
++      <trigger>
++        <pseudo_event id="18" operation="start" operation_key="grp_start_0"/>
++      </trigger>
++    </inputs>
++  </synapse>
++  <synapse id="3">
++    <action_set>
++      <pseudo_event id="18" operation="start" operation_key="grp_start_0">
++        <attributes CRM_meta_timeout="90000" />
++      </pseudo_event>
++    </action_set>
++    <inputs>
++      <trigger>
++        <pseudo_event id="21" operation="stopped" operation_key="grp_stopped_0"/>
++      </trigger>
++    </inputs>
++  </synapse>
++  <synapse id="4">
++    <action_set>
++      <rsc_op id="12" operation="monitor" operation_key="foo_monitor_10000" on_node="rhel8-3" on_node_uuid="3">
++        <primitive id="foo" class="ocf" provider="pacemaker" type="Dummy"/>
++        <attributes CRM_meta_interval="10000" CRM_meta_name="monitor" CRM_meta_on_node="rhel8-3" CRM_meta_on_node_uuid="3" CRM_meta_timeout="20000" />
++      </rsc_op>
++    </action_set>
++    <inputs>
++      <trigger>
++        <rsc_op id="11" operation="start" operation_key="foo_start_0" on_node="rhel8-3" on_node_uuid="3"/>
++      </trigger>
++    </inputs>
++  </synapse>
++  <synapse id="5">
++    <action_set>
++      <rsc_op id="11" operation="start" operation_key="foo_start_0" on_node="rhel8-3" on_node_uuid="3">
++        <primitive id="foo" class="ocf" provider="pacemaker" type="Dummy"/>
++        <attributes CRM_meta_name="start" CRM_meta_on_node="rhel8-3" CRM_meta_on_node_uuid="3" CRM_meta_timeout="20000" />
++      </rsc_op>
++    </action_set>
++    <inputs>
++      <trigger>
++        <rsc_op id="10" operation="stop" operation_key="foo_stop_0" on_node="rhel8-4" on_node_uuid="4"/>
++      </trigger>
++      <trigger>
++        <pseudo_event id="18" operation="start" operation_key="grp_start_0"/>
++      </trigger>
++    </inputs>
++  </synapse>
++  <synapse id="6">
++    <action_set>
++      <rsc_op id="10" operation="stop" operation_key="foo_stop_0" on_node="rhel8-4" on_node_uuid="4">
++        <primitive id="foo" class="ocf" provider="pacemaker" type="Dummy"/>
++        <attributes CRM_meta_name="stop" CRM_meta_on_node="rhel8-4" CRM_meta_on_node_uuid="4" CRM_meta_timeout="20000" />
++      </rsc_op>
++    </action_set>
++    <inputs>
++      <trigger>
++        <rsc_op id="13" operation="stop" operation_key="bar_stop_0" on_node="rhel8-4" on_node_uuid="4"/>
++      </trigger>
++      <trigger>
++        <pseudo_event id="20" operation="stop" operation_key="grp_stop_0"/>
++      </trigger>
++    </inputs>
++  </synapse>
++  <synapse id="7">
++    <action_set>
++      <rsc_op id="15" operation="monitor" operation_key="bar_monitor_10000" on_node="rhel8-3" on_node_uuid="3">
++        <primitive id="bar" class="ocf" provider="pacemaker" type="Dummy"/>
++        <attributes CRM_meta_interval="10000" CRM_meta_name="monitor" CRM_meta_on_node="rhel8-3" CRM_meta_on_node_uuid="3" CRM_meta_timeout="20000" />
++      </rsc_op>
++    </action_set>
++    <inputs>
++      <trigger>
++        <rsc_op id="14" operation="start" operation_key="bar_start_0" on_node="rhel8-3" on_node_uuid="3"/>
++      </trigger>
++    </inputs>
++  </synapse>
++  <synapse id="8">
++    <action_set>
++      <rsc_op id="14" operation="start" operation_key="bar_start_0" on_node="rhel8-3" on_node_uuid="3">
++        <primitive id="bar" class="ocf" provider="pacemaker" type="Dummy"/>
++        <attributes CRM_meta_name="start" CRM_meta_on_node="rhel8-3" CRM_meta_on_node_uuid="3" CRM_meta_timeout="20000" />
++      </rsc_op>
++    </action_set>
++    <inputs>
++      <trigger>
++        <rsc_op id="11" operation="start" operation_key="foo_start_0" on_node="rhel8-3" on_node_uuid="3"/>
++      </trigger>
++      <trigger>
++        <rsc_op id="13" operation="stop" operation_key="bar_stop_0" on_node="rhel8-4" on_node_uuid="4"/>
++      </trigger>
++      <trigger>
++        <pseudo_event id="18" operation="start" operation_key="grp_start_0"/>
++      </trigger>
++    </inputs>
++  </synapse>
++  <synapse id="9">
++    <action_set>
++      <rsc_op id="13" operation="stop" operation_key="bar_stop_0" on_node="rhel8-4" on_node_uuid="4">
++        <primitive id="bar" class="ocf" provider="pacemaker" type="Dummy"/>
++        <attributes CRM_meta_name="stop" CRM_meta_on_node="rhel8-4" CRM_meta_on_node_uuid="4" CRM_meta_timeout="20000" />
++      </rsc_op>
++    </action_set>
++    <inputs>
++      <trigger>
++        <rsc_op id="16" operation="stop" operation_key="vip_stop_0" on_node="rhel8-3" on_node_uuid="3"/>
++      </trigger>
++      <trigger>
++        <pseudo_event id="20" operation="stop" operation_key="grp_stop_0"/>
++      </trigger>
++    </inputs>
++  </synapse>
++  <synapse id="10">
++    <action_set>
++      <rsc_op id="17" operation="start" operation_key="vip_start_0" on_node="rhel8-3" on_node_uuid="3">
++        <primitive id="vip" class="ocf" provider="pacemaker" type="Dummy"/>
++        <attributes CRM_meta_name="start" CRM_meta_on_node="rhel8-3" CRM_meta_on_node_uuid="3" CRM_meta_timeout="20000" />
++      </rsc_op>
++    </action_set>
++    <inputs>
++      <trigger>
++        <rsc_op id="14" operation="start" operation_key="bar_start_0" on_node="rhel8-3" on_node_uuid="3"/>
++      </trigger>
++      <trigger>
++        <rsc_op id="16" operation="stop" operation_key="vip_stop_0" on_node="rhel8-3" on_node_uuid="3"/>
++      </trigger>
++      <trigger>
++        <pseudo_event id="18" operation="start" operation_key="grp_start_0"/>
++      </trigger>
++    </inputs>
++  </synapse>
++  <synapse id="11">
++    <action_set>
++      <rsc_op id="16" operation="stop" operation_key="vip_stop_0" on_node="rhel8-3" on_node_uuid="3">
+         <primitive id="vip" class="ocf" provider="pacemaker" type="Dummy"/>
+         <attributes CRM_meta_name="stop" CRM_meta_on_node="rhel8-3" CRM_meta_on_node_uuid="3" CRM_meta_timeout="20000" />
+       </rsc_op>
+     </action_set>
+     <inputs>
+       <trigger>
+-        <pseudo_event id="17" operation="stop" operation_key="grp_stop_0"/>
++        <pseudo_event id="20" operation="stop" operation_key="grp_stop_0"/>
++      </trigger>
++    </inputs>
++  </synapse>
++  <synapse id="12">
++    <action_set>
++      <rsc_op id="3" operation="monitor" operation_key="vip_monitor_10000" on_node="rhel8-3" on_node_uuid="3">
++        <primitive id="vip" class="ocf" provider="pacemaker" type="Dummy"/>
++        <attributes CRM_meta_interval="10000" CRM_meta_name="monitor" CRM_meta_on_node="rhel8-3" CRM_meta_on_node_uuid="3" CRM_meta_timeout="20000" />
++      </rsc_op>
++    </action_set>
++    <inputs>
++      <trigger>
++        <rsc_op id="17" operation="start" operation_key="vip_start_0" on_node="rhel8-3" on_node_uuid="3"/>
+       </trigger>
+     </inputs>
+   </synapse>
+diff --git a/cts/scheduler/scores/coloc-with-inner-group-member.scores b/cts/scheduler/scores/coloc-with-inner-group-member.scores
+index 10fe944cb42..8d1c6f621c1 100644
+--- a/cts/scheduler/scores/coloc-with-inner-group-member.scores
++++ b/cts/scheduler/scores/coloc-with-inner-group-member.scores
+@@ -26,17 +26,17 @@ pcmk__primitive_assign: Fencing allocation score on rhel8-4: 0
+ pcmk__primitive_assign: Fencing allocation score on rhel8-5: 0
+ pcmk__primitive_assign: bar allocation score on rhel8-1: -INFINITY
+ pcmk__primitive_assign: bar allocation score on rhel8-2: -INFINITY
+-pcmk__primitive_assign: bar allocation score on rhel8-3: -INFINITY
+-pcmk__primitive_assign: bar allocation score on rhel8-4: 0
++pcmk__primitive_assign: bar allocation score on rhel8-3: 0
++pcmk__primitive_assign: bar allocation score on rhel8-4: -INFINITY
+ pcmk__primitive_assign: bar allocation score on rhel8-5: -INFINITY
+-pcmk__primitive_assign: foo allocation score on rhel8-1: 0
+-pcmk__primitive_assign: foo allocation score on rhel8-2: 0
++pcmk__primitive_assign: foo allocation score on rhel8-1: -INFINITY
++pcmk__primitive_assign: foo allocation score on rhel8-2: -INFINITY
+ pcmk__primitive_assign: foo allocation score on rhel8-3: 0
+-pcmk__primitive_assign: foo allocation score on rhel8-4: 0
+-pcmk__primitive_assign: foo allocation score on rhel8-5: 0
++pcmk__primitive_assign: foo allocation score on rhel8-4: -INFINITY
++pcmk__primitive_assign: foo allocation score on rhel8-5: -INFINITY
+ pcmk__primitive_assign: vip allocation score on rhel8-1: -INFINITY
+ pcmk__primitive_assign: vip allocation score on rhel8-2: -INFINITY
+-pcmk__primitive_assign: vip allocation score on rhel8-3: -INFINITY
++pcmk__primitive_assign: vip allocation score on rhel8-3: 0
+ pcmk__primitive_assign: vip allocation score on rhel8-4: -INFINITY
+ pcmk__primitive_assign: vip allocation score on rhel8-5: -INFINITY
+ pcmk__primitive_assign: vip-dep allocation score on rhel8-1: 0
+diff --git a/cts/scheduler/summary/coloc-with-inner-group-member.summary b/cts/scheduler/summary/coloc-with-inner-group-member.summary
+index 3e87f0867ef..6659721a79c 100644
+--- a/cts/scheduler/summary/coloc-with-inner-group-member.summary
++++ b/cts/scheduler/summary/coloc-with-inner-group-member.summary
+@@ -12,12 +12,24 @@ Current cluster status:
+       * vip	(ocf:pacemaker:Dummy):	 Started rhel8-3
+ 
+ Transition Summary:
+-  * Stop       vip     ( rhel8-3 )  due to node availability
++  * Move       foo     ( rhel8-4 -> rhel8-3 )
++  * Move       bar     ( rhel8-4 -> rhel8-3 )
++  * Restart    vip     (            rhel8-3 )  due to required bar start
+ 
+ Executing Cluster Transition:
+   * Pseudo action:   grp_stop_0
+   * Resource action: vip             stop on rhel8-3
++  * Resource action: bar             stop on rhel8-4
++  * Resource action: foo             stop on rhel8-4
+   * Pseudo action:   grp_stopped_0
++  * Pseudo action:   grp_start_0
++  * Resource action: foo             start on rhel8-3
++  * Resource action: bar             start on rhel8-3
++  * Resource action: vip             start on rhel8-3
++  * Resource action: vip             monitor=10000 on rhel8-3
++  * Pseudo action:   grp_running_0
++  * Resource action: foo             monitor=10000 on rhel8-3
++  * Resource action: bar             monitor=10000 on rhel8-3
+ Using the original execution date of: 2023-06-20 20:45:06Z
+ 
+ Revised Cluster Status:
+@@ -28,6 +40,6 @@ Revised Cluster Status:
+     * Fencing	(stonith:fence_xvm):	 Started rhel8-1
+     * vip-dep	(ocf:pacemaker:Dummy):	 Started rhel8-3
+     * Resource Group: grp:
+-      * foo	(ocf:pacemaker:Dummy):	 Started rhel8-4
+-      * bar	(ocf:pacemaker:Dummy):	 Started rhel8-4
+-      * vip	(ocf:pacemaker:Dummy):	 Stopped
++      * foo	(ocf:pacemaker:Dummy):	 Started rhel8-3
++      * bar	(ocf:pacemaker:Dummy):	 Started rhel8-3
++      * vip	(ocf:pacemaker:Dummy):	 Started rhel8-3
+
+From 9ada709b568cf5050f768b83e4682a8b93d1b361 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Thu, 29 Jun 2023 09:01:41 -0500
+Subject: [PATCH 14/17] Fix: CIB: be more strict about ignoring colocation
+ elements without an ID
+
+Callers of pcmk__unpack_colocation() have more context about the element being
+unpacked, so the checks are done there.
+---
+ lib/pacemaker/pcmk_sched_colocation.c | 24 ++++++++++++++++++------
+ 1 file changed, 18 insertions(+), 6 deletions(-)
+
+diff --git a/lib/pacemaker/pcmk_sched_colocation.c b/lib/pacemaker/pcmk_sched_colocation.c
+index e0b39b59e81..a2baddbbb5c 100644
+--- a/lib/pacemaker/pcmk_sched_colocation.c
++++ b/lib/pacemaker/pcmk_sched_colocation.c
+@@ -886,23 +886,30 @@ pcmk__unpack_colocation(xmlNode *xml_obj, pe_working_set_t *data_set)
+     xmlNode *expanded_xml = NULL;
+ 
+     const char *id = crm_element_value(xml_obj, XML_ATTR_ID);
+-    const char *score = crm_element_value(xml_obj, XML_RULE_ATTR_SCORE);
+-    const char *influence_s = crm_element_value(xml_obj,
+-                                                XML_COLOC_ATTR_INFLUENCE);
++    const char *score = NULL;
++    const char *influence_s = NULL;
+ 
+-    if (score) {
+-        score_i = char2score(score);
++    if (pcmk__str_empty(id)) {
++        pcmk__config_err("Ignoring " XML_CONS_TAG_RSC_DEPEND
++                         " without " CRM_ATTR_ID);
++        return;
+     }
+ 
+     if (unpack_colocation_tags(xml_obj, &expanded_xml,
+                                data_set) != pcmk_rc_ok) {
+         return;
+     }
+-    if (expanded_xml) {
++    if (expanded_xml != NULL) {
+         orig_xml = xml_obj;
+         xml_obj = expanded_xml;
+     }
+ 
++    score = crm_element_value(xml_obj, XML_RULE_ATTR_SCORE);
++    if (score != NULL) {
++        score_i = char2score(score);
++    }
++    influence_s = crm_element_value(xml_obj, XML_COLOC_ATTR_INFLUENCE);
++
+     for (set = first_named_child(xml_obj, XML_CONS_TAG_RSC_SET); set != NULL;
+          set = crm_next_same_xml(set)) {
+ 
+@@ -914,6 +921,11 @@ pcmk__unpack_colocation(xmlNode *xml_obj, pe_working_set_t *data_set)
+             return;
+         }
+ 
++        if (pcmk__str_empty(ID(set))) {
++            pcmk__config_err("Ignoring " XML_CONS_TAG_RSC_SET
++                             " without " CRM_ATTR_ID);
++            continue;
++        }
+         unpack_colocation_set(set, score_i, id, influence_s, data_set);
+ 
+         if (last != NULL) {
+
+From e830a9663c80ea348eff694a8e71a1e07d380690 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Thu, 29 Jun 2023 09:40:57 -0500
+Subject: [PATCH 15/17] Log: scheduler: improve colocation unpacking messages
+ (and comments)
+
+---
+ lib/pacemaker/pcmk_sched_colocation.c | 60 ++++++++++++++-------------
+ 1 file changed, 32 insertions(+), 28 deletions(-)
+
+diff --git a/lib/pacemaker/pcmk_sched_colocation.c b/lib/pacemaker/pcmk_sched_colocation.c
+index a2baddbbb5c..9c9195ed02c 100644
+--- a/lib/pacemaker/pcmk_sched_colocation.c
++++ b/lib/pacemaker/pcmk_sched_colocation.c
+@@ -136,13 +136,13 @@ pcmk__add_this_with(GList **list, const pcmk__colocation_t *colocation)
+ {
+     CRM_ASSERT((list != NULL) && (colocation != NULL));
+ 
+-    crm_trace("Adding colocation %s (%s with %s%s%s @%d) "
++    crm_trace("Adding colocation %s (%s with %s%s%s @%s) "
+               "to 'this with' list",
+               colocation->id, colocation->dependent->id,
+               colocation->primary->id,
+               (colocation->node_attribute == NULL)? "" : " using ",
+               pcmk__s(colocation->node_attribute, ""),
+-              colocation->score);
++              pcmk_readable_score(colocation->score));
+     *list = g_list_insert_sorted(*list, (gpointer) colocation,
+                                  cmp_primary_priority);
+ }
+@@ -187,13 +187,13 @@ pcmk__add_with_this(GList **list, const pcmk__colocation_t *colocation)
+ {
+     CRM_ASSERT((list != NULL) && (colocation != NULL));
+ 
+-    crm_trace("Adding colocation %s (%s with %s%s%s @%d) "
++    crm_trace("Adding colocation %s (%s with %s%s%s @%s) "
+               "to 'with this' list",
+               colocation->id, colocation->dependent->id,
+               colocation->primary->id,
+               (colocation->node_attribute == NULL)? "" : " using ",
+               pcmk__s(colocation->node_attribute, ""),
+-              colocation->score);
++              pcmk_readable_score(colocation->score));
+     *list = g_list_insert_sorted(*list, (gpointer) colocation,
+                                  cmp_dependent_priority);
+ }
+@@ -339,10 +339,6 @@ pcmk__new_colocation(const char *id, const char *node_attr, int score,
+         node_attr = CRM_ATTR_UNAME;
+     }
+ 
+-    pe_rsc_trace(dependent, "Added colocation %s (%s with %s @%s using %s)",
+-                 new_con->id, dependent->id, primary->id,
+-                 pcmk_readable_score(score), node_attr);
+-
+     pcmk__add_this_with(&(dependent->rsc_cons), new_con);
+     pcmk__add_with_this(&(primary->rsc_cons_lhs), new_con);
+ 
+@@ -495,8 +491,6 @@ unpack_colocation_set(xmlNode *set, int score, const char *coloc_id,
+                 other = pcmk__find_constraint_resource(data_set->resources,
+                                                        xml_rsc_id);
+                 CRM_ASSERT(other != NULL); // We already processed it
+-                pe_rsc_trace(resource, "Anti-Colocating %s with %s",
+-                             resource->id, other->id);
+                 pcmk__new_colocation(set_id, NULL, local_score,
+                                      resource, other, role, role, flags);
+             }
+@@ -504,9 +498,21 @@ unpack_colocation_set(xmlNode *set, int score, const char *coloc_id,
+     }
+ }
+ 
++/*!
++ * \internal
++ * \brief Colocate two resource sets relative to each other
++ *
++ * \param[in]     id           Colocation XML ID
++ * \param[in]     set1         Dependent set
++ * \param[in]     set2         Primary set
++ * \param[in]     score        Colocation score
++ * \param[in]     influence_s  Value of colocation's "influence" attribute
++ * \param[in,out] data_set     Cluster working set
++ */
+ static void
+-colocate_rsc_sets(const char *id, xmlNode *set1, xmlNode *set2, int score,
+-                  const char *influence_s, pe_working_set_t *data_set)
++colocate_rsc_sets(const char *id, const xmlNode *set1, const xmlNode *set2,
++                  int score, const char *influence_s,
++                  pe_working_set_t *data_set)
+ {
+     xmlNode *xml_rsc = NULL;
+     pe_resource_t *rsc_1 = NULL;
+@@ -521,8 +527,8 @@ colocate_rsc_sets(const char *id, xmlNode *set1, xmlNode *set2, int score,
+     uint32_t flags = pcmk__coloc_none;
+ 
+     if (score == 0) {
+-        crm_trace("Ignoring colocation '%s' between sets because score is 0",
+-                  id);
++        crm_trace("Ignoring colocation '%s' between sets %s and %s "
++                  "because score is 0", id, ID(set1), ID(set2));
+         return;
+     }
+ 
+@@ -562,12 +568,12 @@ colocate_rsc_sets(const char *id, xmlNode *set1, xmlNode *set2, int score,
+         }
+     }
+ 
+-    if ((rsc_1 != NULL) && (rsc_2 != NULL)) {
++    if ((rsc_1 != NULL) && (rsc_2 != NULL)) { // Both sets are sequential
+         flags = pcmk__coloc_explicit | unpack_influence(id, rsc_1, influence_s);
+         pcmk__new_colocation(id, NULL, score, rsc_1, rsc_2, role_1, role_2,
+                              flags);
+ 
+-    } else if (rsc_1 != NULL) {
++    } else if (rsc_1 != NULL) { // Only set1 is sequential
+         flags = pcmk__coloc_explicit | unpack_influence(id, rsc_1, influence_s);
+         for (xml_rsc = first_named_child(set2, XML_TAG_RESOURCE_REF);
+              xml_rsc != NULL; xml_rsc = crm_next_same_xml(xml_rsc)) {
+@@ -576,19 +582,17 @@ colocate_rsc_sets(const char *id, xmlNode *set1, xmlNode *set2, int score,
+             rsc_2 = pcmk__find_constraint_resource(data_set->resources,
+                                                    xml_rsc_id);
+             if (rsc_2 == NULL) {
+-                pcmk__config_err("%s: No resource found for %s",
+-                                 id, xml_rsc_id);
+                 // Should be possible only with validation disabled
+-                pcmk__config_err("Ignoring resource %s and later in set %s "
+-                                 "for colocation with set %s: No such resource",
+-                                 xml_rsc_id, set2, set1);
++                pcmk__config_err("Ignoring set %s colocation with resource %s "
++                                 "and later in set %s: No such resource",
++                                 ID(set1), xml_rsc_id, ID(set2));
+                 return;
+             }
+             pcmk__new_colocation(id, NULL, score, rsc_1, rsc_2, role_1,
+                                  role_2, flags);
+         }
+ 
+-    } else if (rsc_2 != NULL) {
++    } else if (rsc_2 != NULL) { // Only set2 is sequential
+         for (xml_rsc = first_named_child(set1, XML_TAG_RESOURCE_REF);
+              xml_rsc != NULL; xml_rsc = crm_next_same_xml(xml_rsc)) {
+ 
+@@ -599,7 +603,7 @@ colocate_rsc_sets(const char *id, xmlNode *set1, xmlNode *set2, int score,
+                 // Should be possible only with validation disabled
+                 pcmk__config_err("Ignoring resource %s and later in set %s "
+                                  "for colocation with set %s: No such resource",
+-                                 xml_rsc_id, set1, set2);
++                                 xml_rsc_id, ID(set1), ID(set2));
+                 return;
+             }
+             flags = pcmk__coloc_explicit
+@@ -608,7 +612,7 @@ colocate_rsc_sets(const char *id, xmlNode *set1, xmlNode *set2, int score,
+                                  role_2, flags);
+         }
+ 
+-    } else {
++    } else { // Neither set is sequential
+         for (xml_rsc = first_named_child(set1, XML_TAG_RESOURCE_REF);
+              xml_rsc != NULL; xml_rsc = crm_next_same_xml(xml_rsc)) {
+ 
+@@ -621,7 +625,7 @@ colocate_rsc_sets(const char *id, xmlNode *set1, xmlNode *set2, int score,
+                 // Should be possible only with validation disabled
+                 pcmk__config_err("Ignoring resource %s and later in set %s "
+                                  "for colocation with set %s: No such resource",
+-                                 xml_rsc_id, set1, set2);
++                                 xml_rsc_id, ID(set1), ID(set2));
+                 return;
+             }
+ 
+@@ -636,10 +640,10 @@ colocate_rsc_sets(const char *id, xmlNode *set1, xmlNode *set2, int score,
+                                                        xml_rsc_id);
+                 if (rsc_2 == NULL) {
+                     // Should be possible only with validation disabled
+-                    pcmk__config_err("Ignoring resource %s and later in set %s "
+-                                     "for colocation with %s in set %s: "
++                    pcmk__config_err("Ignoring set %s resource %s colocation with "
++                                     "resource %s and later in set %s: "
+                                      "No such resource",
+-                                     xml_rsc_id, set2, ID(xml_rsc), set1);
++                                     ID(set1), ID(xml_rsc), xml_rsc_id, ID(set2));
+                     return;
+                 }
+                 pcmk__new_colocation(id, NULL, score, rsc_1, rsc_2,
+
+From 737d74b656cad7b5514397bb461b8a18fb5590df Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Thu, 29 Jun 2023 09:49:13 -0500
+Subject: [PATCH 16/17] Low: scheduler: continue with non-sequential set
+ members after error
+
+---
+ lib/pacemaker/pcmk_sched_colocation.c | 30 +++++++++++++--------------
+ 1 file changed, 15 insertions(+), 15 deletions(-)
+
+diff --git a/lib/pacemaker/pcmk_sched_colocation.c b/lib/pacemaker/pcmk_sched_colocation.c
+index 9c9195ed02c..3e094a4b87b 100644
+--- a/lib/pacemaker/pcmk_sched_colocation.c
++++ b/lib/pacemaker/pcmk_sched_colocation.c
+@@ -584,9 +584,9 @@ colocate_rsc_sets(const char *id, const xmlNode *set1, const xmlNode *set2,
+             if (rsc_2 == NULL) {
+                 // Should be possible only with validation disabled
+                 pcmk__config_err("Ignoring set %s colocation with resource %s "
+-                                 "and later in set %s: No such resource",
++                                 "in set %s: No such resource",
+                                  ID(set1), xml_rsc_id, ID(set2));
+-                return;
++                continue;
+             }
+             pcmk__new_colocation(id, NULL, score, rsc_1, rsc_2, role_1,
+                                  role_2, flags);
+@@ -601,10 +601,10 @@ colocate_rsc_sets(const char *id, const xmlNode *set1, const xmlNode *set2,
+                                                    xml_rsc_id);
+             if (rsc_1 == NULL) {
+                 // Should be possible only with validation disabled
+-                pcmk__config_err("Ignoring resource %s and later in set %s "
+-                                 "for colocation with set %s: No such resource",
+-                                 xml_rsc_id, ID(set1), ID(set2));
+-                return;
++                pcmk__config_err("Ignoring colocation of set %s resource %s "
++                                 "with set %s: No such resource",
++                                 ID(set1), xml_rsc_id, ID(set2));
++                continue;
+             }
+             flags = pcmk__coloc_explicit
+                     | unpack_influence(id, rsc_1, influence_s);
+@@ -623,10 +623,10 @@ colocate_rsc_sets(const char *id, const xmlNode *set1, const xmlNode *set2,
+                                                    xml_rsc_id);
+             if (rsc_1 == NULL) {
+                 // Should be possible only with validation disabled
+-                pcmk__config_err("Ignoring resource %s and later in set %s "
+-                                 "for colocation with set %s: No such resource",
+-                                 xml_rsc_id, ID(set1), ID(set2));
+-                return;
++                pcmk__config_err("Ignoring colocation of set %s resource %s "
++                                 "with set %s: No such resource",
++                                 ID(set1), xml_rsc_id, ID(set2));
++                continue;
+             }
+ 
+             flags = pcmk__coloc_explicit
+@@ -640,11 +640,11 @@ colocate_rsc_sets(const char *id, const xmlNode *set1, const xmlNode *set2,
+                                                        xml_rsc_id);
+                 if (rsc_2 == NULL) {
+                     // Should be possible only with validation disabled
+-                    pcmk__config_err("Ignoring set %s resource %s colocation with "
+-                                     "resource %s and later in set %s: "
+-                                     "No such resource",
+-                                     ID(set1), ID(xml_rsc), xml_rsc_id, ID(set2));
+-                    return;
++                    pcmk__config_err("Ignoring colocation of set %s resource "
++                                     "%s with set %s resource %s: No such "
++                                     "resource", ID(set1), ID(xml_rsc),
++                                     ID(set2), xml_rsc_id);
++                    continue;
+                 }
+                 pcmk__new_colocation(id, NULL, score, rsc_1, rsc_2,
+                                      role_1, role_2, flags);
+
+From d9c8593f17975371e64e0c187bc8234e901349a9 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Thu, 29 Jun 2023 09:49:55 -0500
+Subject: [PATCH 17/17] Refactor: scheduler: make some variables const that can
+ be
+
+---
+ lib/pacemaker/pcmk_sched_group.c | 9 +++++----
+ 1 file changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/lib/pacemaker/pcmk_sched_group.c b/lib/pacemaker/pcmk_sched_group.c
+index 95e2d77aa5f..a2bf5f6dcd4 100644
+--- a/lib/pacemaker/pcmk_sched_group.c
++++ b/lib/pacemaker/pcmk_sched_group.c
+@@ -699,8 +699,8 @@ pcmk__with_group_colocations(const pe_resource_t *rsc,
+     }
+ 
+     // Add explicit colocations with the group's (other) children
+-    for (GList *iter = rsc->children; iter != NULL; iter = iter->next) {
+-        pe_resource_t *member = iter->data;
++    for (const GList *iter = rsc->children; iter != NULL; iter = iter->next) {
++        const pe_resource_t *member = iter->data;
+ 
+         if (member != orig_rsc) {
+             member->cmds->with_this_colocations(member, orig_rsc, list);
+@@ -747,7 +747,8 @@ pcmk__group_with_colocations(const pe_resource_t *rsc,
+         }
+ 
+         // Add explicit colocations involving the group's (other) children
+-        for (GList *iter = rsc->children; iter != NULL; iter = iter->next) {
++        for (const GList *iter = rsc->children;
++             iter != NULL; iter = iter->next) {
+             member = iter->data;
+             if (member != orig_rsc) {
+                 member->cmds->this_with_colocations(member, orig_rsc, list);
+@@ -761,7 +762,7 @@ pcmk__group_with_colocations(const pe_resource_t *rsc,
+      * However, if an earlier group member is unmanaged, this chaining will not
+      * happen, so the group's mandatory colocations must be explicitly added.
+      */
+-    for (GList *iter = rsc->children; iter != NULL; iter = iter->next) {
++    for (const GList *iter = rsc->children; iter != NULL; iter = iter->next) {
+         member = iter->data;
+         if (orig_rsc == member) {
+             break; // We've seen all earlier members, and none are unmanaged
