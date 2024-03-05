@@ -1,0 +1,34 @@
+From 14b87a38786ae5b4dc12fc1581e5d39a274fced2 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Mon, 30 Oct 2023 12:21:24 -0500
+Subject: [PATCH] Fix: attrd: revert faulty T138 fix
+
+f5263c9401 created a timing issue where a node could get a shutdown attribute,
+the original writer leaves the cluster before writing it out, then the
+shutting-down node wins the writer election. In that case, it would skip the
+write-out and the scheduler would never shut it down.
+
+Reopens T138
+---
+ daemons/attrd/attrd_elections.c | 8 --------
+ 1 file changed, 8 deletions(-)
+
+diff --git a/daemons/attrd/attrd_elections.c b/daemons/attrd/attrd_elections.c
+index 62310ed1d8..82fbe8affc 100644
+--- a/daemons/attrd/attrd_elections.c
++++ b/daemons/attrd/attrd_elections.c
+@@ -22,14 +22,6 @@
+ {
+     attrd_declare_winner();
+ 
+-    if (attrd_requesting_shutdown() || attrd_shutting_down()) {
+-        /* This node is shutting down or about to, meaning its attributes will
+-         * be removed (and may have already been removed from the CIB by a
+-         * controller). Don't sync or write its attributes in this case.
+-         */
+-        return G_SOURCE_REMOVE;
+-    }
+-
+     /* Update the peers after an election */
+     attrd_peer_sync(NULL, NULL);
+ 

@@ -36,7 +36,7 @@
 ## can be incremented to build packages reliably considered "newer"
 ## than previously built packages with the same pcmkversion)
 %global pcmkversion 2.1.6
-%global specversion 8
+%global specversion 9
 
 ## Upstream commit (full commit ID, abbreviated commit ID, or tag) to build
 %global commit 6fdc9deea294bbad629b003c6ae036aaed8e3ee0
@@ -242,7 +242,7 @@
 Name:          pacemaker
 Summary:       Scalable High-Availability cluster resource manager
 Version:       %{pcmkversion}
-Release:       %{pcmk_release}%{?dist}
+Release:       %{pcmk_release}.1%{?dist}
 %if %{defined _unitdir}
 License:       GPL-2.0-or-later AND LGPL-2.1-or-later
 %else
@@ -272,6 +272,8 @@ Patch006:      006-controller-reply.patch
 Patch007:      007-glib-assertions.patch
 Patch008:      008-attrd-shutdown.patch
 Patch009:      009-attrd-shutdown-2.patch
+Patch010:      010-revert-58400e27.patch
+Patch011:      011-revert-f5263c94.patch
 
 # downstream-only commits
 #Patch1xx:      1xx-xxxx.patch
@@ -1010,6 +1012,14 @@ exit 0
 %license %{nagios_name}-%{nagios_hash}/COPYING
 
 %changelog
+* Tue Oct 31 2023 Chris Lumens <clumens@redhat.com> - 2.1.6-9.1
+- Revert the rest of the attrd shutdown race condition fix
+- Related: RHEL-14052
+
+* Mon Oct 23 2023 Chris Lumens <clumens@redhat.com> - 2.1.6-9
+- Avoid an error if the elected attrd is on a node that is shutting down
+- Resolves: RHEL-14052
+
 * Tue Aug 29 2023 Chris Lumens <clumens@redhat.com> - 2.1.6-8
 - Fix an additional shutdown race between attrd and the controller
 - Related: rhbz2228955

@@ -1,0 +1,62 @@
+From 2e81e0db9a716c486805e0760f78be65ca79eeae Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Tue, 17 Oct 2023 15:28:27 -0500
+Subject: [PATCH] Fix: attrd: avoid regression by reverting 58400e27
+
+Fixes T714
+---
+ daemons/attrd/attrd_cib.c       |  5 -----
+ daemons/attrd/attrd_elections.c | 10 +---------
+ daemons/attrd/pacemaker-attrd.h |  1 -
+ 3 files changed, 1 insertion(+), 15 deletions(-)
+
+diff --git a/daemons/attrd/attrd_cib.c b/daemons/attrd/attrd_cib.c
+index 2de37a7cb6..9ce2872715 100644
+--- a/daemons/attrd/attrd_cib.c
++++ b/daemons/attrd/attrd_cib.c
+@@ -641,11 +641,6 @@ attrd_write_attributes(uint32_t options)
+               pcmk_is_set(options, attrd_write_all)? "all" : "changed");
+     g_hash_table_iter_init(&iter, attributes);
+     while (g_hash_table_iter_next(&iter, NULL, (gpointer *) & a)) {
+-        if (pcmk_is_set(options, attrd_write_skip_shutdown)
+-            && pcmk__str_eq(a->id, XML_CIB_ATTR_SHUTDOWN, pcmk__str_none)) {
+-            continue;
+-        }
+-
+         if (!pcmk_is_set(options, attrd_write_all) && a->unknown_peer_uuids) {
+             // Try writing this attribute again, in case peer ID was learned
+             a->changed = true;
+diff --git a/daemons/attrd/attrd_elections.c b/daemons/attrd/attrd_elections.c
+index a95cd44cbd..62310ed1d8 100644
+--- a/daemons/attrd/attrd_elections.c
++++ b/daemons/attrd/attrd_elections.c
+@@ -35,16 +35,8 @@ attrd_election_cb(gpointer user_data)
+ 
+     /* After winning an election, update the CIB with the values of all
+      * attributes as the winner knows them.
+-     *
+-     * However, do not write out any "shutdown" attributes. A node that is
+-     * shutting down will have all its transient attributes removed from the CIB
+-     * when its controller exits, and from the attribute manager's memory (on
+-     * remaining nodes) when its attribute manager exits; if an election is won
+-     * between when those two things happen, we don't want to write the shutdown
+-     * attribute back out, which would cause the node to immediately shut down
+-     * the next time it rejoins.
+      */
+-    attrd_write_attributes(attrd_write_all|attrd_write_skip_shutdown);
++    attrd_write_attributes(attrd_write_all);
+     return G_SOURCE_REMOVE;
+ }
+ 
+diff --git a/daemons/attrd/pacemaker-attrd.h b/daemons/attrd/pacemaker-attrd.h
+index e3c369b5bc..a95bb54367 100644
+--- a/daemons/attrd/pacemaker-attrd.h
++++ b/daemons/attrd/pacemaker-attrd.h
+@@ -181,7 +181,6 @@ enum attrd_write_options {
+     attrd_write_changed         = 0,
+     attrd_write_all             = (1 << 0),
+     attrd_write_no_delay        = (1 << 1),
+-    attrd_write_skip_shutdown   = (1 << 2),
+ };
+ 
+ void attrd_write_attribute(attribute_t *a, bool ignore_delay);
