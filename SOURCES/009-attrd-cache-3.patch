@@ -1,0 +1,385 @@
+From 84d4a0d5f562df91baa0fece45d06ad3732f941c Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Tue, 16 Jan 2024 11:20:53 -0600
+Subject: [PATCH 1/5] Low: pacemaker-attrd: properly validate attribute set
+ type
+
+The sense of the test was accidentally reversed in 26471a52689
+---
+ daemons/attrd/attrd_attributes.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/daemons/attrd/attrd_attributes.c b/daemons/attrd/attrd_attributes.c
+index 8f32988..f059059 100644
+--- a/daemons/attrd/attrd_attributes.c
++++ b/daemons/attrd/attrd_attributes.c
+@@ -40,9 +40,9 @@ attrd_create_attribute(xmlNode *xml)
+      * attributes are not written.
+      */
+     crm_element_value_int(xml, PCMK__XA_ATTR_IS_PRIVATE, &is_private);
+-    if ((is_private != 0)
+-        && !pcmk__str_any_of(set_type, XML_TAG_ATTR_SETS, XML_TAG_UTILIZATION,
+-                             NULL)) {
++    if (!is_private && !pcmk__str_any_of(set_type,
++                                         XML_TAG_ATTR_SETS,
++                                         XML_TAG_UTILIZATION, NULL)) {
+         crm_warn("Ignoring attribute %s with invalid set type %s",
+                  pcmk__s(name, "(unidentified)"), set_type);
+         return NULL;
+-- 
+2.31.1
+
+From d0d0511e71fe983a2d89589c39810b79fb48a8ca Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Tue, 16 Jan 2024 12:13:42 -0600
+Subject: [PATCH 2/5] Fix: pacemaker-attrd: sync utilization attributes to
+ peers correctly
+
+Include the set type with attribute syncs.
+
+Previously, utilization attributes would have the correct set_type on the node
+where they were set, but peers would store it as a regular node attribute. If
+one of those peers became writer, the attribute would get written to the wrong
+set.
+---
+ daemons/attrd/attrd_attributes.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/daemons/attrd/attrd_attributes.c b/daemons/attrd/attrd_attributes.c
+index f059059..0ad9630 100644
+--- a/daemons/attrd/attrd_attributes.c
++++ b/daemons/attrd/attrd_attributes.c
+@@ -139,6 +139,7 @@ attrd_add_value_xml(xmlNode *parent, const attribute_t *a,
+     xmlNode *xml = create_xml_node(parent, __func__);
+ 
+     crm_xml_add(xml, PCMK__XA_ATTR_NAME, a->id);
++    crm_xml_add(xml, PCMK__XA_ATTR_SET_TYPE, a->set_type);
+     crm_xml_add(xml, PCMK__XA_ATTR_SET, a->set_id);
+     crm_xml_add(xml, PCMK__XA_ATTR_UUID, a->uuid);
+     crm_xml_add(xml, PCMK__XA_ATTR_USER, a->user);
+-- 
+2.31.1
+
+From 4479ff8507dd69f5946d31cf83c7e47fe15d3bdb Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Tue, 16 Jan 2024 12:18:40 -0600
+Subject: [PATCH 3/5] Refactor: pacemaker-attrd: functionize getting attribute
+ set ID
+
+... for future reuse
+---
+ daemons/attrd/attrd_attributes.c | 38 ++++++++++++++++++++++++++++++++
+ daemons/attrd/attrd_cib.c        |  9 +-------
+ daemons/attrd/pacemaker-attrd.h  |  3 ++-
+ 3 files changed, 41 insertions(+), 9 deletions(-)
+
+diff --git a/daemons/attrd/attrd_attributes.c b/daemons/attrd/attrd_attributes.c
+index 0ad9630..5727ab8 100644
+--- a/daemons/attrd/attrd_attributes.c
++++ b/daemons/attrd/attrd_attributes.c
+@@ -210,3 +210,41 @@ attrd_populate_attribute(xmlNode *xml, const char *attr)
+ 
+     return a;
+ }
++
++/*!
++ * \internal
++ * \brief Get the XML ID used to write out an attribute set
++ *
++ * \param[in] attr           Attribute to get set ID for
++ * \param[in] node_state_id  XML ID of node state that attribute value is for
++ *
++ * \return Newly allocated string with XML ID to use for \p attr set
++ */
++char *
++attrd_set_id(const attribute_t *attr, const char *node_state_id)
++{
++    char *set_id = NULL;
++
++    CRM_ASSERT((attr != NULL) && (node_state_id != NULL));
++
++    if (attr->set_id == NULL) {
++        /* @COMPAT This should really take the set type into account. Currently
++         * we use the same XML ID for transient attributes and utilization
++         * attributes. It doesn't cause problems because the status section is
++         * not limited by the schema in any way, but it's still unfortunate.
++         * For backward compatibility reasons, we can't change this.
++         */
++        set_id = crm_strdup_printf("%s-%s", XML_CIB_TAG_STATUS, node_state_id);
++    } else {
++        /* @COMPAT When the user specifies a set ID for an attribute, it is the
++         * same for every node. That is less than ideal, but again, the schema
++         * doesn't enforce anything for the status section. We couldn't change
++         * it without allowing the set ID to vary per value rather than per
++         * attribute, which would break backward compatibility, pose design
++         * challenges, and potentially cause problems in rolling upgrades.
++         */
++        pcmk__str_update(&set_id, attr->set_id);
++    }
++    crm_xml_sanitize_id(set_id);
++    return set_id;
++}
+diff --git a/daemons/attrd/attrd_cib.c b/daemons/attrd/attrd_cib.c
+index 481fea7..08d3425 100644
+--- a/daemons/attrd/attrd_cib.c
++++ b/daemons/attrd/attrd_cib.c
+@@ -423,17 +423,10 @@ add_unset_attr_update(const attribute_t *attr, const char *attr_id,
+ static int
+ add_attr_update(const attribute_t *attr, const char *value, const char *node_id)
+ {
+-    char *set_id = NULL;
++    char *set_id = attrd_set_id(attr, node_id);
+     char *attr_id = NULL;
+     int rc = pcmk_rc_ok;
+ 
+-    if (attr->set_id != NULL) {
+-        pcmk__str_update(&set_id, attr->set_id);
+-    } else {
+-        set_id = crm_strdup_printf("%s-%s", XML_CIB_TAG_STATUS, node_id);
+-    }
+-    crm_xml_sanitize_id(set_id);
+-
+     if (attr->uuid != NULL) {
+         pcmk__str_update(&attr_id, attr->uuid);
+     } else {
+diff --git a/daemons/attrd/pacemaker-attrd.h b/daemons/attrd/pacemaker-attrd.h
+index bacaad6..3da7f8d 100644
+--- a/daemons/attrd/pacemaker-attrd.h
++++ b/daemons/attrd/pacemaker-attrd.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2013-2023 the Pacemaker project contributors
++ * Copyright 2013-2024 the Pacemaker project contributors
+  *
+  * The version control history for this file may have further details.
+  *
+@@ -195,6 +195,7 @@ void attrd_clear_value_seen(void);
+ void attrd_free_attribute(gpointer data);
+ void attrd_free_attribute_value(gpointer data);
+ attribute_t *attrd_populate_attribute(xmlNode *xml, const char *attr);
++char *attrd_set_id(const attribute_t *attr, const char *node_state_id);
+ 
+ enum attrd_write_options {
+     attrd_write_changed         = 0,
+-- 
+2.31.1
+
+From eee2169ac348b8ed26ac0b78cb11ddc5cef9384e Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Tue, 16 Jan 2024 12:25:59 -0600
+Subject: [PATCH 4/5] Refactor: pacemaker-attrd: functionize getting attribute
+ nvpair ID
+
+... for future reuse
+---
+ daemons/attrd/attrd_attributes.c | 28 ++++++++++++++++++++++++++++
+ daemons/attrd/attrd_cib.c        | 17 +++++------------
+ daemons/attrd/pacemaker-attrd.h  |  1 +
+ 3 files changed, 34 insertions(+), 12 deletions(-)
+
+diff --git a/daemons/attrd/attrd_attributes.c b/daemons/attrd/attrd_attributes.c
+index 5727ab8..23de2e2 100644
+--- a/daemons/attrd/attrd_attributes.c
++++ b/daemons/attrd/attrd_attributes.c
+@@ -248,3 +248,31 @@ attrd_set_id(const attribute_t *attr, const char *node_state_id)
+     crm_xml_sanitize_id(set_id);
+     return set_id;
+ }
++
++/*!
++ * \internal
++ * \brief Get the XML ID used to write out an attribute value
++ *
++ * \param[in] attr           Attribute to get value XML ID for
++ * \param[in] node_state_id  UUID of node that attribute value is for
++ *
++ * \return Newly allocated string with XML ID of \p attr value
++ */
++char *
++attrd_nvpair_id(const attribute_t *attr, const char *node_state_id)
++{
++    char *nvpair_id = NULL;
++
++    if (attr->uuid != NULL) {
++        pcmk__str_update(&nvpair_id, attr->uuid);
++
++    } else if (attr->set_id != NULL) {
++        nvpair_id = crm_strdup_printf("%s-%s", attr->set_id, attr->id);
++
++    } else {
++        nvpair_id = crm_strdup_printf(XML_CIB_TAG_STATUS "-%s-%s",
++                                      node_state_id, attr->id);
++    }
++    crm_xml_sanitize_id(nvpair_id);
++    return nvpair_id;
++}
+diff --git a/daemons/attrd/attrd_cib.c b/daemons/attrd/attrd_cib.c
+index 08d3425..d42345f 100644
+--- a/daemons/attrd/attrd_cib.c
++++ b/daemons/attrd/attrd_cib.c
+@@ -424,23 +424,16 @@ static int
+ add_attr_update(const attribute_t *attr, const char *value, const char *node_id)
+ {
+     char *set_id = attrd_set_id(attr, node_id);
+-    char *attr_id = NULL;
++    char *nvpair_id = attrd_nvpair_id(attr, node_id);
+     int rc = pcmk_rc_ok;
+ 
+-    if (attr->uuid != NULL) {
+-        pcmk__str_update(&attr_id, attr->uuid);
++    if (value == NULL) {
++        rc = add_unset_attr_update(attr, nvpair_id, node_id, set_id);
+     } else {
+-        attr_id = crm_strdup_printf("%s-%s", set_id, attr->id);
+-    }
+-    crm_xml_sanitize_id(attr_id);
+-
+-    if (value != NULL) {
+-        rc = add_set_attr_update(attr, attr_id, node_id, set_id, value);
+-    } else {
+-        rc = add_unset_attr_update(attr, attr_id, node_id, set_id);
++        rc = add_set_attr_update(attr, nvpair_id, node_id, set_id, value);
+     }
+     free(set_id);
+-    free(attr_id);
++    free(nvpair_id);
+     return rc;
+ }
+ 
+diff --git a/daemons/attrd/pacemaker-attrd.h b/daemons/attrd/pacemaker-attrd.h
+index 3da7f8d..deec790 100644
+--- a/daemons/attrd/pacemaker-attrd.h
++++ b/daemons/attrd/pacemaker-attrd.h
+@@ -196,6 +196,7 @@ void attrd_free_attribute(gpointer data);
+ void attrd_free_attribute_value(gpointer data);
+ attribute_t *attrd_populate_attribute(xmlNode *xml, const char *attr);
+ char *attrd_set_id(const attribute_t *attr, const char *node_state_id);
++char *attrd_nvpair_id(const attribute_t *attr, const char *node_state_id);
+ 
+ enum attrd_write_options {
+     attrd_write_changed         = 0,
+-- 
+2.31.1
+
+From 2abde6cb87d2e3d31a370c74656f6f7c0818c185 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Thu, 18 Jan 2024 10:01:56 -0600
+Subject: [PATCH 5/5] Log: pacemaker-attrd: improve some messages for debugging
+
+---
+ daemons/attrd/attrd_attributes.c |  8 +++++---
+ daemons/attrd/attrd_cib.c        | 13 +++++++++----
+ daemons/attrd/attrd_corosync.c   | 10 ++++++----
+ 3 files changed, 20 insertions(+), 11 deletions(-)
+
+diff --git a/daemons/attrd/attrd_attributes.c b/daemons/attrd/attrd_attributes.c
+index 23de2e2..68b9585 100644
+--- a/daemons/attrd/attrd_attributes.c
++++ b/daemons/attrd/attrd_attributes.c
+@@ -60,13 +60,10 @@ attrd_create_attribute(xmlNode *xml)
+     a->values = pcmk__strikey_table(NULL, attrd_free_attribute_value);
+ 
+     a->user = crm_element_value_copy(xml, PCMK__XA_ATTR_USER);
+-    crm_trace("Performing all %s operations as user '%s'", a->id, a->user);
+ 
+     if (dampen_s != NULL) {
+         dampen = crm_get_msec(dampen_s);
+     }
+-    crm_trace("Created attribute %s with %s write delay", a->id,
+-              (a->timeout_ms == 0)? "no" : pcmk__readable_interval(a->timeout_ms));
+ 
+     if(dampen > 0) {
+         a->timeout_ms = dampen;
+@@ -75,6 +72,11 @@ attrd_create_attribute(xmlNode *xml)
+         crm_warn("Ignoring invalid delay %s for attribute %s", dampen_s, a->id);
+     }
+ 
++    crm_trace("Created attribute %s with %s write delay and %s CIB user",
++              a->id,
++              ((dampen > 0)? pcmk__readable_interval(a->timeout_ms) : "no"),
++              pcmk__s(a->user, "default"));
++
+     g_hash_table_replace(attributes, a->id, a);
+     return a;
+ }
+diff --git a/daemons/attrd/attrd_cib.c b/daemons/attrd/attrd_cib.c
+index d42345f..cae6846 100644
+--- a/daemons/attrd/attrd_cib.c
++++ b/daemons/attrd/attrd_cib.c
+@@ -54,6 +54,7 @@ attrd_cib_updated_cb(const char *event, xmlNode *msg)
+     bool status_changed = false;
+ 
+     if (attrd_shutting_down(true)) {
++        crm_debug("Ignoring CIB change during shutdown");
+         return;
+     }
+ 
+@@ -278,11 +279,13 @@ attrd_cib_callback(xmlNode *msg, int call_id, int rc, xmlNode *output, void *use
+ 
+     g_hash_table_iter_init(&iter, a->values);
+     while (g_hash_table_iter_next(&iter, (gpointer *) & peer, (gpointer *) & v)) {
+-        do_crm_log(level, "* %s[%s]=%s",
+-                   a->id, peer, pcmk__s(v->requested, "(null)"));
+         if (rc == pcmk_ok) {
++            crm_info("* Wrote %s[%s]=%s",
++                     a->id, peer, pcmk__s(v->requested, "(unset)"));
+             pcmk__str_update(&(v->requested), NULL);
+         } else {
++            do_crm_log(level, "* Could not write %s[%s]=%s",
++                       a->id, peer, pcmk__s(v->requested, "(unset)"));
+             a->changed = true; // Reattempt write below if we are still writer
+         }
+     }
+@@ -292,6 +295,7 @@ attrd_cib_callback(xmlNode *msg, int call_id, int rc, xmlNode *output, void *use
+             /* We deferred a write of a new update because this update was in
+              * progress. Write out the new value without additional delay.
+              */
++            crm_debug("Pending update for %s can be written now", a->id);
+             write_attribute(a, false);
+ 
+         /* We're re-attempting a write because the original failed; delay
+@@ -593,8 +597,9 @@ write_attribute(attribute_t *a, bool ignore_delay)
+             continue;
+         }
+ 
+-        crm_debug("Updating %s[%s]=%s (node uuid=%s id=%" PRIu32 ")",
+-                  a->id, v->nodename, v->current, uuid, v->nodeid);
++        crm_debug("Writing %s[%s]=%s (node-state-id=%s node-id=%" PRIu32 ")",
++                  a->id, v->nodename, pcmk__s(v->current, "(unset)"),
++                  uuid, v->nodeid);
+         cib_updates++;
+ 
+         /* Preservation of the attribute to transmit alert */
+diff --git a/daemons/attrd/attrd_corosync.c b/daemons/attrd/attrd_corosync.c
+index b348d52..6fb847b 100644
+--- a/daemons/attrd/attrd_corosync.c
++++ b/daemons/attrd/attrd_corosync.c
+@@ -293,7 +293,8 @@ update_attr_on_host(attribute_t *a, const crm_node_t *peer, const xmlNode *xml,
+ 
+         // Write out new value or start dampening timer
+         if (a->timeout_ms && a->timer) {
+-            crm_trace("Delayed write out (%dms) for %s", a->timeout_ms, attr);
++            crm_trace("Delaying write of %s %s for dampening",
++                      attr, pcmk__readable_interval(a->timeout_ms));
+             mainloop_timer_start(a->timer);
+         } else {
+             attrd_write_or_elect_attribute(a);
+@@ -307,11 +308,12 @@ update_attr_on_host(attribute_t *a, const crm_node_t *peer, const xmlNode *xml,
+         if (is_force_write == 1 && a->timeout_ms && a->timer) {
+             /* Save forced writing and set change flag. */
+             /* The actual attribute is written by Writer after election. */
+-            crm_trace("Unchanged %s[%s] from %s is %s(Set the forced write flag)",
+-                      attr, host, peer->uname, value);
++            crm_trace("%s[%s] from %s is unchanged (%s), forcing write",
++                      attr, host, peer->uname, pcmk__s(value, "unset"));
+             a->force_write = TRUE;
+         } else {
+-            crm_trace("Unchanged %s[%s] from %s is %s", attr, host, peer->uname, value);
++            crm_trace("%s[%s] from %s is unchanged (%s)",
++                      attr, host, peer->uname, pcmk__s(value, "unset"));
+         }
+     }
+ 
+-- 
+2.31.1
+

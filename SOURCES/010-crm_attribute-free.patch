@@ -1,0 +1,53 @@
+From 9c13ce6fe95812308443c188ace8f897e6bce942 Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Mon, 29 Jan 2024 11:14:25 -0800
+Subject: [PATCH] Fix: tools: crm_attribute emits garbage for --node localhost
+ or auto
+
+This happens because pcmk__node_attr_target() returns its argument if
+its argument is NULL, "auto", or "localhost" and no relevant environment
+variables are found. Then crm_attribute frees the return value, makes a
+copy of it, and assigns it back to options.dest_uname.
+
+The fix is to check whether the return value is equal to the argument.
+
+Fixes RHEL-23065
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ tools/crm_attribute.c | 19 +++++++++++++++++--
+ 1 file changed, 17 insertions(+), 2 deletions(-)
+
+diff --git a/tools/crm_attribute.c b/tools/crm_attribute.c
+index d221ab85d..636d03dbd 100644
+--- a/tools/crm_attribute.c
++++ b/tools/crm_attribute.c
+@@ -766,8 +766,23 @@ main(int argc, char **argv)
+         const char *target = pcmk__node_attr_target(options.dest_uname);
+ 
+         if (target != NULL) {
+-            g_free(options.dest_uname);
+-            options.dest_uname = g_strdup(target);
++            /* If options.dest_uname is "auto" or "localhost", then
++             * pcmk__node_attr_target() may return it, depending on environment
++             * variables. In that case, attribute lookups will fail for "auto"
++             * (unless there's a node named "auto"). attrd maps "localhost" to
++             * the true local node name for queries.
++             *
++             * @TODO
++             * * Investigate whether "localhost" is mapped to a real node name
++             *   for non-query commands. If not, possibly modify it so that it
++             *   is.
++             * * Map "auto" to "localhost" (probably).
++             */
++            if (target != (const char *) options.dest_uname) {
++                g_free(options.dest_uname);
++                options.dest_uname = g_strdup(target);
++            }
++
+         } else if (getenv("CIB_file") != NULL && options.dest_uname == NULL) {
+             get_node_name_from_local();
+         }
+-- 
+2.41.0
+

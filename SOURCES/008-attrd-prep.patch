@@ -1,0 +1,373 @@
+From 4823643bef8801b33688167b159bb531bcdf8911 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Thu, 4 Jan 2024 17:10:08 -0600
+Subject: [PATCH 1/5] Refactor: pacemaker-attrd: drop redundant argument from
+ update_attr_on_host()
+
+It can check for a force-write via its xml argument, to simplify the caller
+---
+ daemons/attrd/attrd_corosync.c | 13 +++++++------
+ 1 file changed, 7 insertions(+), 6 deletions(-)
+
+diff --git a/daemons/attrd/attrd_corosync.c b/daemons/attrd/attrd_corosync.c
+index 158d82f..1b56923 100644
+--- a/daemons/attrd/attrd_corosync.c
++++ b/daemons/attrd/attrd_corosync.c
+@@ -266,7 +266,7 @@ record_peer_nodeid(attribute_value_t *v, const char *host)
+ static void
+ update_attr_on_host(attribute_t *a, const crm_node_t *peer, const xmlNode *xml,
+                     const char *attr, const char *value, const char *host,
+-                    bool filter, int is_force_write)
++                    bool filter)
+ {
+     attribute_value_t *v = NULL;
+ 
+@@ -309,6 +309,10 @@ update_attr_on_host(attribute_t *a, const crm_node_t *peer, const xmlNode *xml,
+         }
+ 
+     } else {
++        int is_force_write = 0;
++
++        crm_element_value_int(xml, PCMK__XA_ATTR_FORCE, &is_force_write);
++
+         if (is_force_write == 1 && a->timeout_ms && a->timer) {
+             /* Save forced writing and set change flag. */
+             /* The actual attribute is written by Writer after election. */
+@@ -338,15 +342,12 @@ attrd_peer_update_one(const crm_node_t *peer, xmlNode *xml, bool filter)
+     const char *attr = crm_element_value(xml, PCMK__XA_ATTR_NAME);
+     const char *value = crm_element_value(xml, PCMK__XA_ATTR_VALUE);
+     const char *host = crm_element_value(xml, PCMK__XA_ATTR_NODE_NAME);
+-    int is_force_write = 0;
+ 
+     if (attr == NULL) {
+         crm_warn("Could not update attribute: peer did not specify name");
+         return;
+     }
+ 
+-    crm_element_value_int(xml, PCMK__XA_ATTR_FORCE, &is_force_write);
+-
+     a = attrd_populate_attribute(xml, attr);
+     if (a == NULL) {
+         return;
+@@ -361,12 +362,12 @@ attrd_peer_update_one(const crm_node_t *peer, xmlNode *xml, bool filter)
+         g_hash_table_iter_init(&vIter, a->values);
+ 
+         while (g_hash_table_iter_next(&vIter, (gpointer *) & host, NULL)) {
+-            update_attr_on_host(a, peer, xml, attr, value, host, filter, is_force_write);
++            update_attr_on_host(a, peer, xml, attr, value, host, filter);
+         }
+ 
+     } else {
+         // Update attribute value for the given host
+-        update_attr_on_host(a, peer, xml, attr, value, host, filter, is_force_write);
++        update_attr_on_host(a, peer, xml, attr, value, host, filter);
+     }
+ 
+     /* If this is a message from some attrd instance broadcasting its protocol
+-- 
+2.31.1
+
+From c7a1ab819b25e3225c185c1630a7139a96fb5c71 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Tue, 9 Jan 2024 16:48:37 -0600
+Subject: [PATCH 2/5] Refactor: pacemaker-attrd: drop unused argument from
+ attrd_peer_sync()
+
+---
+ daemons/attrd/attrd_corosync.c  | 10 ++++++++--
+ daemons/attrd/attrd_elections.c |  2 +-
+ daemons/attrd/attrd_messages.c  |  2 +-
+ daemons/attrd/pacemaker-attrd.h |  2 +-
+ 4 files changed, 11 insertions(+), 5 deletions(-)
+
+diff --git a/daemons/attrd/attrd_corosync.c b/daemons/attrd/attrd_corosync.c
+index 1b56923..088f00c 100644
+--- a/daemons/attrd/attrd_corosync.c
++++ b/daemons/attrd/attrd_corosync.c
+@@ -233,7 +233,7 @@ attrd_peer_change_cb(enum crm_status_type kind, crm_node_t *peer, const void *da
+                  */
+                 if (attrd_election_won()
+                     && !pcmk_is_set(peer->flags, crm_remote_node)) {
+-                    attrd_peer_sync(peer, NULL);
++                    attrd_peer_sync(peer);
+                 }
+             } else {
+                 // Remove all attribute values associated with lost nodes
+@@ -535,8 +535,14 @@ attrd_peer_remove(const char *host, bool uncache, const char *source)
+     }
+ }
+ 
++/*!
++ * \internal
++ * \brief Send all known attributes and values to a peer
++ *
++ * \param[in] peer  Peer to send sync to (if NULL, broadcast to all peers)
++ */
+ void
+-attrd_peer_sync(crm_node_t *peer, xmlNode *xml)
++attrd_peer_sync(crm_node_t *peer)
+ {
+     GHashTableIter aIter;
+     GHashTableIter vIter;
+diff --git a/daemons/attrd/attrd_elections.c b/daemons/attrd/attrd_elections.c
+index 82fbe8a..9dbf133 100644
+--- a/daemons/attrd/attrd_elections.c
++++ b/daemons/attrd/attrd_elections.c
+@@ -23,7 +23,7 @@ attrd_election_cb(gpointer user_data)
+     attrd_declare_winner();
+ 
+     /* Update the peers after an election */
+-    attrd_peer_sync(NULL, NULL);
++    attrd_peer_sync(NULL);
+ 
+     /* After winning an election, update the CIB with the values of all
+      * attributes as the winner knows them.
+diff --git a/daemons/attrd/attrd_messages.c b/daemons/attrd/attrd_messages.c
+index 5525d4b..13ac01f 100644
+--- a/daemons/attrd/attrd_messages.c
++++ b/daemons/attrd/attrd_messages.c
+@@ -180,7 +180,7 @@ handle_sync_request(pcmk__request_t *request)
+         crm_node_t *peer = pcmk__get_node(0, request->peer, NULL,
+                                           pcmk__node_search_cluster);
+ 
+-        attrd_peer_sync(peer, request->xml);
++        attrd_peer_sync(peer);
+         pcmk__set_result(&request->result, CRM_EX_OK, PCMK_EXEC_DONE, NULL);
+         return NULL;
+     } else {
+diff --git a/daemons/attrd/pacemaker-attrd.h b/daemons/attrd/pacemaker-attrd.h
+index 7384188..bacaad6 100644
+--- a/daemons/attrd/pacemaker-attrd.h
++++ b/daemons/attrd/pacemaker-attrd.h
+@@ -175,7 +175,7 @@ extern GHashTable *peer_protocol_vers;
+ int attrd_cluster_connect(void);
+ void attrd_peer_update(const crm_node_t *peer, xmlNode *xml, const char *host,
+                        bool filter);
+-void attrd_peer_sync(crm_node_t *peer, xmlNode *xml);
++void attrd_peer_sync(crm_node_t *peer);
+ void attrd_peer_remove(const char *host, bool uncache, const char *source);
+ void attrd_peer_clear_failure(pcmk__request_t *request);
+ void attrd_peer_sync_response(const crm_node_t *peer, bool peer_won,
+-- 
+2.31.1
+
+From abafae0068e10abb135b0496086947728365299a Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Thu, 11 Jan 2024 17:31:17 -0600
+Subject: [PATCH 3/5] Refactor: pacemaker-attrd: de-functionize
+ attrd_lookup_or_create_value()
+
+... to make planned changes easier
+---
+ daemons/attrd/attrd_corosync.c | 62 +++++++++++++---------------------
+ 1 file changed, 24 insertions(+), 38 deletions(-)
+
+diff --git a/daemons/attrd/attrd_corosync.c b/daemons/attrd/attrd_corosync.c
+index 088f00c..59e6a26 100644
+--- a/daemons/attrd/attrd_corosync.c
++++ b/daemons/attrd/attrd_corosync.c
+@@ -168,40 +168,6 @@ broadcast_local_value(const attribute_t *a)
+ 
+ #define state_text(state) pcmk__s((state), "in unknown state")
+ 
+-/*!
+- * \internal
+- * \brief Return a node's value from hash table (creating one if needed)
+- *
+- * \param[in,out] values     Hash table of values
+- * \param[in]     node_name  Name of node to look up
+- * \param[in]     xml        XML describing the attribute
+- *
+- * \return Pointer to new or existing hash table entry
+- */
+-static attribute_value_t *
+-attrd_lookup_or_create_value(GHashTable *values, const char *node_name,
+-                             const xmlNode *xml)
+-{
+-    attribute_value_t *v = g_hash_table_lookup(values, node_name);
+-    int is_remote = 0;
+-
+-    if (v == NULL) {
+-        v = calloc(1, sizeof(attribute_value_t));
+-        CRM_ASSERT(v != NULL);
+-
+-        pcmk__str_update(&v->nodename, node_name);
+-        g_hash_table_replace(values, v->nodename, v);
+-    }
+-
+-    crm_element_value_int(xml, PCMK__XA_ATTR_IS_REMOTE, &is_remote);
+-    if (is_remote) {
+-        attrd_set_value_flags(v, attrd_value_remote);
+-        CRM_ASSERT(crm_remote_peer_get(node_name) != NULL);
+-    }
+-
+-    return(v);
+-}
+-
+ static void
+ attrd_peer_change_cb(enum crm_status_type kind, crm_node_t *peer, const void *data)
+ {
+@@ -268,18 +234,38 @@ update_attr_on_host(attribute_t *a, const crm_node_t *peer, const xmlNode *xml,
+                     const char *attr, const char *value, const char *host,
+                     bool filter)
+ {
++    int is_remote = 0;
++    bool changed = false;
+     attribute_value_t *v = NULL;
+ 
+-    v = attrd_lookup_or_create_value(a->values, host, xml);
++    // Create entry for value if not already existing
++    v = g_hash_table_lookup(a->values, host);
++    if (v == NULL) {
++        v = calloc(1, sizeof(attribute_value_t));
++        CRM_ASSERT(v != NULL);
++
++        pcmk__str_update(&v->nodename, host);
++        g_hash_table_replace(a->values, v->nodename, v);
++    }
++
++    // If value is for a Pacemaker Remote node, remember that
++    crm_element_value_int(xml, PCMK__XA_ATTR_IS_REMOTE, &is_remote);
++    if (is_remote) {
++        attrd_set_value_flags(v, attrd_value_remote);
++        CRM_ASSERT(crm_remote_peer_get(host) != NULL);
++    }
++
++    // Check whether the value changed
++    changed = !pcmk__str_eq(v->current, value, pcmk__str_casei);
+ 
+-    if (filter && !pcmk__str_eq(v->current, value, pcmk__str_casei)
+-        && pcmk__str_eq(host, attrd_cluster->uname, pcmk__str_casei)) {
++    if (changed && filter && pcmk__str_eq(host, attrd_cluster->uname,
++                                          pcmk__str_casei)) {
+ 
+         crm_notice("%s[%s]: local value '%s' takes priority over '%s' from %s",
+                    attr, host, v->current, value, peer->uname);
+         v = broadcast_local_value(a);
+ 
+-    } else if (!pcmk__str_eq(v->current, value, pcmk__str_casei)) {
++    } else if (changed) {
+         crm_notice("Setting %s[%s]%s%s: %s -> %s "
+                    CRM_XS " from %s with %s write delay",
+                    attr, host, a->set_type ? " in " : "",
+-- 
+2.31.1
+
+From 72529ec512fb4938bd8dbbd2caf44bbb1a616826 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Thu, 11 Jan 2024 18:04:33 -0600
+Subject: [PATCH 4/5] Refactor: pacemaker-attrd: minor shuffling to make
+ planned changes easier
+
+---
+ daemons/attrd/attrd_cib.c | 19 +++++++++++--------
+ 1 file changed, 11 insertions(+), 8 deletions(-)
+
+diff --git a/daemons/attrd/attrd_cib.c b/daemons/attrd/attrd_cib.c
+index bdc0a10..481fea7 100644
+--- a/daemons/attrd/attrd_cib.c
++++ b/daemons/attrd/attrd_cib.c
+@@ -51,6 +51,7 @@ attrd_cib_updated_cb(const char *event, xmlNode *msg)
+ {
+     const xmlNode *patchset = NULL;
+     const char *client_name = NULL;
++    bool status_changed = false;
+ 
+     if (attrd_shutting_down(true)) {
+         return;
+@@ -64,20 +65,22 @@ attrd_cib_updated_cb(const char *event, xmlNode *msg)
+         mainloop_set_trigger(attrd_config_read);
+     }
+ 
+-    if (!attrd_election_won()) {
+-        // Don't write attributes if we're not the writer
+-        return;
+-    }
++    status_changed = cib__element_in_patchset(patchset, XML_CIB_TAG_STATUS);
+ 
+     client_name = crm_element_value(msg, F_CIB_CLIENTNAME);
+     if (!cib__client_triggers_refresh(client_name)) {
+-        // The CIB is still accurate
++        /* This change came from a source that ensured the CIB is consistent
++         * with our attributes table, so we don't need to write anything out.
++         */
+         return;
+     }
+ 
+-    if (cib__element_in_patchset(patchset, XML_CIB_TAG_NODES)
+-        || cib__element_in_patchset(patchset, XML_CIB_TAG_STATUS)) {
+-
++    if (!attrd_election_won()) {
++        // Don't write attributes if we're not the writer
++        return;
++    }
++ 
++    if (status_changed || cib__element_in_patchset(patchset, XML_CIB_TAG_NODES)) {
+         /* An unsafe client modified the nodes or status section. Write
+          * transient attributes to ensure they're up-to-date in the CIB.
+          */
+-- 
+2.31.1
+
+From b83c2567fb450eec5b18882ded16403831d2c3c0 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Thu, 11 Jan 2024 17:53:55 -0600
+Subject: [PATCH 5/5] Log: pacemaker-attrd: make sure we don't try to log NULL
+
+---
+ daemons/attrd/attrd_corosync.c | 15 +++++++++++----
+ 1 file changed, 11 insertions(+), 4 deletions(-)
+
+diff --git a/daemons/attrd/attrd_corosync.c b/daemons/attrd/attrd_corosync.c
+index 59e6a26..b348d52 100644
+--- a/daemons/attrd/attrd_corosync.c
++++ b/daemons/attrd/attrd_corosync.c
+@@ -229,6 +229,11 @@ record_peer_nodeid(attribute_value_t *v, const char *host)
+     }
+ }
+ 
++#define readable_value(rv_v) pcmk__s((rv_v)->current, "(unset)")
++
++#define readable_peer(p)    \
++    (((p) == NULL)? "all peers" : pcmk__s((p)->uname, "unknown peer"))
++
+ static void
+ update_attr_on_host(attribute_t *a, const crm_node_t *peer, const xmlNode *xml,
+                     const char *attr, const char *value, const char *host,
+@@ -262,14 +267,14 @@ update_attr_on_host(attribute_t *a, const crm_node_t *peer, const xmlNode *xml,
+                                           pcmk__str_casei)) {
+ 
+         crm_notice("%s[%s]: local value '%s' takes priority over '%s' from %s",
+-                   attr, host, v->current, value, peer->uname);
++                   attr, host, readable_value(v), value, peer->uname);
+         v = broadcast_local_value(a);
+ 
+     } else if (changed) {
+         crm_notice("Setting %s[%s]%s%s: %s -> %s "
+                    CRM_XS " from %s with %s write delay",
+                    attr, host, a->set_type ? " in " : "",
+-                   pcmk__s(a->set_type, ""), pcmk__s(v->current, "(unset)"),
++                   pcmk__s(a->set_type, ""), readable_value(v),
+                    pcmk__s(value, "(unset)"), peer->uname,
+                    (a->timeout_ms == 0)? "no" : pcmk__readable_interval(a->timeout_ms));
+         pcmk__str_update(&v->current, value);
+@@ -543,12 +548,14 @@ attrd_peer_sync(crm_node_t *peer)
+     while (g_hash_table_iter_next(&aIter, NULL, (gpointer *) & a)) {
+         g_hash_table_iter_init(&vIter, a->values);
+         while (g_hash_table_iter_next(&vIter, NULL, (gpointer *) & v)) {
+-            crm_debug("Syncing %s[%s] = %s to %s", a->id, v->nodename, v->current, peer?peer->uname:"everyone");
++            crm_debug("Syncing %s[%s]='%s' to %s",
++                      a->id, v->nodename, readable_value(v),
++                      readable_peer(peer));
+             attrd_add_value_xml(sync, a, v, false);
+         }
+     }
+ 
+-    crm_debug("Syncing values to %s", peer?peer->uname:"everyone");
++    crm_debug("Syncing values to %s", readable_peer(peer));
+     attrd_send_message(peer, sync, false);
+     free_xml(sync);
+ }
+-- 
+2.31.1
+

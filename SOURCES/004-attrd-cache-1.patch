@@ -1,0 +1,1443 @@
+From 543a1e9b6f22f13956a8ef22b20c8fe93dad7ae9 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Tue, 12 Dec 2023 16:08:44 -0600
+Subject: [PATCH 01/12] Refactor: libcrmcommon: support attrd purge requests
+ without clearing cache
+
+Nothing uses the new capability yet
+---
+ daemons/attrd/attrd_corosync.c          | 4 +++-
+ daemons/attrd/attrd_messages.c          | 8 +++++++-
+ daemons/attrd/pacemaker-attrd.h         | 3 ++-
+ daemons/controld/controld_attrd.c       | 2 +-
+ include/crm/common/ipc_attrd_internal.h | 7 ++++---
+ include/crm_internal.h                  | 1 +
+ lib/common/ipc_attrd.c                  | 3 ++-
+ lib/common/ipc_client.c                 | 1 +
+ 8 files changed, 21 insertions(+), 8 deletions(-)
+
+diff --git a/daemons/attrd/attrd_corosync.c b/daemons/attrd/attrd_corosync.c
+index 86dc67b04..e6cd07f65 100644
+--- a/daemons/attrd/attrd_corosync.c
++++ b/daemons/attrd/attrd_corosync.c
+@@ -540,7 +540,9 @@ attrd_peer_remove(const char *host, bool uncache, const char *source)
+     GHashTableIter aIter;
+ 
+     CRM_CHECK(host != NULL, return);
+-    crm_notice("Removing all %s attributes for peer %s", host, source);
++    crm_notice("Removing all %s attributes for node %s "
++               CRM_XS " %s reaping node from cache",
++               host, source, (uncache? "and" : "without"));
+ 
+     g_hash_table_iter_init(&aIter, attributes);
+     while (g_hash_table_iter_next(&aIter, NULL, (gpointer *) & a)) {
+diff --git a/daemons/attrd/attrd_messages.c b/daemons/attrd/attrd_messages.c
+index 89da6d894..ac32e18af 100644
+--- a/daemons/attrd/attrd_messages.c
++++ b/daemons/attrd/attrd_messages.c
+@@ -148,7 +148,13 @@ handle_remove_request(pcmk__request_t *request)
+ {
+     if (request->peer != NULL) {
+         const char *host = crm_element_value(request->xml, PCMK__XA_ATTR_NODE_NAME);
+-        attrd_peer_remove(host, true, request->peer);
++        bool reap = false;
++
++        if (pcmk__xe_get_bool_attr(request->xml, PCMK__XA_REAP,
++                                   &reap) != pcmk_rc_ok) {
++            reap = true; // Default to true for backward compatibility
++        }
++        attrd_peer_remove(host, reap, request->peer);
+         pcmk__set_result(&request->result, CRM_EX_OK, PCMK_EXEC_DONE, NULL);
+         return NULL;
+     } else {
+diff --git a/daemons/attrd/pacemaker-attrd.h b/daemons/attrd/pacemaker-attrd.h
+index b8929a7f7..70e2cb41b 100644
+--- a/daemons/attrd/pacemaker-attrd.h
++++ b/daemons/attrd/pacemaker-attrd.h
+@@ -42,8 +42,9 @@
+  *     4       2.1.5    Multiple attributes can be updated in a single IPC
+  *                      message
+  *     5       2.1.5    Peers can request confirmation of a sent message
++ *     6       2.1.7    PCMK__ATTRD_CMD_PEER_REMOVE supports PCMK__XA_REAP
+  */
+-#define ATTRD_PROTOCOL_VERSION "5"
++#define ATTRD_PROTOCOL_VERSION "6"
+ 
+ #define ATTRD_SUPPORTS_MULTI_MESSAGE(x) ((x) >= 4)
+ #define ATTRD_SUPPORTS_CONFIRMATION(x)  ((x) >= 5)
+diff --git a/daemons/controld/controld_attrd.c b/daemons/controld/controld_attrd.c
+index 923abb92d..958dc2f14 100644
+--- a/daemons/controld/controld_attrd.c
++++ b/daemons/controld/controld_attrd.c
+@@ -117,7 +117,7 @@ update_attrd_remote_node_removed(const char *host, const char *user_name)
+     if (rc == pcmk_rc_ok) {
+         crm_trace("Asking attribute manager to purge Pacemaker Remote node %s",
+                   host);
+-        rc = pcmk__attrd_api_purge(attrd_api, host);
++        rc = pcmk__attrd_api_purge(attrd_api, host, true);
+     }
+     if (rc != pcmk_rc_ok) {
+         crm_err("Could not purge Pacemaker Remote node %s "
+diff --git a/include/crm/common/ipc_attrd_internal.h b/include/crm/common/ipc_attrd_internal.h
+index b1b7584bd..39a55ad1d 100644
+--- a/include/crm/common/ipc_attrd_internal.h
++++ b/include/crm/common/ipc_attrd_internal.h
+@@ -89,10 +89,11 @@ int pcmk__attrd_api_delete(pcmk_ipc_api_t *api, const char *node, const char *na
+ 
+ /*!
+  * \internal
+- * \brief Purge a node from pacemaker-attrd
++ * \brief Request removal of a node's transient attributes
+  *
+  * \param[in,out] api           pacemaker-attrd IPC object
+- * \param[in]     node          Node to remove
++ * \param[in]     node          Node whose attributes should be purged
++ * \param[in]     reap          If true, also request removal from node caches
+  *
+  * \note If \p api is NULL, a new temporary connection will be created
+  *       just for this operation and destroyed afterwards.  If \p api is
+@@ -102,7 +103,7 @@ int pcmk__attrd_api_delete(pcmk_ipc_api_t *api, const char *node, const char *na
+  *
+  * \return Standard Pacemaker return code
+  */
+-int pcmk__attrd_api_purge(pcmk_ipc_api_t *api, const char *node);
++int pcmk__attrd_api_purge(pcmk_ipc_api_t *api, const char *node, bool reap);
+ 
+ /*!
+  * \internal
+diff --git a/include/crm_internal.h b/include/crm_internal.h
+index 3bc8d096a..f800ab0cc 100644
+--- a/include/crm_internal.h
++++ b/include/crm_internal.h
+@@ -92,6 +92,7 @@
+ #define PCMK__XA_MODE                   "mode"
+ #define PCMK__XA_NODE_START_STATE       "node_start_state"
+ #define PCMK__XA_PATH                   "path"
++#define PCMK__XA_REAP                   "reap"
+ #define PCMK__XA_SCHEMA                 "schema"
+ #define PCMK__XA_SCHEMAS                "schemas"
+ #define PCMK__XA_TASK                   "task"
+diff --git a/lib/common/ipc_attrd.c b/lib/common/ipc_attrd.c
+index 9caaabec0..56cdb5aba 100644
+--- a/lib/common/ipc_attrd.c
++++ b/lib/common/ipc_attrd.c
+@@ -277,7 +277,7 @@ pcmk__attrd_api_delete(pcmk_ipc_api_t *api, const char *node, const char *name,
+ }
+ 
+ int
+-pcmk__attrd_api_purge(pcmk_ipc_api_t *api, const char *node)
++pcmk__attrd_api_purge(pcmk_ipc_api_t *api, const char *node, bool reap)
+ {
+     int rc = pcmk_rc_ok;
+     xmlNode *request = NULL;
+@@ -291,6 +291,7 @@ pcmk__attrd_api_purge(pcmk_ipc_api_t *api, const char *node)
+     request = create_attrd_op(NULL);
+ 
+     crm_xml_add(request, PCMK__XA_TASK, PCMK__ATTRD_CMD_PEER_REMOVE);
++    pcmk__xe_set_bool_attr(request, PCMK__XA_REAP, reap);
+     pcmk__xe_add_node(request, node, 0);
+ 
+     if (api == NULL) {
+diff --git a/lib/common/ipc_client.c b/lib/common/ipc_client.c
+index 0d3865095..5e64e2324 100644
+--- a/lib/common/ipc_client.c
++++ b/lib/common/ipc_client.c
+@@ -759,6 +759,7 @@ create_purge_node_request(const pcmk_ipc_api_t *api, const char *node_name,
+             crm_xml_add(request, F_TYPE, T_ATTRD);
+             crm_xml_add(request, F_ORIG, crm_system_name);
+             crm_xml_add(request, PCMK__XA_TASK, PCMK__ATTRD_CMD_PEER_REMOVE);
++            pcmk__xe_set_bool_attr(request, PCMK__XA_REAP, true);
+             pcmk__xe_add_node(request, node_name, nodeid);
+             break;
+ 
+-- 
+2.41.0
+
+From adc1d8ef587913e5505494e0205bd77a8e0a878e Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Wed, 13 Dec 2023 09:24:28 -0600
+Subject: [PATCH 02/12] Log: attrd: improve messages for CIB wipe
+
+Also, expose attrd_erase_attrs() as attrd_cib_erase_transient_attrs() and make
+it take the node name as an argument, for future reuse.
+---
+ daemons/attrd/attrd_cib.c       | 60 ++++++++++++++++++++-------------
+ daemons/attrd/pacemaker-attrd.h |  1 +
+ 2 files changed, 37 insertions(+), 24 deletions(-)
+
+diff --git a/daemons/attrd/attrd_cib.c b/daemons/attrd/attrd_cib.c
+index 80e5580d9..ca1c5b9e0 100644
+--- a/daemons/attrd/attrd_cib.c
++++ b/daemons/attrd/attrd_cib.c
+@@ -153,41 +153,44 @@ static void
+ attrd_erase_cb(xmlNode *msg, int call_id, int rc, xmlNode *output,
+                void *user_data)
+ {
+-    do_crm_log_unlikely(((rc != pcmk_ok)? LOG_NOTICE : LOG_DEBUG),
+-                        "Cleared transient attributes: %s "
+-                        CRM_XS " xpath=%s rc=%d",
+-                        pcmk_strerror(rc), (char *) user_data, rc);
++    const char *node = pcmk__s((const char *) user_data, "a node");
++
++    if (rc == pcmk_ok) {
++        crm_info("Cleared transient node attributes for %s from CIB", node);
++    } else {
++        crm_err("Unable to clear transient node attributes for %s from CIB: %s",
++                node, pcmk_strerror(rc));
++    }
+ }
+ 
+ #define XPATH_TRANSIENT "//node_state[@uname='%s']/" XML_TAG_TRANSIENT_NODEATTRS
+ 
+ /*!
+  * \internal
+- * \brief Wipe all transient attributes for this node from the CIB
++ * \brief Wipe all transient node attributes for a node from the CIB
+  *
+- * Clear any previous transient node attributes from the CIB. This is
+- * normally done by the DC's controller when this node leaves the cluster, but
+- * this handles the case where the node restarted so quickly that the
+- * cluster layer didn't notice.
+- *
+- * \todo If pacemaker-attrd respawns after crashing (see PCMK_ENV_RESPAWNED),
+- *       ideally we'd skip this and sync our attributes from the writer.
+- *       However, currently we reject any values for us that the writer has, in
+- *       attrd_peer_update().
++ * \param[in] node  Node to clear attributes for
+  */
+-static void
+-attrd_erase_attrs(void)
++void
++attrd_cib_erase_transient_attrs(const char *node)
+ {
+     int call_id = 0;
+-    char *xpath = crm_strdup_printf(XPATH_TRANSIENT, attrd_cluster->uname);
++    char *xpath = NULL;
++
++    CRM_CHECK(node != NULL, return);
++
++    xpath = crm_strdup_printf(XPATH_TRANSIENT, node);
+ 
+-    crm_info("Clearing transient attributes from CIB " CRM_XS " xpath=%s",
+-             xpath);
++    crm_debug("Clearing transient node attributes for %s from CIB using %s",
++              node, xpath);
+ 
+     call_id = the_cib->cmds->remove(the_cib, xpath, NULL, cib_xpath);
+-    the_cib->cmds->register_callback_full(the_cib, call_id, 120, FALSE, xpath,
+-                                          "attrd_erase_cb", attrd_erase_cb,
+-                                          free);
++    free(xpath);
++
++    // strdup() is just for logging here, so ignore failure
++    the_cib->cmds->register_callback_full(the_cib, call_id, 120, FALSE,
++                                          strdup(node), "attrd_erase_cb",
++                                          attrd_erase_cb, free);
+ }
+ 
+ /*!
+@@ -197,8 +200,17 @@ attrd_erase_attrs(void)
+ void
+ attrd_cib_init(void)
+ {
+-    // We have no attribute values in memory, wipe the CIB to match
+-    attrd_erase_attrs();
++    /* We have no attribute values in memory, so wipe the CIB to match. This is
++     * normally done by the DC's controller when this node leaves the cluster, but
++     * this handles the case where the node restarted so quickly that the
++     * cluster layer didn't notice.
++     *
++     * \todo If pacemaker-attrd respawns after crashing (see PCMK_ENV_RESPAWNED),
++     *       ideally we'd skip this and sync our attributes from the writer.
++     *       However, currently we reject any values for us that the writer has, in
++     *       attrd_peer_update().
++     */
++    attrd_cib_erase_transient_attrs(attrd_cluster->uname);
+ 
+     // Set a trigger for reading the CIB (for the alerts section)
+     attrd_config_read = mainloop_add_trigger(G_PRIORITY_HIGH, attrd_read_options, NULL);
+diff --git a/daemons/attrd/pacemaker-attrd.h b/daemons/attrd/pacemaker-attrd.h
+index 70e2cb41b..62637d1d7 100644
+--- a/daemons/attrd/pacemaker-attrd.h
++++ b/daemons/attrd/pacemaker-attrd.h
+@@ -66,6 +66,7 @@ void attrd_ipc_fini(void);
+ int attrd_cib_connect(int max_retry);
+ void attrd_cib_disconnect(void);
+ void attrd_cib_init(void);
++void attrd_cib_erase_transient_attrs(const char *node);
+ 
+ bool attrd_value_needs_expansion(const char *value);
+ int attrd_expand_value(const char *value, const char *old_value);
+-- 
+2.41.0
+
+From 9be38897eaa683ad7920503d9c9fd7db7a20a8ec Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Wed, 13 Dec 2023 11:20:07 -0600
+Subject: [PATCH 03/12] Refactor: attrd: convert value booleans to flags
+
+---
+ daemons/attrd/attrd_attributes.c |  7 +++---
+ daemons/attrd/attrd_corosync.c   | 38 +++++++++++++++++---------------
+ daemons/attrd/pacemaker-attrd.h  | 21 ++++++++++++++++--
+ 3 files changed, 42 insertions(+), 24 deletions(-)
+
+diff --git a/daemons/attrd/attrd_attributes.c b/daemons/attrd/attrd_attributes.c
+index 388c181d7..8f32988be 100644
+--- a/daemons/attrd/attrd_attributes.c
++++ b/daemons/attrd/attrd_attributes.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2013-2022 the Pacemaker project contributors
++ * Copyright 2013-2023 the Pacemaker project contributors
+  *
+  * The version control history for this file may have further details.
+  *
+@@ -143,7 +143,7 @@ attrd_add_value_xml(xmlNode *parent, const attribute_t *a,
+     crm_xml_add(xml, PCMK__XA_ATTR_UUID, a->uuid);
+     crm_xml_add(xml, PCMK__XA_ATTR_USER, a->user);
+     pcmk__xe_add_node(xml, v->nodename, v->nodeid);
+-    if (v->is_remote != 0) {
++    if (pcmk_is_set(v->flags, attrd_value_remote)) {
+         crm_xml_add_int(xml, PCMK__XA_ATTR_IS_REMOTE, 1);
+     }
+     crm_xml_add(xml, PCMK__XA_ATTR_VALUE, v->current);
+@@ -166,8 +166,7 @@ attrd_clear_value_seen(void)
+     while (g_hash_table_iter_next(&aIter, NULL, (gpointer *) & a)) {
+         g_hash_table_iter_init(&vIter, a->values);
+         while (g_hash_table_iter_next(&vIter, NULL, (gpointer *) & v)) {
+-            v->seen = FALSE;
+-            crm_trace("Clear seen flag %s[%s] = %s.", a->id, v->nodename, v->current);
++            attrd_clear_value_flags(v, attrd_value_from_peer);
+         }
+     }
+ }
+diff --git a/daemons/attrd/attrd_corosync.c b/daemons/attrd/attrd_corosync.c
+index e6cd07f65..ca20bdc0f 100644
+--- a/daemons/attrd/attrd_corosync.c
++++ b/daemons/attrd/attrd_corosync.c
+@@ -192,34 +192,35 @@ cache_remote_node(const char *node_name)
+ 
+ /*!
+  * \internal
+- * \brief Return host's hash table entry (creating one if needed)
++ * \brief Return a node's value from hash table (creating one if needed)
+  *
+- * \param[in,out] values Hash table of values
+- * \param[in]     host   Name of peer to look up
+- * \param[in]     xml    XML describing the attribute
++ * \param[in,out] values     Hash table of values
++ * \param[in]     node_name  Name of node to look up
++ * \param[in]     xml        XML describing the attribute
+  *
+  * \return Pointer to new or existing hash table entry
+  */
+ static attribute_value_t *
+-attrd_lookup_or_create_value(GHashTable *values, const char *host,
++attrd_lookup_or_create_value(GHashTable *values, const char *node_name,
+                              const xmlNode *xml)
+ {
+-    attribute_value_t *v = g_hash_table_lookup(values, host);
++    attribute_value_t *v = g_hash_table_lookup(values, node_name);
+     int is_remote = 0;
+ 
+-    crm_element_value_int(xml, PCMK__XA_ATTR_IS_REMOTE, &is_remote);
+-    if (is_remote) {
+-        cache_remote_node(host);
+-    }
+-
+     if (v == NULL) {
+         v = calloc(1, sizeof(attribute_value_t));
+         CRM_ASSERT(v != NULL);
+ 
+-        pcmk__str_update(&v->nodename, host);
+-        v->is_remote = is_remote;
++        pcmk__str_update(&v->nodename, node_name);
+         g_hash_table_replace(values, v->nodename, v);
+     }
++
++    crm_element_value_int(xml, PCMK__XA_ATTR_IS_REMOTE, &is_remote);
++    if (is_remote) {
++        attrd_set_value_flags(v, attrd_value_remote);
++        cache_remote_node(node_name);
++    }
++
+     return(v);
+ }
+ 
+@@ -344,11 +345,11 @@ update_attr_on_host(attribute_t *a, const crm_node_t *peer, const xmlNode *xml,
+         }
+     }
+ 
+-    /* Set the seen flag for attribute processing held only in the own node. */
+-    v->seen = TRUE;
++    // This allows us to later detect local values that peer doesn't know about
++    attrd_set_value_flags(v, attrd_value_from_peer);
+ 
+     /* If this is a cluster node whose node ID we are learning, remember it */
+-    if ((v->nodeid == 0) && (v->is_remote == FALSE)
++    if ((v->nodeid == 0) && !pcmk_is_set(v->flags, attrd_value_remote)
+         && (crm_element_value_int(xml, PCMK__XA_ATTR_NODE_ID,
+                                   (int*)&v->nodeid) == 0) && (v->nodeid > 0)) {
+         record_peer_nodeid(v, host);
+@@ -414,8 +415,9 @@ broadcast_unseen_local_values(void)
+     while (g_hash_table_iter_next(&aIter, NULL, (gpointer *) & a)) {
+         g_hash_table_iter_init(&vIter, a->values);
+         while (g_hash_table_iter_next(&vIter, NULL, (gpointer *) & v)) {
+-            if (!(v->seen) && pcmk__str_eq(v->nodename, attrd_cluster->uname,
+-                                           pcmk__str_casei)) {
++            if (!pcmk_is_set(v->flags, attrd_value_from_peer)
++                && pcmk__str_eq(v->nodename, attrd_cluster->uname,
++                                pcmk__str_casei)) {
+                 if (sync == NULL) {
+                     sync = create_xml_node(NULL, __func__);
+                     crm_xml_add(sync, PCMK__XA_TASK, PCMK__ATTRD_CMD_SYNC_RESPONSE);
+diff --git a/daemons/attrd/pacemaker-attrd.h b/daemons/attrd/pacemaker-attrd.h
+index 62637d1d7..738418857 100644
+--- a/daemons/attrd/pacemaker-attrd.h
++++ b/daemons/attrd/pacemaker-attrd.h
+@@ -140,15 +140,32 @@ typedef struct attribute_s {
+ 
+ } attribute_t;
+ 
++enum attrd_value_flags {
++    attrd_value_none        = 0U,
++    attrd_value_remote      = (1U << 0),  // Value is for Pacemaker Remote node
++    attrd_value_from_peer   = (1U << 1),  // Value is from peer sync response
++};
++
+ typedef struct attribute_value_s {
+         uint32_t nodeid;
+-        gboolean is_remote;
+         char *nodename;
+         char *current;
+         char *requested;
+-        gboolean seen;
++        uint32_t flags;     // Group of attrd_value_flags
+ } attribute_value_t;
+ 
++#define attrd_set_value_flags(attr_value, flags_to_set) do {            \
++        (attr_value)->flags = pcmk__set_flags_as(__func__, __LINE__,    \
++            LOG_TRACE, "Value for node", (attr_value)->nodename,        \
++            (attr_value)->flags, (flags_to_set), #flags_to_set);        \
++    } while (0)
++
++#define attrd_clear_value_flags(attr_value, flags_to_clear) do {        \
++        (attr_value)->flags = pcmk__clear_flags_as(__func__, __LINE__,  \
++            LOG_TRACE, "Value for node", (attr_value)->nodename,        \
++            (attr_value)->flags, (flags_to_clear), #flags_to_clear);    \
++    } while (0)
++
+ extern crm_cluster_t *attrd_cluster;
+ extern GHashTable *attributes;
+ extern GHashTable *peer_protocol_vers;
+-- 
+2.41.0
+
+From 922c79f4e39dc9501ff7c0136df8043081b771cb Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Wed, 13 Dec 2023 16:51:39 -0600
+Subject: [PATCH 04/12] Log: attrd: improve logging of CIB write result
+
+When attrd requests a write-out of a changed attribute value, it saves the new
+value in attribute_value_t:requested so it can be used in a log when the write
+completes (which may occur after the value has already changed again, so we
+can't log the current value at that time).
+
+Previously, the log call relied on libqb mapping a NULL pointer to "(null)".
+To be safer, do that explicitly.
+
+Also, it previously erased "requested" after the write completed, even if the
+write failed and would be reattempted. Leave the value alone in this case so
+the result of the reattempt can be logged correctly.
+---
+ daemons/attrd/attrd_cib.c | 18 ++++++++----------
+ 1 file changed, 8 insertions(+), 10 deletions(-)
+
+diff --git a/daemons/attrd/attrd_cib.c b/daemons/attrd/attrd_cib.c
+index ca1c5b9e0..ae6564856 100644
+--- a/daemons/attrd/attrd_cib.c
++++ b/daemons/attrd/attrd_cib.c
+@@ -274,11 +274,12 @@ attrd_cib_callback(xmlNode *msg, int call_id, int rc, xmlNode *output, void *use
+ 
+     g_hash_table_iter_init(&iter, a->values);
+     while (g_hash_table_iter_next(&iter, (gpointer *) & peer, (gpointer *) & v)) {
+-        do_crm_log(level, "* %s[%s]=%s", a->id, peer, v->requested);
+-        free(v->requested);
+-        v->requested = NULL;
+-        if (rc != pcmk_ok) {
+-            a->changed = true; /* Attempt write out again */
++        do_crm_log(level, "* %s[%s]=%s",
++                   a->id, peer, pcmk__s(v->requested, "(null)"));
++        if (rc == pcmk_ok) {
++            pcmk__str_update(&(v->requested), NULL);
++        } else {
++            a->changed = true; // Reattempt write below if we are still writer
+         }
+     }
+ 
+@@ -605,11 +606,8 @@ write_attribute(attribute_t *a, bool ignore_delay)
+         /* Preservation of the attribute to transmit alert */
+         set_alert_attribute_value(alert_attribute_value, v);
+ 
+-        free(v->requested);
+-        v->requested = NULL;
+-        if (v->current) {
+-            v->requested = strdup(v->current);
+-        }
++        // Save this value so we can log it when write completes
++        pcmk__str_update(&(v->requested), v->current);
+     }
+ 
+     if (private_updates) {
+-- 
+2.41.0
+
+From fa2830b1c4acf061faa40490620eb63c48a56a2b Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Wed, 13 Dec 2023 17:01:01 -0600
+Subject: [PATCH 05/12] Low: libcrmcluster: avoid use-after-free in trace log
+
+---
+ lib/cluster/membership.c | 16 ++++++++++++++--
+ 1 file changed, 14 insertions(+), 2 deletions(-)
+
+diff --git a/lib/cluster/membership.c b/lib/cluster/membership.c
+index f856ccaca..6958e65f2 100644
+--- a/lib/cluster/membership.c
++++ b/lib/cluster/membership.c
+@@ -143,11 +143,23 @@ crm_remote_peer_get(const char *node_name)
+     return node;
+ }
+ 
++/*!
++ * \brief Remove a node from the Pacemaker Remote node cache
++ *
++ * \param[in] node_name  Name of node to remove from cache
++ *
++ * \note The caller must be careful not to use \p node_name after calling this
++ *       function if it might be a pointer into the cache entry being removed.
++ */
+ void
+ crm_remote_peer_cache_remove(const char *node_name)
+ {
+-    if (g_hash_table_remove(crm_remote_peer_cache, node_name)) {
+-        crm_trace("removed %s from remote peer cache", node_name);
++    /* Do a lookup first, because node_name could be a pointer within the entry
++     * being removed -- we can't log it *after* removing it.
++     */
++    if (g_hash_table_lookup(crm_remote_peer_cache, node_name) != NULL) {
++        crm_trace("Removing %s from Pacemaker Remote node cache", node_name);
++        g_hash_table_remove(crm_remote_peer_cache, node_name);
+     }
+ }
+ 
+-- 
+2.41.0
+
+From 14a7449a413f3f10eb80634c607386007d264475 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Thu, 14 Dec 2023 09:24:38 -0600
+Subject: [PATCH 06/12] Refactor: libcrmcluster,attrd: functionize removing
+ node from both caches
+
+This future-proofs against a potential use-after-free (not possible with
+current code) and isolates cache management better.
+---
+ daemons/attrd/attrd_corosync.c |  3 +--
+ include/crm/cluster/internal.h |  9 +++----
+ lib/cluster/membership.c       | 44 ++++++++++++++++++++++++++++++++++
+ 3 files changed, 50 insertions(+), 6 deletions(-)
+
+diff --git a/daemons/attrd/attrd_corosync.c b/daemons/attrd/attrd_corosync.c
+index ca20bdc0f..aa94a078e 100644
+--- a/daemons/attrd/attrd_corosync.c
++++ b/daemons/attrd/attrd_corosync.c
+@@ -554,8 +554,7 @@ attrd_peer_remove(const char *host, bool uncache, const char *source)
+     }
+ 
+     if (uncache) {
+-        crm_remote_peer_cache_remove(host);
+-        reap_crm_member(0, host);
++        pcmk__purge_node_from_cache(host, 0);
+     }
+ }
+ 
+diff --git a/include/crm/cluster/internal.h b/include/crm/cluster/internal.h
+index e20ee4c59..c71069be2 100644
+--- a/include/crm/cluster/internal.h
++++ b/include/crm/cluster/internal.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2004-2021 the Pacemaker project contributors
++ * Copyright 2004-2023 the Pacemaker project contributors
+  *
+  * The version control history for this file may have further details.
+  *
+@@ -7,8 +7,8 @@
+  * version 2.1 or later (LGPLv2.1+) WITHOUT ANY WARRANTY.
+  */
+ 
+-#ifndef CRM_CLUSTER_INTERNAL__H
+-#  define CRM_CLUSTER_INTERNAL__H
++#ifndef PCMK__CRM_CLUSTER_INTERNAL__H
++#  define PCMK__CRM_CLUSTER_INTERNAL__H
+ 
+ #  include <stdint.h>       // uint32_t, uint64_t
+ #  include <crm/cluster.h>
+@@ -126,6 +126,7 @@ crm_node_t *pcmk__search_node_caches(unsigned int id, const char *uname,
+                                      uint32_t flags);
+ crm_node_t *pcmk__search_cluster_node_cache(unsigned int id, const char *uname,
+                                             const char *uuid);
++void pcmk__purge_node_from_cache(const char *node_name, uint32_t node_id);
+ 
+ void pcmk__refresh_node_caches_from_cib(xmlNode *cib);
+ crm_node_t *pcmk__search_known_node_cache(unsigned int id, const char *uname,
+@@ -136,4 +137,4 @@ crm_node_t *pcmk__get_peer(unsigned int id, const char *uname,
+ crm_node_t *pcmk__get_peer_full(unsigned int id, const char *uname,
+                                 const char *uuid, int flags);
+ 
+-#endif
++#endif // PCMK__CRM_CLUSTER_INTERNAL__H
+diff --git a/lib/cluster/membership.c b/lib/cluster/membership.c
+index 6958e65f2..173aaaa17 100644
+--- a/lib/cluster/membership.c
++++ b/lib/cluster/membership.c
+@@ -341,6 +341,9 @@ crm_reap_dead_member(gpointer key, gpointer value, gpointer user_data)
+  * \param[in] name  Uname of node to remove (or NULL to ignore)
+  *
+  * \return Number of cache entries removed
++ *
++ * \note The caller must be careful not to use \p name after calling this
++ *       function if it might be a pointer into the cache entry being removed.
+  */
+ guint
+ reap_crm_member(uint32_t id, const char *name)
+@@ -564,6 +567,47 @@ pcmk__get_peer_full(unsigned int id, const char *uname, const char *uuid,
+     return node;
+ }
+ 
++/*!
++ * \internal
++ * \brief Purge a node from cache (both cluster and Pacemaker Remote)
++ *
++ * \param[in] node_name  If not NULL, purge only nodes with this name
++ * \param[in] node_id    If not 0, purge cluster nodes only if they have this ID
++ *
++ * \note If \p node_name is NULL and \p node_id is 0, no nodes will be purged.
++ *       If \p node_name is not NULL and \p node_id is not 0, Pacemaker Remote
++ *       nodes that match \p node_name will be purged, and cluster nodes that
++ *       match both \p node_name and \p node_id will be purged.
++ * \note The caller must be careful not to use \p node_name after calling this
++ *       function if it might be a pointer into a cache entry being removed.
++ */
++void
++pcmk__purge_node_from_cache(const char *node_name, uint32_t node_id)
++{
++    char *node_name_copy = NULL;
++
++    if ((node_name == NULL) && (node_id == 0U)) {
++        return;
++    }
++
++    // Purge from Pacemaker Remote node cache
++    if ((node_name != NULL)
++        && (g_hash_table_lookup(crm_remote_peer_cache, node_name) != NULL)) {
++        /* node_name could be a pointer into the cache entry being purged,
++         * so reassign it to a copy before the original gets freed
++         */
++        node_name_copy = strdup(node_name);
++        CRM_ASSERT(node_name_copy != NULL);
++        node_name = node_name_copy;
++
++        crm_trace("Purging %s from Pacemaker Remote node cache", node_name);
++        g_hash_table_remove(crm_remote_peer_cache, node_name);
++    }
++
++    reap_crm_member(node_id, node_name);
++    free(node_name_copy);
++}
++
+ /*!
+  * \brief Get a node cache entry (cluster or Pacemaker Remote)
+  *
+-- 
+2.41.0
+
+From 8d552c1b582a95f9879b15e2dd991a7f995e7eca Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Thu, 14 Dec 2023 09:51:37 -0600
+Subject: [PATCH 07/12] Fix: pacemaker-attrd,libcrmcluster: avoid
+ use-after-free when remote node in cluster node cache
+
+Previously, pacemaker-attrd removed any conflicting entry from the cluster node
+cache before adding a node to the remote node cache. However, if the name used
+was a pointer into the cluster node cache entry being freed, it would be reused
+to create the remote node cache entry.
+
+This avoids that and also moves the functionality into libcrmcluster for better
+isolation of cache management. It also corrects mistakenly setting errno to a
+negative value.
+---
+ daemons/attrd/attrd_corosync.c | 26 ++------------------------
+ lib/cluster/membership.c       | 30 ++++++++++++++++++++++++++++--
+ 2 files changed, 30 insertions(+), 26 deletions(-)
+
+diff --git a/daemons/attrd/attrd_corosync.c b/daemons/attrd/attrd_corosync.c
+index aa94a078e..1d0f87f04 100644
+--- a/daemons/attrd/attrd_corosync.c
++++ b/daemons/attrd/attrd_corosync.c
+@@ -166,28 +166,6 @@ broadcast_local_value(const attribute_t *a)
+     return v;
+ }
+ 
+-/*!
+- * \internal
+- * \brief Ensure a Pacemaker Remote node is in the correct peer cache
+- *
+- * \param[in] node_name  Name of Pacemaker Remote node to check
+- */
+-static void
+-cache_remote_node(const char *node_name)
+-{
+-    /* If we previously assumed this node was an unseen cluster node,
+-     * remove its entry from the cluster peer cache.
+-     */
+-    crm_node_t *dup = pcmk__search_cluster_node_cache(0, node_name, NULL);
+-
+-    if (dup && (dup->uuid == NULL)) {
+-        reap_crm_member(0, node_name);
+-    }
+-
+-    // Ensure node is in the remote peer cache
+-    CRM_ASSERT(crm_remote_peer_get(node_name) != NULL);
+-}
+-
+ #define state_text(state) pcmk__s((state), "in unknown state")
+ 
+ /*!
+@@ -218,7 +196,7 @@ attrd_lookup_or_create_value(GHashTable *values, const char *node_name,
+     crm_element_value_int(xml, PCMK__XA_ATTR_IS_REMOTE, &is_remote);
+     if (is_remote) {
+         attrd_set_value_flags(v, attrd_value_remote);
+-        cache_remote_node(node_name);
++        CRM_ASSERT(crm_remote_peer_get(node_name) != NULL);
+     }
+ 
+     return(v);
+@@ -273,7 +251,7 @@ attrd_peer_change_cb(enum crm_status_type kind, crm_node_t *peer, const void *da
+ 
+     // Ensure remote nodes that come up are in the remote node cache
+     } else if (!gone && is_remote) {
+-        cache_remote_node(peer->uname);
++        CRM_ASSERT(crm_remote_peer_get(peer->uname) != NULL);
+     }
+ }
+ 
+diff --git a/lib/cluster/membership.c b/lib/cluster/membership.c
+index 173aaaa17..a653617fa 100644
+--- a/lib/cluster/membership.c
++++ b/lib/cluster/membership.c
+@@ -102,26 +102,50 @@ crm_remote_peer_cache_size(void)
+  * \note When creating a new entry, this will leave the node state undetermined,
+  *       so the caller should also call pcmk__update_peer_state() if the state
+  *       is known.
++ * \note Because this can add and remove cache entries, callers should not
++ *       assume any previously obtained cache entry pointers remain valid.
+  */
+ crm_node_t *
+ crm_remote_peer_get(const char *node_name)
+ {
+     crm_node_t *node;
++    char *node_name_copy = NULL;
+ 
+     if (node_name == NULL) {
+-        errno = -EINVAL;
++        errno = EINVAL;
+         return NULL;
+     }
+ 
++    /* It's theoretically possible that the node was added to the cluster peer
++     * cache before it was known to be a Pacemaker Remote node. Remove that
++     * entry unless it has a node ID, which means the name actually is
++     * associated with a cluster node. (@TODO return an error in that case?)
++     */
++    node = pcmk__search_cluster_node_cache(0, node_name, NULL);
++    if ((node != NULL) && (node->uuid == NULL)) {
++        /* node_name could be a pointer into the cache entry being removed, so
++         * reassign it to a copy before the original gets freed
++         */
++        node_name_copy = strdup(node_name);
++        if (node_name_copy == NULL) {
++            errno = ENOMEM;
++            return NULL;
++        }
++        node_name = node_name_copy;
++        reap_crm_member(0, node_name);
++    }
++
+     /* Return existing cache entry if one exists */
+     node = g_hash_table_lookup(crm_remote_peer_cache, node_name);
+     if (node) {
++        free(node_name_copy);
+         return node;
+     }
+ 
+     /* Allocate a new entry */
+     node = calloc(1, sizeof(crm_node_t));
+     if (node == NULL) {
++        free(node_name_copy);
+         return NULL;
+     }
+ 
+@@ -130,7 +154,8 @@ crm_remote_peer_get(const char *node_name)
+     node->uuid = strdup(node_name);
+     if (node->uuid == NULL) {
+         free(node);
+-        errno = -ENOMEM;
++        errno = ENOMEM;
++        free(node_name_copy);
+         return NULL;
+     }
+ 
+@@ -140,6 +165,7 @@ crm_remote_peer_get(const char *node_name)
+ 
+     /* Update the entry's uname, ensuring peer status callbacks are called */
+     update_peer_uname(node, node_name);
++    free(node_name_copy);
+     return node;
+ }
+ 
+-- 
+2.41.0
+
+From 17ac8f0409021cbcd3e03a1b70518ab7abd9b259 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Thu, 14 Dec 2023 10:03:05 -0600
+Subject: [PATCH 08/12] Refactor: attrd: remove dead code
+
+The peer change callback can't be called for a Pacemaker Remote node unless the
+node is already in the remote node cache, so don't bother trying to add it.
+Modifying the peer caches is forbidden in peer change callbacks anyway since it
+could lead to use-after-free issues in libcrmcluster.
+---
+ daemons/attrd/attrd_corosync.c | 4 ----
+ 1 file changed, 4 deletions(-)
+
+diff --git a/daemons/attrd/attrd_corosync.c b/daemons/attrd/attrd_corosync.c
+index 1d0f87f04..eba734c3a 100644
+--- a/daemons/attrd/attrd_corosync.c
++++ b/daemons/attrd/attrd_corosync.c
+@@ -248,10 +248,6 @@ attrd_peer_change_cb(enum crm_status_type kind, crm_node_t *peer, const void *da
+         attrd_remove_voter(peer);
+         attrd_remove_peer_protocol_ver(peer->uname);
+         attrd_do_not_expect_from_peer(peer->uname);
+-
+-    // Ensure remote nodes that come up are in the remote node cache
+-    } else if (!gone && is_remote) {
+-        CRM_ASSERT(crm_remote_peer_get(peer->uname) != NULL);
+     }
+ }
+ 
+-- 
+2.41.0
+
+From 221c4d697edc0481817c206ce8fdd878afd98ca1 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Thu, 14 Dec 2023 17:17:32 -0600
+Subject: [PATCH 09/12] Low: libcrmcommon: handle disconnected attrd API
+ connections consistently
+
+Drop send_attrd_request() in favor of using connect_and_send_attrd_request(),
+since pcmk__connect_ipc() will return pcmk_rc_ok immediately if the API is
+already connected.
+
+All the attribute manager IPC APIs attempted the connection if not already
+connected except for pcmk__attrd_api_query(). Now that it uses
+connect_and_send_attrd_request(), they are all consistent.
+---
+ lib/common/ipc_attrd.c | 28 +++++-----------------------
+ 1 file changed, 5 insertions(+), 23 deletions(-)
+
+diff --git a/lib/common/ipc_attrd.c b/lib/common/ipc_attrd.c
+index 56cdb5aba..e36b42cbc 100644
+--- a/lib/common/ipc_attrd.c
++++ b/lib/common/ipc_attrd.c
+@@ -190,12 +190,6 @@ connect_and_send_attrd_request(pcmk_ipc_api_t *api, const xmlNode *request)
+     return pcmk_rc_ok;
+ }
+ 
+-static int
+-send_attrd_request(pcmk_ipc_api_t *api, const xmlNode *request)
+-{
+-    return pcmk__send_ipc_request(api, request);
+-}
+-
+ int
+ pcmk__attrd_api_clear_failures(pcmk_ipc_api_t *api, const char *node,
+                                const char *resource, const char *operation,
+@@ -229,11 +223,8 @@ pcmk__attrd_api_clear_failures(pcmk_ipc_api_t *api, const char *node,
+         rc = connect_and_send_attrd_request(api, request);
+         destroy_api(api);
+ 
+-    } else if (!pcmk_ipc_is_connected(api)) {
+-        rc = connect_and_send_attrd_request(api, request);
+-
+     } else {
+-        rc = send_attrd_request(api, request);
++        rc = connect_and_send_attrd_request(api, request);
+     }
+ 
+     free_xml(request);
+@@ -303,11 +294,8 @@ pcmk__attrd_api_purge(pcmk_ipc_api_t *api, const char *node, bool reap)
+         rc = connect_and_send_attrd_request(api, request);
+         destroy_api(api);
+ 
+-    } else if (!pcmk_ipc_is_connected(api)) {
+-        rc = connect_and_send_attrd_request(api, request);
+-
+     } else {
+-        rc = send_attrd_request(api, request);
++        rc = connect_and_send_attrd_request(api, request);
+     }
+ 
+     free_xml(request);
+@@ -346,7 +334,7 @@ pcmk__attrd_api_query(pcmk_ipc_api_t *api, const char *node, const char *name,
+     crm_xml_add(request, PCMK__XA_TASK, PCMK__ATTRD_CMD_QUERY);
+     pcmk__xe_add_node(request, node, 0);
+ 
+-    rc = send_attrd_request(api, request);
++    rc = connect_and_send_attrd_request(api, request);
+     free_xml(request);
+ 
+     if (node) {
+@@ -386,11 +374,8 @@ pcmk__attrd_api_refresh(pcmk_ipc_api_t *api, const char *node)
+         rc = connect_and_send_attrd_request(api, request);
+         destroy_api(api);
+ 
+-    } else if (!pcmk_ipc_is_connected(api)) {
+-        rc = connect_and_send_attrd_request(api, request);
+-
+     } else {
+-        rc = send_attrd_request(api, request);
++        rc = connect_and_send_attrd_request(api, request);
+     }
+ 
+     free_xml(request);
+@@ -479,11 +464,8 @@ pcmk__attrd_api_update(pcmk_ipc_api_t *api, const char *node, const char *name,
+         rc = connect_and_send_attrd_request(api, request);
+         destroy_api(api);
+ 
+-    } else if (!pcmk_ipc_is_connected(api)) {
+-        rc = connect_and_send_attrd_request(api, request);
+-
+     } else {
+-        rc = send_attrd_request(api, request);
++        rc = connect_and_send_attrd_request(api, request);
+     }
+ 
+     free_xml(request);
+-- 
+2.41.0
+
+From 85502a405c384fdf0331e43ec161910ee1d14973 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Thu, 14 Dec 2023 17:29:11 -0600
+Subject: [PATCH 10/12] Low: libcrmcommon: handle NULL attribute manager IPC
+ API connections consistently
+
+Previously, all attribute manager IPC APIs except pcmk__attrd_api_query() would
+create a temporary connection if passed a NULL argument for one. Now,
+connect_and_send_attrd_request() does this itself, reducing code duplication and
+making the handling consistent across all APIs.
+---
+ lib/common/ipc_attrd.c | 116 +++++++++--------------------------------
+ 1 file changed, 25 insertions(+), 91 deletions(-)
+
+diff --git a/lib/common/ipc_attrd.c b/lib/common/ipc_attrd.c
+index e36b42cbc..68975c7b6 100644
+--- a/lib/common/ipc_attrd.c
++++ b/lib/common/ipc_attrd.c
+@@ -148,46 +148,39 @@ create_attrd_op(const char *user_name)
+     return attrd_op;
+ }
+ 
+-static int
+-create_api(pcmk_ipc_api_t **api)
+-{
+-    int rc = pcmk_new_ipc_api(api, pcmk_ipc_attrd);
+-
+-    if (rc != pcmk_rc_ok) {
+-        crm_err("Could not connect to attrd: %s", pcmk_rc_str(rc));
+-    }
+-
+-    return rc;
+-}
+-
+-static void
+-destroy_api(pcmk_ipc_api_t *api)
+-{
+-    pcmk_disconnect_ipc(api);
+-    pcmk_free_ipc_api(api);
+-    api = NULL;
+-}
+-
+ static int
+ connect_and_send_attrd_request(pcmk_ipc_api_t *api, const xmlNode *request)
+ {
+     int rc = pcmk_rc_ok;
++    bool created_api = false;
++
++    if (api == NULL) {
++        rc = pcmk_new_ipc_api(&api, pcmk_ipc_attrd);
++        if (rc != pcmk_rc_ok) {
++            crm_err("Could not connect to attribute manager: %s",
++                    pcmk_rc_str(rc));
++            return rc;
++        }
++        created_api = true;
++    }
+ 
+     rc = pcmk__connect_ipc(api, pcmk_ipc_dispatch_sync, 5);
+     if (rc != pcmk_rc_ok) {
+         crm_err("Could not connect to %s: %s",
+                 pcmk_ipc_name(api, true), pcmk_rc_str(rc));
+-        return rc;
+-    }
+ 
+-    rc = pcmk__send_ipc_request(api, request);
+-    if (rc != pcmk_rc_ok) {
+-        crm_err("Could not send request to %s: %s",
+-                pcmk_ipc_name(api, true), pcmk_rc_str(rc));
+-        return rc;
++    } else {
++        rc = pcmk__send_ipc_request(api, request);
++        if (rc != pcmk_rc_ok) {
++            crm_err("Could not send request to %s: %s",
++                    pcmk_ipc_name(api, true), pcmk_rc_str(rc));
++        }
+     }
+ 
+-    return pcmk_rc_ok;
++    if (created_api) {
++        pcmk_free_ipc_api(api);
++    }
++    return rc;
+ }
+ 
+ int
+@@ -214,18 +207,7 @@ pcmk__attrd_api_clear_failures(pcmk_ipc_api_t *api, const char *node,
+     crm_xml_add_int(request, PCMK__XA_ATTR_IS_REMOTE,
+                     pcmk_is_set(options, pcmk__node_attr_remote));
+ 
+-    if (api == NULL) {
+-        rc = create_api(&api);
+-        if (rc != pcmk_rc_ok) {
+-            return rc;
+-        }
+-
+-        rc = connect_and_send_attrd_request(api, request);
+-        destroy_api(api);
+-
+-    } else {
+-        rc = connect_and_send_attrd_request(api, request);
+-    }
++    rc = connect_and_send_attrd_request(api, request);
+ 
+     free_xml(request);
+ 
+@@ -285,18 +267,7 @@ pcmk__attrd_api_purge(pcmk_ipc_api_t *api, const char *node, bool reap)
+     pcmk__xe_set_bool_attr(request, PCMK__XA_REAP, reap);
+     pcmk__xe_add_node(request, node, 0);
+ 
+-    if (api == NULL) {
+-        rc = create_api(&api);
+-        if (rc != pcmk_rc_ok) {
+-            return rc;
+-        }
+-
+-        rc = connect_and_send_attrd_request(api, request);
+-        destroy_api(api);
+-
+-    } else {
+-        rc = connect_and_send_attrd_request(api, request);
+-    }
++    rc = connect_and_send_attrd_request(api, request);
+ 
+     free_xml(request);
+ 
+@@ -365,18 +336,7 @@ pcmk__attrd_api_refresh(pcmk_ipc_api_t *api, const char *node)
+     crm_xml_add(request, PCMK__XA_TASK, PCMK__ATTRD_CMD_REFRESH);
+     pcmk__xe_add_node(request, node, 0);
+ 
+-    if (api == NULL) {
+-        rc = create_api(&api);
+-        if (rc != pcmk_rc_ok) {
+-            return rc;
+-        }
+-
+-        rc = connect_and_send_attrd_request(api, request);
+-        destroy_api(api);
+-
+-    } else {
+-        rc = connect_and_send_attrd_request(api, request);
+-    }
++    rc = connect_and_send_attrd_request(api, request);
+ 
+     free_xml(request);
+ 
+@@ -455,18 +415,7 @@ pcmk__attrd_api_update(pcmk_ipc_api_t *api, const char *node, const char *name,
+     request = create_attrd_op(user_name);
+     populate_update_op(request, node, name, value, dampen, set, options);
+ 
+-    if (api == NULL) {
+-        rc = create_api(&api);
+-        if (rc != pcmk_rc_ok) {
+-            return rc;
+-        }
+-
+-        rc = connect_and_send_attrd_request(api, request);
+-        destroy_api(api);
+-
+-    } else {
+-        rc = connect_and_send_attrd_request(api, request);
+-    }
++    rc = connect_and_send_attrd_request(api, request);
+ 
+     free_xml(request);
+ 
+@@ -547,23 +496,8 @@ pcmk__attrd_api_update_list(pcmk_ipc_api_t *api, GList *attrs, const char *dampe
+      * request.  Do that now, creating and destroying the API object if needed.
+      */
+     if (pcmk__is_daemon) {
+-        bool created_api = false;
+-
+-        if (api == NULL) {
+-            rc = create_api(&api);
+-            if (rc != pcmk_rc_ok) {
+-                return rc;
+-            }
+-
+-            created_api = true;
+-        }
+-
+         rc = connect_and_send_attrd_request(api, request);
+         free_xml(request);
+-
+-        if (created_api) {
+-            destroy_api(api);
+-        }
+     }
+ 
+     return rc;
+-- 
+2.41.0
+
+From 4b25e2e2cf52e6c772805309e1f3dd6bb7ce8fab Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Thu, 14 Dec 2023 18:11:14 -0600
+Subject: [PATCH 11/12] Log: controld,libcrmcommon: improve attrd IPC API
+ messages
+
+Previously, connect_and_send_attrd_request() would log error messages for
+failures, attrd IPC APIs would log debug messages with the result whether
+success or failure, and then callers would log or output failures again.
+
+Now, connect_and_send_attrd_request() does not log, the attrd IPC APIs log a
+debug message before sending the request, and the callers log or output
+failures.
+---
+ daemons/controld/controld_attrd.c | 22 ++++-----
+ lib/common/ipc_attrd.c            | 76 ++++++++++++-------------------
+ 2 files changed, 38 insertions(+), 60 deletions(-)
+
+diff --git a/daemons/controld/controld_attrd.c b/daemons/controld/controld_attrd.c
+index 958dc2f14..24c1e7068 100644
+--- a/daemons/controld/controld_attrd.c
++++ b/daemons/controld/controld_attrd.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2006-2022 the Pacemaker project contributors
++ * Copyright 2006-2023 the Pacemaker project contributors
+  *
+  * The version control history for this file may have further details.
+  *
+@@ -136,25 +136,23 @@ update_attrd_clear_failures(const char *host, const char *rsc, const char *op,
+         rc = pcmk_new_ipc_api(&attrd_api, pcmk_ipc_attrd);
+     }
+     if (rc == pcmk_rc_ok) {
+-        const char *op_desc = pcmk__s(op, "operations");
+-        const char *interval_desc = "all";
+         uint32_t attrd_opts = pcmk__node_attr_none;
+ 
+-        if (op != NULL) {
+-            interval_desc = pcmk__s(interval_spec, "nonrecurring");
+-        }
+         if (is_remote_node) {
+             pcmk__set_node_attr_flags(attrd_opts, pcmk__node_attr_remote);
+         }
+-        crm_info("Asking attribute manager to clear failure of %s %s for %s "
+-                 "on %s node %s", interval_desc, op_desc, rsc,
+-                 node_type(is_remote_node), host);
+         rc = pcmk__attrd_api_clear_failures(attrd_api, host, rsc, op,
+                                             interval_spec, NULL, attrd_opts);
+     }
+     if (rc != pcmk_rc_ok) {
+-        crm_err("Could not clear failure attributes for %s on %s node %s%s: %s "
+-                CRM_XS " rc=%d", pcmk__s(rsc, "all resources"),
+-                node_type(is_remote_node), host, when(), pcmk_rc_str(rc), rc);
++        const char *interval_desc = "all";
++
++        if (op != NULL) {
++            interval_desc = pcmk__s(interval_spec, "nonrecurring");
++        }
++        crm_err("Could not clear failure of %s %s for %s on %s node %s%s: %s "
++                CRM_XS " rc=%d", interval_desc, pcmk__s(op, "operations"),
++                pcmk__s(rsc, "all resources"), node_type(is_remote_node), host,
++                when(), pcmk_rc_str(rc), rc);
+     }
+ }
+diff --git a/lib/common/ipc_attrd.c b/lib/common/ipc_attrd.c
+index 68975c7b6..3951bd3df 100644
+--- a/lib/common/ipc_attrd.c
++++ b/lib/common/ipc_attrd.c
+@@ -157,24 +157,14 @@ connect_and_send_attrd_request(pcmk_ipc_api_t *api, const xmlNode *request)
+     if (api == NULL) {
+         rc = pcmk_new_ipc_api(&api, pcmk_ipc_attrd);
+         if (rc != pcmk_rc_ok) {
+-            crm_err("Could not connect to attribute manager: %s",
+-                    pcmk_rc_str(rc));
+             return rc;
+         }
+         created_api = true;
+     }
+ 
+     rc = pcmk__connect_ipc(api, pcmk_ipc_dispatch_sync, 5);
+-    if (rc != pcmk_rc_ok) {
+-        crm_err("Could not connect to %s: %s",
+-                pcmk_ipc_name(api, true), pcmk_rc_str(rc));
+-
+-    } else {
++    if (rc == pcmk_rc_ok) {
+         rc = pcmk__send_ipc_request(api, request);
+-        if (rc != pcmk_rc_ok) {
+-            crm_err("Could not send request to %s: %s",
+-                    pcmk_ipc_name(api, true), pcmk_rc_str(rc));
+-        }
+     }
+ 
+     if (created_api) {
+@@ -199,6 +189,17 @@ pcmk__attrd_api_clear_failures(pcmk_ipc_api_t *api, const char *node,
+         node = target;
+     }
+ 
++    if (operation) {
++        interval_desc = pcmk__s(interval_spec, "nonrecurring");
++        op_desc = operation;
++    } else {
++        interval_desc = "all";
++        op_desc = "operations";
++    }
++    crm_debug("Asking %s to clear failure of %s %s for %s on %s",
++              pcmk_ipc_name(api, true), interval_desc, op_desc,
++              pcmk__s(resource, "all resources"), pcmk__s(node, "all nodes"));
++
+     crm_xml_add(request, PCMK__XA_TASK, PCMK__ATTRD_CMD_CLEAR_FAILURE);
+     pcmk__xe_add_node(request, node, 0);
+     crm_xml_add(request, PCMK__XA_ATTR_RESOURCE, resource);
+@@ -210,19 +211,6 @@ pcmk__attrd_api_clear_failures(pcmk_ipc_api_t *api, const char *node,
+     rc = connect_and_send_attrd_request(api, request);
+ 
+     free_xml(request);
+-
+-    if (operation) {
+-        interval_desc = interval_spec? interval_spec : "nonrecurring";
+-        op_desc = operation;
+-    } else {
+-        interval_desc = "all";
+-        op_desc = "operations";
+-    }
+-
+-    crm_debug("Asked pacemaker-attrd to clear failure of %s %s for %s on %s: %s (%d)",
+-              interval_desc, op_desc, (resource? resource : "all resources"),
+-              (node? node : "all nodes"), pcmk_rc_str(rc), rc);
+-
+     return rc;
+ }
+ 
+@@ -254,13 +242,17 @@ pcmk__attrd_api_purge(pcmk_ipc_api_t *api, const char *node, bool reap)
+ {
+     int rc = pcmk_rc_ok;
+     xmlNode *request = NULL;
+-    const char *display_host = (node ? node : "localhost");
+     const char *target = pcmk__node_attr_target(node);
+ 
+     if (target != NULL) {
+         node = target;
+     }
+ 
++    crm_debug("Asking %s to purge transient attributes%s for %s",
++              pcmk_ipc_name(api, true),
++              (reap? " and node cache entries" : ""),
++              pcmk__s(node, "local node"));
++
+     request = create_attrd_op(NULL);
+ 
+     crm_xml_add(request, PCMK__XA_TASK, PCMK__ATTRD_CMD_PEER_REMOVE);
+@@ -270,10 +262,6 @@ pcmk__attrd_api_purge(pcmk_ipc_api_t *api, const char *node, bool reap)
+     rc = connect_and_send_attrd_request(api, request);
+ 
+     free_xml(request);
+-
+-    crm_debug("Asked pacemaker-attrd to purge %s: %s (%d)",
+-              display_host, pcmk_rc_str(rc), rc);
+-
+     return rc;
+ }
+ 
+@@ -299,6 +287,10 @@ pcmk__attrd_api_query(pcmk_ipc_api_t *api, const char *node, const char *name,
+         }
+     }
+ 
++    crm_debug("Querying %s for value of '%s'%s%s",
++              pcmk_ipc_name(api, true), name,
++              ((node == NULL)? "" : " on "), pcmk__s(node, ""));
++
+     request = create_attrd_op(NULL);
+ 
+     crm_xml_add(request, PCMK__XA_ATTR_NAME, name);
+@@ -307,15 +299,6 @@ pcmk__attrd_api_query(pcmk_ipc_api_t *api, const char *node, const char *name,
+ 
+     rc = connect_and_send_attrd_request(api, request);
+     free_xml(request);
+-
+-    if (node) {
+-        crm_debug("Queried pacemaker-attrd for %s on %s: %s (%d)",
+-                  name, node, pcmk_rc_str(rc), rc);
+-    } else {
+-        crm_debug("Queried pacemaker-attrd for %s: %s (%d)",
+-                  name, pcmk_rc_str(rc), rc);
+-    }
+-
+     return rc;
+ }
+ 
+@@ -324,13 +307,15 @@ pcmk__attrd_api_refresh(pcmk_ipc_api_t *api, const char *node)
+ {
+     int rc = pcmk_rc_ok;
+     xmlNode *request = NULL;
+-    const char *display_host = (node ? node : "localhost");
+     const char *target = pcmk__node_attr_target(node);
+ 
+     if (target != NULL) {
+         node = target;
+     }
+ 
++    crm_debug("Asking %s to write all transient attributes for %s to CIB",
++              pcmk_ipc_name(api, true), pcmk__s(node, "local node"));
++
+     request = create_attrd_op(NULL);
+ 
+     crm_xml_add(request, PCMK__XA_TASK, PCMK__ATTRD_CMD_REFRESH);
+@@ -339,10 +324,6 @@ pcmk__attrd_api_refresh(pcmk_ipc_api_t *api, const char *node)
+     rc = connect_and_send_attrd_request(api, request);
+ 
+     free_xml(request);
+-
+-    crm_debug("Asked pacemaker-attrd to refresh %s: %s (%d)",
+-              display_host, pcmk_rc_str(rc), rc);
+-
+     return rc;
+ }
+ 
+@@ -399,7 +380,6 @@ pcmk__attrd_api_update(pcmk_ipc_api_t *api, const char *node, const char *name,
+ {
+     int rc = pcmk_rc_ok;
+     xmlNode *request = NULL;
+-    const char *display_host = (node ? node : "localhost");
+     const char *target = NULL;
+ 
+     if (name == NULL) {
+@@ -412,16 +392,16 @@ pcmk__attrd_api_update(pcmk_ipc_api_t *api, const char *node, const char *name,
+         node = target;
+     }
+ 
++    crm_debug("Asking %s to update '%s' to '%s' for %s",
++              pcmk_ipc_name(api, true), name, pcmk__s(value, "(null)"),
++              pcmk__s(node, "local node"));
++
+     request = create_attrd_op(user_name);
+     populate_update_op(request, node, name, value, dampen, set, options);
+ 
+     rc = connect_and_send_attrd_request(api, request);
+ 
+     free_xml(request);
+-
+-    crm_debug("Asked pacemaker-attrd to update %s on %s: %s (%d)",
+-              name, display_host, pcmk_rc_str(rc), rc);
+-
+     return rc;
+ }
+ 
+-- 
+2.41.0
+
+From e5d22ef2a6b130768bd59ab5b7d8cd1155bb02a5 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Thu, 14 Dec 2023 17:54:01 -0600
+Subject: [PATCH 12/12] Log: libcrmcommon: use log-friendly name in pacemakerd
+ IPC logs
+
+---
+ lib/common/ipc_pacemakerd.c | 15 ++++++++-------
+ 1 file changed, 8 insertions(+), 7 deletions(-)
+
+diff --git a/lib/common/ipc_pacemakerd.c b/lib/common/ipc_pacemakerd.c
+index 2f0370974..6d6f6d6bf 100644
+--- a/lib/common/ipc_pacemakerd.c
++++ b/lib/common/ipc_pacemakerd.c
+@@ -210,15 +210,16 @@ dispatch(pcmk_ipc_api_t *api, xmlNode *reply)
+     value = crm_element_value(reply, F_CRM_MSG_TYPE);
+     if (pcmk__str_empty(value)
+         || !pcmk__str_eq(value, XML_ATTR_RESPONSE, pcmk__str_none)) {
+-        crm_info("Unrecognizable message from pacemakerd: "
++        crm_info("Unrecognizable message from %s: "
+                  "message type '%s' not '" XML_ATTR_RESPONSE "'",
+-                 pcmk__s(value, ""));
++                 pcmk_ipc_name(api, true), pcmk__s(value, ""));
+         status = CRM_EX_PROTOCOL;
+         goto done;
+     }
+ 
+     if (pcmk__str_empty(crm_element_value(reply, XML_ATTR_REFERENCE))) {
+-        crm_info("Unrecognizable message from pacemakerd: no reference");
++        crm_info("Unrecognizable message from %s: no reference",
++                 pcmk_ipc_name(api, true));
+         status = CRM_EX_PROTOCOL;
+         goto done;
+     }
+@@ -244,8 +245,8 @@ dispatch(pcmk_ipc_api_t *api, xmlNode *reply)
+         reply_data.reply_type = pcmk_pacemakerd_reply_shutdown;
+         reply_data.data.shutdown.status = atoi(crm_element_value(msg_data, XML_LRM_ATTR_OPSTATUS));
+     } else {
+-        crm_info("Unrecognizable message from pacemakerd: "
+-                 "unknown command '%s'", pcmk__s(value, ""));
++        crm_info("Unrecognizable message from %s: unknown command '%s'",
++                 pcmk_ipc_name(api, true), pcmk__s(value, ""));
+         status = CRM_EX_PROTOCOL;
+         goto done;
+     }
+@@ -292,8 +293,8 @@ do_pacemakerd_api_call(pcmk_ipc_api_t *api, const char *ipc_name, const char *ta
+     if (cmd) {
+         rc = pcmk__send_ipc_request(api, cmd);
+         if (rc != pcmk_rc_ok) {
+-            crm_debug("Couldn't send request to pacemakerd: %s rc=%d",
+-                      pcmk_rc_str(rc), rc);
++            crm_debug("Couldn't send request to %s: %s rc=%d",
++                      pcmk_ipc_name(api, true), pcmk_rc_str(rc), rc);
+         }
+         free_xml(cmd);
+     } else {
+-- 
+2.41.0
+

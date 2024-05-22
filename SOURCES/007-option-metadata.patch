@@ -1,0 +1,3689 @@
+From 4401064f409921caed9444d18a74713250213c44 Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Tue, 2 Jan 2024 19:52:41 -0800
+Subject: [PATCH 01/24] Test: cts-cli: Update for added spaces
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ cts/cli/regression.daemons.exp | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/cts/cli/regression.daemons.exp b/cts/cli/regression.daemons.exp
+index b34fba8..1cd049f 100644
+--- a/cts/cli/regression.daemons.exp
++++ b/cts/cli/regression.daemons.exp
+@@ -47,7 +47,7 @@
+       <content type="time" default=""/>
+     </parameter>
+     <parameter name="cluster-recheck-interval">
+-      <longdesc lang="en">Pacemaker is primarily event-driven, and looks ahead to know when to recheck cluster state for failure timeouts and most time-based rules. However, it will also recheck the cluster after this amount of inactivity, to evaluate rules with date specifications and serve as a fail-safe for certain types of scheduler bugs.  Allowed values: Zero disables polling, while positive values are an interval in seconds(unless other units are specified, for example "5min")</longdesc>
++      <longdesc lang="en">Pacemaker is primarily event-driven, and looks ahead to know when to recheck cluster state for failure timeouts and most time-based rules. However, it will also recheck the cluster after this amount of inactivity, to evaluate rules with date specifications and serve as a fail-safe for certain types of scheduler bugs.  Allowed values: Zero disables polling, while positive values are an interval in seconds (unless other units are specified, for example "5min")</longdesc>
+       <shortdesc lang="en">Polling interval to recheck cluster state and evaluate rules with date specifications</shortdesc>
+       <content type="time" default=""/>
+     </parameter>
+@@ -345,7 +345,7 @@
+       <content type="boolean" default=""/>
+     </parameter>
+     <parameter name="startup-fencing">
+-      <longdesc lang="en">Setting this to false may lead to a &quot;split-brain&quot; situation,potentially leading to data loss and/or service unavailability.</longdesc>
++      <longdesc lang="en">Setting this to false may lead to a &quot;split-brain&quot; situation, potentially leading to data loss and/or service unavailability.</longdesc>
+       <shortdesc lang="en">*** Advanced Use Only *** Whether to fence unseen nodes at start-up</shortdesc>
+       <content type="boolean" default=""/>
+     </parameter>
+-- 
+2.31.1
+
+From e3597b061afa62a1f869a3e238ad78d3f7222029 Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Tue, 2 Jan 2024 20:28:21 -0800
+Subject: [PATCH 02/24] Test: cts-cli: Update daemon tests to note that
+ stonith-timeout is used
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ cts/cli/regression.daemons.exp | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/cts/cli/regression.daemons.exp b/cts/cli/regression.daemons.exp
+index 1cd049f..6a24089 100644
+--- a/cts/cli/regression.daemons.exp
++++ b/cts/cli/regression.daemons.exp
+@@ -330,8 +330,8 @@
+       </content>
+     </parameter>
+     <parameter name="stonith-timeout">
+-      <longdesc lang="en">This value is not used by Pacemaker, but is kept for backward compatibility, and certain legacy fence agents might use it.</longdesc>
+-      <shortdesc lang="en">*** Advanced Use Only *** Unused by Pacemaker</shortdesc>
++      <longdesc lang="en">How long to wait for on, off, and reboot fence actions to complete by default</longdesc>
++      <shortdesc lang="en">How long to wait for on, off, and reboot fence actions to complete by default</shortdesc>
+       <content type="time" default=""/>
+     </parameter>
+     <parameter name="have-watchdog">
+-- 
+2.31.1
+
+From cb3431c1058dd3cfbcc1cc490db268a95d1731e1 Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Sat, 6 Jan 2024 19:20:26 -0800
+Subject: [PATCH 03/24] Refactor: libcrmcommon: New
+ pcmk__valid_placement_strategy()
+
+We'll soon need this function outside the scheduler.
+
+Ref T746
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ include/crm/common/options_internal.h |  1 +
+ lib/common/options.c                  | 16 ++++++++++++++++
+ lib/pengine/common.c                  |  9 +--------
+ 3 files changed, 18 insertions(+), 8 deletions(-)
+
+diff --git a/include/crm/common/options_internal.h b/include/crm/common/options_internal.h
+index a9316ca..1ea27ee 100644
+--- a/include/crm/common/options_internal.h
++++ b/include/crm/common/options_internal.h
+@@ -67,6 +67,7 @@ bool pcmk__valid_number(const char *value);
+ bool pcmk__valid_positive_number(const char *value);
+ bool pcmk__valid_quorum(const char *value);
+ bool pcmk__valid_script(const char *value);
++bool pcmk__valid_placement_strategy(const char *value);
+ bool pcmk__valid_percentage(const char *value);
+ 
+ // from watchdog.c
+diff --git a/lib/common/options.c b/lib/common/options.c
+index 2d86ebc..1db41a2 100644
+--- a/lib/common/options.c
++++ b/lib/common/options.c
+@@ -246,6 +246,22 @@ pcmk__valid_script(const char *value)
+ 
+     return true;
+ }
++ 
++/*!
++ * \internal
++ * \brief Check whether a string represents a valid placement strategy
++ *
++ * \param[in] value  String to validate
++ *
++ * \return \c true if \p value is a valid placement strategy, or \c false
++ *         otherwise
++ */
++bool
++pcmk__valid_placement_strategy(const char *value)
++{
++    return pcmk__strcase_any_of(value, "default", "utilization", "minimal",
++                                "balanced", NULL);
++}
+ 
+ bool
+ pcmk__valid_percentage(const char *value)
+diff --git a/lib/pengine/common.c b/lib/pengine/common.c
+index 0fdd5a1..6878f4d 100644
+--- a/lib/pengine/common.c
++++ b/lib/pengine/common.c
+@@ -21,13 +21,6 @@
+ gboolean was_processing_error = FALSE;
+ gboolean was_processing_warning = FALSE;
+ 
+-static bool
+-check_placement_strategy(const char *value)
+-{
+-    return pcmk__strcase_any_of(value, "default", "utilization", "minimal",
+-                           "balanced", NULL);
+-}
+-
+ static pcmk__cluster_option_t pe_opts[] = {
+     /* name, old name, type, allowed values,
+      * default value, validator,
+@@ -285,7 +278,7 @@ static pcmk__cluster_option_t pe_opts[] = {
+     {
+         "placement-strategy", NULL, "select",
+         "default, utilization, minimal, balanced",
+-        "default", check_placement_strategy,
++        "default", pcmk__valid_placement_strategy,
+         N_("How the cluster should allocate resources to nodes"),
+         NULL
+     },
+-- 
+2.31.1
+
+From 4c877cefcde40da8a2cd776956ade62919a2c926 Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Tue, 9 Jan 2024 22:13:19 -0800
+Subject: [PATCH 04/24] Refactor: controller: Remove stonith-watchdog-timeout
+ validator function
+
+...from options array. Instead, call it from the controller after
+validating the options array.
+
+We'll soon be moving the options array to libcrmcommon. There, we don't
+have access to controld_verify_stonith_watchdog_timeout() or to the
+controller's stonith API connection and node name. New comments and the
+following task have more details: https://projects.clusterlabs.org/T749.
+
+Ref T746
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ daemons/controld/controld_control.c | 25 ++++++++++++++++++++++++-
+ lib/common/watchdog.c               |  4 ++++
+ 2 files changed, 28 insertions(+), 1 deletion(-)
+
+diff --git a/daemons/controld/controld_control.c b/daemons/controld/controld_control.c
+index 644d686..83b802e 100644
+--- a/daemons/controld/controld_control.c
++++ b/daemons/controld/controld_control.c
+@@ -621,8 +621,18 @@ static pcmk__cluster_option_t controller_options[] = {
+             "the order in which ping updates arrive.")
+     },
+     {
++        /* @COMPAT Currently unparsable values default to -1 (auto-calculate),
++         * while missing values default to 0 (disable). All values are accepted
++         * (unless the controller finds that the value conflicts with the
++         * SBD_WATCHDOG_TIMEOUT).
++         *
++         * At a compatibility break: properly validate as a timeout, let
++         * either negative values or a particular string like "auto" mean auto-
++         * calculate, and use 0 as the single default for when the option either
++         * is unset or fails to validate.
++         */
+         "stonith-watchdog-timeout", NULL, "time", NULL,
+-        "0", controld_verify_stonith_watchdog_timeout,
++        "0", NULL,
+         N_("How long before nodes can be assumed to be safely down when "
+            "watchdog-based self-fencing via SBD is in use"),
+         N_("If this is set to a positive value, lost nodes are assumed to "
+@@ -747,6 +757,19 @@ config_query_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, void
+     pcmk__validate_cluster_options(config_hash, controller_options,
+                                    PCMK__NELEM(controller_options));
+ 
++    /* Validate the watchdog timeout in the context of the local node
++     * environment. If invalid, the controller will exit with a fatal error.
++     *
++     * We do this via a wrapper in the controller, so that we call
++     * pcmk__valid_stonith_watchdog_timeout() only if watchdog fencing is
++     * enabled for the local node. Otherwise, we may exit unnecessarily.
++     *
++     * A validator function in libcrmcommon can't act as such a wrapper, because
++     * it doesn't have a stonith API connection or the local node name.
++     */
++    value = g_hash_table_lookup(config_hash, "stonith-watchdog-timeout");
++    controld_verify_stonith_watchdog_timeout(value);
++
+     value = g_hash_table_lookup(config_hash, "no-quorum-policy");
+     if (pcmk__str_eq(value, "suicide", pcmk__str_casei) && pcmk__locate_sbd()) {
+         controld_set_global_flags(controld_no_quorum_suicide);
+diff --git a/lib/common/watchdog.c b/lib/common/watchdog.c
+index e569214..7d126af 100644
+--- a/lib/common/watchdog.c
++++ b/lib/common/watchdog.c
+@@ -278,6 +278,10 @@ pcmk__valid_sbd_timeout(const char *value)
+ {
+     long st_timeout = value? crm_get_msec(value) : 0;
+ 
++    /* @COMPAT At a compatibility break, accept either negative values or a
++     * specific string like "auto" (but not both) to mean "auto-calculate the
++     * timeout." Reject other values that aren't parsable as timeouts.
++     */
+     if (st_timeout < 0) {
+         st_timeout = pcmk__auto_watchdog_timeout();
+         crm_debug("Using calculated value %ld for stonith-watchdog-timeout (%s)",
+-- 
+2.31.1
+
+From 28d96fc802bca24ed3e52b8ce5946f4b2b971b7d Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Sat, 6 Jan 2024 17:52:18 -0800
+Subject: [PATCH 05/24] Refactor: libcrmcommon: New enum pcmk__opt_context
+
+At first this will be used only for backward compatibility with metadata
+commands for pacemaker-based, pacemaker-controld, and
+pacemaker-schedulerd. It may be extended later for meta-attribute
+contexts or similar.
+
+The idea is that we'll consolidate all cluster options into a single
+table and use these enum values as filters for getting daemon metadata.
+
+We won't need a pcmk__opt_context_fenced, because its metadata consists
+of stonith instance attributes, not cluster options. Those instance
+attributes will be stored in a separate array from the cluster options.
+
+Ref T746
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ include/crm/common/options_internal.h | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/include/crm/common/options_internal.h b/include/crm/common/options_internal.h
+index 1ea27ee..0c6c9e8 100644
+--- a/include/crm/common/options_internal.h
++++ b/include/crm/common/options_internal.h
+@@ -34,6 +34,19 @@ bool pcmk__env_option_enabled(const char *daemon, const char *option);
+  * Cluster option handling
+  */
+ 
++/*!
++ * \internal
++ * \enum pcmk__opt_context
++ * \brief Context flags for options
++ */
++enum pcmk__opt_context {
++    // @COMPAT Used only for daemon metadata
++    pcmk__opt_context_none       = 0,           //!< No additional context
++    pcmk__opt_context_based      = (1 << 1),    //!< CIB manager metadata
++    pcmk__opt_context_controld   = (1 << 2),    //!< Controller metadata
++    pcmk__opt_context_schedulerd = (1 << 3),    //!< Scheduler metadata
++};
++
+ typedef struct pcmk__cluster_option_s {
+     const char *name;
+     const char *alt_name;
+-- 
+2.31.1
+
+From 2f8537331e2948b9186555ffbd9c9f2c121587d1 Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Sat, 6 Jan 2024 17:58:25 -0800
+Subject: [PATCH 06/24] Refactor: libcrmcommon: New
+ pcmk__cluster_option_t:context member
+
+Arguably makes more sense adjacent to the type member, but this
+placement keeps the diffs smaller when updating existing options arrays.
+
+We will use this soon to ensure that each option occurs in exactly one
+daemon's metadata. Several options (for example,
+PCMK_OPT_NO_QUORUM_POLICY) currently appear in the metadata of both the
+controller and the scheduler, causing issues for external tools that
+parse the output.
+
+Where an option currently appears in the metadata of both the controller
+and the scheduler, it will soon appear only in the scheduler's metadata.
+We assign context flags accordingly.
+
+Note that the fencer doesn't have a context flag. The options in its
+metadata are actually stonith device instance attributes, not cluster
+options. They will continue to reside in a separate table from the
+cluster options, so there's no ambiguity about which daemon they "belong
+to."
+
+Ref T746
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ daemons/controld/controld_control.c   | 20 +++++++++++++++++
+ daemons/fenced/pacemaker-fenced.c     | 26 ++++++++++++++++++++++
+ include/crm/common/options_internal.h |  3 +++
+ lib/cib/cib_utils.c                   |  3 +++
+ lib/pengine/common.c                  | 32 +++++++++++++++++++++++++++
+ 5 files changed, 84 insertions(+)
+
+diff --git a/daemons/controld/controld_control.c b/daemons/controld/controld_control.c
+index 83b802e..4d7cb14 100644
+--- a/daemons/controld/controld_control.c
++++ b/daemons/controld/controld_control.c
+@@ -518,22 +518,26 @@ do_recover(long long action,
+ static pcmk__cluster_option_t controller_options[] = {
+     /* name, old name, type, allowed values,
+      * default value, validator,
++     * context,
+      * short description,
+      * long description
+      */
+     {
+         "dc-version", NULL, "string", NULL, PCMK__VALUE_NONE, NULL,
++        pcmk__opt_context_controld,
+         N_("Pacemaker version on cluster node elected Designated Controller (DC)"),
+         N_("Includes a hash which identifies the exact changeset the code was "
+             "built from. Used for diagnostic purposes.")
+     },
+     {
+         "cluster-infrastructure", NULL, "string", NULL, "corosync", NULL,
++        pcmk__opt_context_controld,
+         N_("The messaging stack on which Pacemaker is currently running"),
+         N_("Used for informational and diagnostic purposes.")
+     },
+     {
+         "cluster-name", NULL, "string", NULL, NULL, NULL,
++        pcmk__opt_context_controld,
+         N_("An arbitrary name for the cluster"),
+         N_("This optional value is mostly for users' convenience as desired "
+             "in administration, but may also be used in Pacemaker "
+@@ -543,6 +547,7 @@ static pcmk__cluster_option_t controller_options[] = {
+     {
+         XML_CONFIG_ATTR_DC_DEADTIME, NULL, "time",
+         NULL, "20s", pcmk__valid_interval_spec,
++        pcmk__opt_context_controld,
+         N_("How long to wait for a response from other nodes during start-up"),
+         N_("The optimal value will depend on the speed and load of your network "
+             "and the type of switches used.")
+@@ -552,6 +557,7 @@ static pcmk__cluster_option_t controller_options[] = {
+         N_("Zero disables polling, while positive values are an interval in seconds"
+             "(unless other units are specified, for example \"5min\")"),
+         "15min", pcmk__valid_interval_spec,
++        pcmk__opt_context_controld,
+         N_("Polling interval to recheck cluster state and evaluate rules "
+             "with date specifications"),
+         N_("Pacemaker is primarily event-driven, and looks ahead to know when to "
+@@ -563,6 +569,7 @@ static pcmk__cluster_option_t controller_options[] = {
+     {
+         "load-threshold", NULL, "percentage", NULL,
+         "80%", pcmk__valid_percentage,
++        pcmk__opt_context_controld,
+         N_("Maximum amount of system load that should be used by cluster nodes"),
+         N_("The cluster will slow down its recovery process when the amount of "
+             "system resources used (currently CPU) approaches this limit"),
+@@ -570,10 +577,12 @@ static pcmk__cluster_option_t controller_options[] = {
+     {
+         "node-action-limit", NULL, "integer", NULL,
+         "0", pcmk__valid_number,
++        pcmk__opt_context_controld,
+         N_("Maximum number of jobs that can be scheduled per node "
+             "(defaults to 2x cores)")
+     },
+     { XML_CONFIG_ATTR_FENCE_REACTION, NULL, "string", NULL, "stop", NULL,
++        pcmk__opt_context_controld,
+         N_("How a cluster node should react if notified of its own fencing"),
+         N_("A cluster node may receive notification of its own fencing if fencing "
+         "is misconfigured, or if fabric fencing is in use that doesn't cut "
+@@ -584,6 +593,7 @@ static pcmk__cluster_option_t controller_options[] = {
+     {
+         XML_CONFIG_ATTR_ELECTION_FAIL, NULL, "time", NULL,
+         "2min", pcmk__valid_interval_spec,
++        pcmk__opt_context_controld,
+         "*** Advanced Use Only ***",
+         N_("Declare an election failed if it is not decided within this much "
+             "time. If you need to adjust this value, it probably indicates "
+@@ -592,6 +602,7 @@ static pcmk__cluster_option_t controller_options[] = {
+     {
+         XML_CONFIG_ATTR_FORCE_QUIT, NULL, "time", NULL,
+         "20min", pcmk__valid_interval_spec,
++        pcmk__opt_context_controld,
+         "*** Advanced Use Only ***",
+         N_("Exit immediately if shutdown does not complete within this much "
+             "time. If you need to adjust this value, it probably indicates "
+@@ -600,6 +611,7 @@ static pcmk__cluster_option_t controller_options[] = {
+     {
+         "join-integration-timeout", "crmd-integration-timeout", "time", NULL,
+         "3min", pcmk__valid_interval_spec,
++        pcmk__opt_context_controld,
+         "*** Advanced Use Only ***",
+         N_("If you need to adjust this value, it probably indicates "
+             "the presence of a bug.")
+@@ -607,6 +619,7 @@ static pcmk__cluster_option_t controller_options[] = {
+     {
+         "join-finalization-timeout", "crmd-finalization-timeout", "time", NULL,
+         "30min", pcmk__valid_interval_spec,
++        pcmk__opt_context_controld,
+         "*** Advanced Use Only ***",
+         N_("If you need to adjust this value, it probably indicates "
+             "the presence of a bug.")
+@@ -614,6 +627,7 @@ static pcmk__cluster_option_t controller_options[] = {
+     {
+         "transition-delay", "crmd-transition-delay", "time", NULL,
+         "0s", pcmk__valid_interval_spec,
++        pcmk__opt_context_controld,
+         N_("*** Advanced Use Only *** Enabling this option will slow down "
+             "cluster recovery under all conditions"),
+         N_("Delay cluster recovery for this much time to allow for additional "
+@@ -633,6 +647,7 @@ static pcmk__cluster_option_t controller_options[] = {
+          */
+         "stonith-watchdog-timeout", NULL, "time", NULL,
+         "0", NULL,
++        pcmk__opt_context_controld,
+         N_("How long before nodes can be assumed to be safely down when "
+            "watchdog-based self-fencing via SBD is in use"),
+         N_("If this is set to a positive value, lost nodes are assumed to "
+@@ -654,6 +669,7 @@ static pcmk__cluster_option_t controller_options[] = {
+     {
+         "stonith-max-attempts", NULL, "integer", NULL,
+         "10", pcmk__valid_positive_number,
++        pcmk__opt_context_controld,
+         N_("How many times fencing can fail before it will no longer be "
+             "immediately re-attempted on a target")
+     },
+@@ -662,11 +678,13 @@ static pcmk__cluster_option_t controller_options[] = {
+     {
+         "no-quorum-policy", NULL, "select",
+         "stop, freeze, ignore, demote, suicide", "stop", pcmk__valid_quorum,
++        pcmk__opt_context_controld,
+         N_("What to do when the cluster does not have quorum"), NULL
+     },
+     {
+         XML_CONFIG_ATTR_SHUTDOWN_LOCK, NULL, "boolean", NULL,
+         "false", pcmk__valid_boolean,
++        pcmk__opt_context_controld,
+         N_("Whether to lock resources to a cleanly shut down node"),
+         N_("When true, resources active on a node when it is cleanly shut down "
+             "are kept \"locked\" to that node (not allowed to run elsewhere) "
+@@ -680,6 +698,7 @@ static pcmk__cluster_option_t controller_options[] = {
+     {
+         XML_CONFIG_ATTR_SHUTDOWN_LOCK_LIMIT, NULL, "time", NULL,
+         "0", pcmk__valid_interval_spec,
++        pcmk__opt_context_controld,
+         N_("Do not lock resources to a cleanly shut down node longer than "
+            "this"),
+         N_("If shutdown-lock is true and this is set to a nonzero time "
+@@ -690,6 +709,7 @@ static pcmk__cluster_option_t controller_options[] = {
+     {
+         XML_CONFIG_ATTR_NODE_PENDING_TIMEOUT, NULL, "time", NULL,
+         "0", pcmk__valid_interval_spec,
++        pcmk__opt_context_controld,
+         N_("How long to wait for a node that has joined the cluster to join "
+            "the controller process group"),
+         N_("Fence nodes that do not join the controller process group within "
+diff --git a/daemons/fenced/pacemaker-fenced.c b/daemons/fenced/pacemaker-fenced.c
+index 7c69fb8..b2f4742 100644
+--- a/daemons/fenced/pacemaker-fenced.c
++++ b/daemons/fenced/pacemaker-fenced.c
+@@ -528,11 +528,13 @@ st_peer_update_callback(enum crm_status_type type, crm_node_t * node, const void
+ static pcmk__cluster_option_t fencer_options[] = {
+     /* name, old name, type, allowed values,
+      * default value, validator,
++     * context,
+      * short description,
+      * long description
+      */
+     {
+         PCMK_STONITH_HOST_ARGUMENT, NULL, "string", NULL, "port", NULL,
++        pcmk__opt_context_none,
+         N_("Advanced use only: An alternate parameter to supply instead of 'port'"),
+         N_("some devices do not support the "
+            "standard 'port' parameter or may provide additional ones. Use "
+@@ -543,17 +545,20 @@ static pcmk__cluster_option_t fencer_options[] = {
+     },
+     {
+         PCMK_STONITH_HOST_MAP,NULL, "string", NULL, "", NULL,
++        pcmk__opt_context_none,
+         N_("A mapping of host names to ports numbers for devices that do not support host names."),
+         N_("Eg. node1:1;node2:2,3 would tell the cluster to use port 1 for node1 and ports 2 and 3 for node2")
+     },
+     {
+         PCMK_STONITH_HOST_LIST,NULL, "string", NULL, "", NULL,
++        pcmk__opt_context_none,
+         N_("Eg. node1,node2,node3"),
+         N_("A list of machines controlled by "
+                "this device (Optional unless pcmk_host_list=static-list)")
+     },
+     {
+         PCMK_STONITH_HOST_CHECK,NULL, "string", NULL, "dynamic-list", NULL,
++        pcmk__opt_context_none,
+         N_("How to determine which machines are controlled by the device."),
+         N_("Allowed values: dynamic-list "
+                "(query the device via the 'list' command), static-list "
+@@ -564,6 +569,7 @@ static pcmk__cluster_option_t fencer_options[] = {
+     },
+     {
+         PCMK_STONITH_DELAY_MAX,NULL, "time", NULL, "0s", NULL,
++        pcmk__opt_context_none,
+         N_("Enable a base delay for fencing actions and specify base delay value."),
+         N_("Enable a delay of no more than the "
+                "time specified before executing fencing actions. Pacemaker "
+@@ -573,6 +579,7 @@ static pcmk__cluster_option_t fencer_options[] = {
+     },
+     {
+         PCMK_STONITH_DELAY_BASE,NULL, "string", NULL, "0s", NULL,
++        pcmk__opt_context_none,
+         N_("Enable a base delay for "
+                "fencing actions and specify base delay value."),
+         N_("This enables a static delay for "
+@@ -587,6 +594,7 @@ static pcmk__cluster_option_t fencer_options[] = {
+     },
+     {
+         PCMK_STONITH_ACTION_LIMIT,NULL, "integer", NULL, "1", NULL,
++        pcmk__opt_context_none,
+         N_("The maximum number of actions can be performed in parallel on this device"),
+         N_("Cluster property concurrent-fencing=true needs to be configured first."
+              "Then use this to specify the maximum number of actions can be performed in parallel on this device. -1 is unlimited.")
+@@ -594,18 +602,21 @@ static pcmk__cluster_option_t fencer_options[] = {
+     {
+         "pcmk_reboot_action", NULL, "string", NULL,
+         PCMK_ACTION_REBOOT, NULL,
++        pcmk__opt_context_none,
+         N_("Advanced use only: An alternate command to run instead of 'reboot'"),
+         N_("Some devices do not support the standard commands or may provide additional ones.\n"
+            "Use this to specify an alternate, device-specific, command that implements the \'reboot\' action.")
+     },
+     {
+ 	"pcmk_reboot_timeout",NULL, "time", NULL, "60s", NULL,
++        pcmk__opt_context_none,
+ 	N_("Advanced use only: Specify an alternate timeout to use for reboot actions instead of stonith-timeout"),
+         N_("Some devices need much more/less time to complete than normal."
+ 	   "Use this to specify an alternate, device-specific, timeout for \'reboot\' actions.")
+     },
+     {
+ 	"pcmk_reboot_retries",NULL, "integer", NULL, "2", NULL,
++        pcmk__opt_context_none,
+ 	N_("Advanced use only: The maximum number of times to retry the 'reboot' command within the timeout period"),
+         N_("Some devices do not support multiple connections."
+            " Operations may 'fail' if the device is busy with another task so Pacemaker will automatically retry the operation,      if there is time remaining."
+@@ -614,18 +625,21 @@ static pcmk__cluster_option_t fencer_options[] = {
+     {
+         "pcmk_off_action", NULL, "string", NULL,
+         PCMK_ACTION_OFF, NULL,
++        pcmk__opt_context_none,
+         N_("Advanced use only: An alternate command to run instead of \'off\'"),
+         N_("Some devices do not support the standard commands or may provide additional ones."
+            "Use this to specify an alternate, device-specific, command that implements the \'off\' action.")
+     },
+     {
+ 	"pcmk_off_timeout",NULL, "time", NULL, "60s", NULL,
++        pcmk__opt_context_none,
+ 	N_("Advanced use only: Specify an alternate timeout to use for off actions instead of stonith-timeout"),
+         N_("Some devices need much more/less time to complete than normal."
+ 	   "Use this to specify an alternate, device-specific, timeout for \'off\' actions.")
+     },
+     {
+ 	"pcmk_off_retries",NULL, "integer", NULL, "2", NULL,
++        pcmk__opt_context_none,
+ 	N_("Advanced use only: The maximum number of times to retry the 'off' command within the timeout period"),
+         N_("Some devices do not support multiple connections."
+            " Operations may 'fail' if the device is busy with another task so Pacemaker will automatically retry the operation,      if there is time remaining."
+@@ -634,18 +648,21 @@ static pcmk__cluster_option_t fencer_options[] = {
+     {
+         "pcmk_on_action", NULL, "string", NULL,
+         PCMK_ACTION_ON, NULL,
++        pcmk__opt_context_none,
+         N_("Advanced use only: An alternate command to run instead of 'on'"),
+         N_("Some devices do not support the standard commands or may provide additional ones."
+            "Use this to specify an alternate, device-specific, command that implements the \'on\' action.")
+     },
+     {
+ 	"pcmk_on_timeout",NULL, "time", NULL, "60s", NULL,
++        pcmk__opt_context_none,
+ 	N_("Advanced use only: Specify an alternate timeout to use for on actions instead of stonith-timeout"),
+         N_("Some devices need much more/less time to complete than normal."
+ 	   "Use this to specify an alternate, device-specific, timeout for \'on\' actions.")
+     },
+     {
+ 	"pcmk_on_retries",NULL, "integer", NULL, "2", NULL,
++        pcmk__opt_context_none,
+ 	N_("Advanced use only: The maximum number of times to retry the 'on' command within the timeout period"),
+         N_("Some devices do not support multiple connections."
+            " Operations may 'fail' if the device is busy with another task so Pacemaker will automatically retry the operation,      if there is time remaining."
+@@ -654,18 +671,21 @@ static pcmk__cluster_option_t fencer_options[] = {
+     {
+         "pcmk_list_action",NULL, "string", NULL,
+         PCMK_ACTION_LIST, NULL,
++        pcmk__opt_context_none,
+         N_("Advanced use only: An alternate command to run instead of \'list\'"),
+         N_("Some devices do not support the standard commands or may provide additional ones."
+            "Use this to specify an alternate, device-specific, command that implements the \'list\' action.")
+     },
+     {
+ 	"pcmk_list_timeout",NULL, "time", NULL, "60s", NULL,
++        pcmk__opt_context_none,
+ 	N_("Advanced use only: Specify an alternate timeout to use for list actions instead of stonith-timeout"),
+         N_("Some devices need much more/less time to complete than normal."
+ 	   "Use this to specify an alternate, device-specific, timeout for \'list\' actions.")
+     },
+     {
+ 	"pcmk_list_retries",NULL, "integer", NULL, "2", NULL,
++        pcmk__opt_context_none,
+ 	N_("Advanced use only: The maximum number of times to retry the \'list\' command within the timeout period"),
+         N_("Some devices do not support multiple connections."
+            " Operations may 'fail' if the device is busy with another task so Pacemaker will automatically retry the operation,      if there is time remaining."
+@@ -674,18 +694,21 @@ static pcmk__cluster_option_t fencer_options[] = {
+     {
+         "pcmk_monitor_action", NULL, "string", NULL,
+         PCMK_ACTION_MONITOR, NULL,
++        pcmk__opt_context_none,
+ 	N_("Advanced use only: An alternate command to run instead of \'monitor\'"),
+         N_("Some devices do not support the standard commands or may provide additional ones."
+                  "Use this to specify an alternate, device-specific, command that implements the \'monitor\' action.")
+     },
+     {
+ 	"pcmk_monitor_timeout",NULL, "time", NULL, "60s", NULL,
++        pcmk__opt_context_none,
+ 	N_("Advanced use only: Specify an alternate timeout to use for monitor actions instead of stonith-timeout"),
+         N_("Some devices need much more/less time to complete than normal.\n"
+ 	   "Use this to specify an alternate, device-specific, timeout for \'monitor\' actions.")
+     },
+     {
+ 	"pcmk_monitor_retries",NULL, "integer", NULL, "2", NULL,
++        pcmk__opt_context_none,
+ 	N_("Advanced use only: The maximum number of times to retry the \'monitor\' command within the timeout period"),
+         N_("Some devices do not support multiple connections."
+            " Operations may 'fail' if the device is busy with another task so Pacemaker will automatically retry the operation,      if there is time remaining."
+@@ -694,18 +717,21 @@ static pcmk__cluster_option_t fencer_options[] = {
+     {
+         "pcmk_status_action", NULL, "string", NULL,
+         PCMK_ACTION_STATUS, NULL,
++        pcmk__opt_context_none,
+         N_("Advanced use only: An alternate command to run instead of \'status\'"),
+         N_("Some devices do not support the standard commands or may provide additional ones."
+            "Use this to specify an alternate, device-specific, command that implements the \'status\' action.")
+     },
+     {
+ 	"pcmk_status_timeout",NULL, "time", NULL, "60s", NULL,
++        pcmk__opt_context_none,
+ 	N_("Advanced use only: Specify an alternate timeout to use for status actions instead of stonith-timeout"),
+         N_("Some devices need much more/less time to complete than normal."
+ 	   "Use this to specify an alternate, device-specific, timeout for \'status\' actions.")
+     },
+     {
+ 	"pcmk_status_retries",NULL, "integer", NULL, "2", NULL,
++        pcmk__opt_context_none,
+ 	N_("Advanced use only: The maximum number of times to retry the \'status\' command within the timeout period"),
+         N_("Some devices do not support multiple connections."
+            " Operations may 'fail' if the device is busy with another task so Pacemaker will automatically retry the operation,      if there is time remaining."
+diff --git a/include/crm/common/options_internal.h b/include/crm/common/options_internal.h
+index 0c6c9e8..b2525ef 100644
+--- a/include/crm/common/options_internal.h
++++ b/include/crm/common/options_internal.h
+@@ -56,6 +56,9 @@ typedef struct pcmk__cluster_option_s {
+ 
+     bool (*is_valid)(const char *);
+ 
++    // @COMPAT context is used only for daemon meta-data
++    enum pcmk__opt_context context;
++
+     const char *description_short;
+     const char *description_long;
+ 
+diff --git a/lib/cib/cib_utils.c b/lib/cib/cib_utils.c
+index 9c3f9f1..9e4060b 100644
+--- a/lib/cib/cib_utils.c
++++ b/lib/cib/cib_utils.c
+@@ -869,18 +869,21 @@ cib_native_notify(gpointer data, gpointer user_data)
+ static pcmk__cluster_option_t cib_opts[] = {
+     /* name, legacy name, type, allowed values,
+      * default value, validator,
++     * context,
+      * short description,
+      * long description
+      */
+     {
+         "enable-acl", NULL, "boolean", NULL,
+         "false", pcmk__valid_boolean,
++        pcmk__opt_context_based,
+         N_("Enable Access Control Lists (ACLs) for the CIB"),
+         NULL
+     },
+     {
+         "cluster-ipc-limit", NULL, "integer", NULL,
+         "500", pcmk__valid_positive_number,
++        pcmk__opt_context_based,
+         N_("Maximum IPC message backlog before disconnecting a cluster daemon"),
+         N_("Raise this if log has \"Evicting client\" messages for cluster daemon"
+             " PIDs (a good value is the number of resources in the cluster"
+diff --git a/lib/pengine/common.c b/lib/pengine/common.c
+index 6878f4d..383c4af 100644
+--- a/lib/pengine/common.c
++++ b/lib/pengine/common.c
+@@ -24,24 +24,28 @@ gboolean was_processing_warning = FALSE;
+ static pcmk__cluster_option_t pe_opts[] = {
+     /* name, old name, type, allowed values,
+      * default value, validator,
++     * context,
+      * short description,
+      * long description
+      */
+     {
+         "no-quorum-policy", NULL, "select", "stop, freeze, ignore, demote, suicide",
+         "stop", pcmk__valid_quorum,
++        pcmk__opt_context_schedulerd,
+         N_("What to do when the cluster does not have quorum"),
+         NULL
+     },
+     {
+         "symmetric-cluster", NULL, "boolean", NULL,
+         "true", pcmk__valid_boolean,
++        pcmk__opt_context_schedulerd,
+         N_("Whether resources can run on any node by default"),
+         NULL
+     },
+     {
+         "maintenance-mode", NULL, "boolean", NULL,
+         "false", pcmk__valid_boolean,
++        pcmk__opt_context_schedulerd,
+         N_("Whether the cluster should refrain from monitoring, starting, "
+             "and stopping resources"),
+         NULL
+@@ -49,6 +53,7 @@ static pcmk__cluster_option_t pe_opts[] = {
+     {
+         "start-failure-is-fatal", NULL, "boolean", NULL,
+         "true", pcmk__valid_boolean,
++        pcmk__opt_context_schedulerd,
+         N_("Whether a start failure should prevent a resource from being "
+             "recovered on the same node"),
+         N_("When true, the cluster will immediately ban a resource from a node "
+@@ -58,12 +63,14 @@ static pcmk__cluster_option_t pe_opts[] = {
+     {
+         "enable-startup-probes", NULL, "boolean", NULL,
+         "true", pcmk__valid_boolean,
++        pcmk__opt_context_schedulerd,
+         N_("Whether the cluster should check for active resources during start-up"),
+         NULL
+     },
+     {
+         XML_CONFIG_ATTR_SHUTDOWN_LOCK, NULL, "boolean", NULL,
+         "false", pcmk__valid_boolean,
++        pcmk__opt_context_schedulerd,
+         N_("Whether to lock resources to a cleanly shut down node"),
+         N_("When true, resources active on a node when it is cleanly shut down "
+             "are kept \"locked\" to that node (not allowed to run elsewhere) "
+@@ -77,6 +84,7 @@ static pcmk__cluster_option_t pe_opts[] = {
+     {
+         XML_CONFIG_ATTR_SHUTDOWN_LOCK_LIMIT, NULL, "time", NULL,
+         "0", pcmk__valid_interval_spec,
++        pcmk__opt_context_schedulerd,
+         N_("Do not lock resources to a cleanly shut down node longer than "
+            "this"),
+         N_("If shutdown-lock is true and this is set to a nonzero time "
+@@ -89,6 +97,7 @@ static pcmk__cluster_option_t pe_opts[] = {
+     {
+         "stonith-enabled", NULL, "boolean", NULL,
+         "true", pcmk__valid_boolean,
++        pcmk__opt_context_schedulerd,
+         N_("*** Advanced Use Only *** "
+             "Whether nodes may be fenced as part of recovery"),
+         N_("If false, unresponsive nodes are immediately assumed to be harmless, "
+@@ -99,6 +108,7 @@ static pcmk__cluster_option_t pe_opts[] = {
+     {
+         "stonith-action", NULL, "select", "reboot, off, poweroff",
+         PCMK_ACTION_REBOOT, pcmk__is_fencing_action,
++        pcmk__opt_context_schedulerd,
+         N_("Action to send to fence device when a node needs to be fenced "
+             "(\"poweroff\" is a deprecated alias for \"off\")"),
+         NULL
+@@ -106,6 +116,7 @@ static pcmk__cluster_option_t pe_opts[] = {
+     {
+         "stonith-timeout", NULL, "time", NULL,
+         "60s", pcmk__valid_interval_spec,
++        pcmk__opt_context_schedulerd,
+         N_("*** Advanced Use Only *** Unused by Pacemaker"),
+         N_("This value is not used by Pacemaker, but is kept for backward "
+             "compatibility, and certain legacy fence agents might use it.")
+@@ -113,6 +124,7 @@ static pcmk__cluster_option_t pe_opts[] = {
+     {
+         XML_ATTR_HAVE_WATCHDOG, NULL, "boolean", NULL,
+         "false", pcmk__valid_boolean,
++        pcmk__opt_context_schedulerd,
+         N_("Whether watchdog integration is enabled"),
+         N_("This is set automatically by the cluster according to whether SBD "
+             "is detected to be in use. User-configured values are ignored. "
+@@ -124,12 +136,14 @@ static pcmk__cluster_option_t pe_opts[] = {
+     {
+         "concurrent-fencing", NULL, "boolean", NULL,
+         PCMK__CONCURRENT_FENCING_DEFAULT, pcmk__valid_boolean,
++        pcmk__opt_context_schedulerd,
+         N_("Allow performing fencing operations in parallel"),
+         NULL
+     },
+     {
+         "startup-fencing", NULL, "boolean", NULL,
+         "true", pcmk__valid_boolean,
++        pcmk__opt_context_schedulerd,
+         N_("*** Advanced Use Only *** Whether to fence unseen nodes at start-up"),
+         N_("Setting this to false may lead to a \"split-brain\" situation,"
+             "potentially leading to data loss and/or service unavailability.")
+@@ -137,6 +151,7 @@ static pcmk__cluster_option_t pe_opts[] = {
+     {
+         XML_CONFIG_ATTR_PRIORITY_FENCING_DELAY, NULL, "time", NULL,
+         "0", pcmk__valid_interval_spec,
++        pcmk__opt_context_schedulerd,
+         N_("Apply fencing delay targeting the lost nodes with the highest total resource priority"),
+         N_("Apply specified delay for the fencings that are targeting the lost "
+             "nodes with the highest total resource priority in case we don't "
+@@ -154,6 +169,7 @@ static pcmk__cluster_option_t pe_opts[] = {
+     {
+         XML_CONFIG_ATTR_NODE_PENDING_TIMEOUT, NULL, "time", NULL,
+         "0", pcmk__valid_interval_spec,
++        pcmk__opt_context_schedulerd,
+         N_("How long to wait for a node that has joined the cluster to join "
+            "the controller process group"),
+         N_("Fence nodes that do not join the controller process group within "
+@@ -165,6 +181,7 @@ static pcmk__cluster_option_t pe_opts[] = {
+     {
+         "cluster-delay", NULL, "time", NULL,
+         "60s", pcmk__valid_interval_spec,
++        pcmk__opt_context_schedulerd,
+         N_("Maximum time for node-to-node communication"),
+         N_("The node elected Designated Controller (DC) will consider an action "
+             "failed if it does not get a response from the node executing the "
+@@ -175,6 +192,7 @@ static pcmk__cluster_option_t pe_opts[] = {
+     {
+         "batch-limit", NULL, "integer", NULL,
+         "0", pcmk__valid_number,
++        pcmk__opt_context_schedulerd,
+         N_("Maximum number of jobs that the cluster may execute in parallel "
+             "across all nodes"),
+         N_("The \"correct\" value will depend on the speed and load of your "
+@@ -185,6 +203,7 @@ static pcmk__cluster_option_t pe_opts[] = {
+     {
+         "migration-limit", NULL, "integer", NULL,
+         "-1", pcmk__valid_number,
++        pcmk__opt_context_schedulerd,
+         N_("The number of live migration actions that the cluster is allowed "
+             "to execute in parallel on a node (-1 means no limit)")
+     },
+@@ -193,24 +212,28 @@ static pcmk__cluster_option_t pe_opts[] = {
+     {
+         "stop-all-resources", NULL, "boolean", NULL,
+         "false", pcmk__valid_boolean,
++        pcmk__opt_context_schedulerd,
+         N_("Whether the cluster should stop all active resources"),
+         NULL
+     },
+     {
+         "stop-orphan-resources", NULL, "boolean", NULL,
+         "true", pcmk__valid_boolean,
++        pcmk__opt_context_schedulerd,
+         N_("Whether to stop resources that were removed from the configuration"),
+         NULL
+     },
+     {
+         "stop-orphan-actions", NULL, "boolean", NULL,
+         "true", pcmk__valid_boolean,
++        pcmk__opt_context_schedulerd,
+         N_("Whether to cancel recurring actions removed from the configuration"),
+         NULL
+     },
+     {
+         "remove-after-stop", NULL, "boolean", NULL,
+         "false", pcmk__valid_boolean,
++        pcmk__opt_context_schedulerd,
+         N_("*** Deprecated *** Whether to remove stopped resources from "
+             "the executor"),
+         N_("Values other than default are poorly tested and potentially dangerous."
+@@ -221,18 +244,21 @@ static pcmk__cluster_option_t pe_opts[] = {
+     {
+         "pe-error-series-max", NULL, "integer", NULL,
+         "-1", pcmk__valid_number,
++        pcmk__opt_context_schedulerd,
+         N_("The number of scheduler inputs resulting in errors to save"),
+         N_("Zero to disable, -1 to store unlimited.")
+     },
+     {
+         "pe-warn-series-max",  NULL, "integer", NULL,
+         "5000", pcmk__valid_number,
++        pcmk__opt_context_schedulerd,
+         N_("The number of scheduler inputs resulting in warnings to save"),
+         N_("Zero to disable, -1 to store unlimited.")
+     },
+     {
+         "pe-input-series-max", NULL, "integer", NULL,
+         "4000", pcmk__valid_number,
++        pcmk__opt_context_schedulerd,
+         N_("The number of scheduler inputs without errors or warnings to save"),
+         N_("Zero to disable, -1 to store unlimited.")
+     },
+@@ -244,6 +270,7 @@ static pcmk__cluster_option_t pe_opts[] = {
+             PCMK__VALUE_ONLY_GREEN ", " PCMK__VALUE_PROGRESSIVE ", "
+             PCMK__VALUE_CUSTOM,
+         PCMK__VALUE_NONE, pcmk__validate_health_strategy,
++        pcmk__opt_context_schedulerd,
+         N_("How cluster should react to node health attributes"),
+         N_("Requires external entities to create node attributes (named with "
+             "the prefix \"#health\") with values \"red\", "
+@@ -252,24 +279,28 @@ static pcmk__cluster_option_t pe_opts[] = {
+     {
+         PCMK__OPT_NODE_HEALTH_BASE, NULL, "integer", NULL,
+         "0", pcmk__valid_number,
++        pcmk__opt_context_schedulerd,
+         N_("Base health score assigned to a node"),
+         N_("Only used when \"node-health-strategy\" is set to \"progressive\".")
+     },
+     {
+         PCMK__OPT_NODE_HEALTH_GREEN, NULL, "integer", NULL,
+         "0", pcmk__valid_number,
++        pcmk__opt_context_schedulerd,
+         N_("The score to use for a node health attribute whose value is \"green\""),
+         N_("Only used when \"node-health-strategy\" is set to \"custom\" or \"progressive\".")
+     },
+     {
+         PCMK__OPT_NODE_HEALTH_YELLOW, NULL, "integer", NULL,
+         "0", pcmk__valid_number,
++        pcmk__opt_context_schedulerd,
+         N_("The score to use for a node health attribute whose value is \"yellow\""),
+         N_("Only used when \"node-health-strategy\" is set to \"custom\" or \"progressive\".")
+     },
+     {
+         PCMK__OPT_NODE_HEALTH_RED, NULL, "integer", NULL,
+         "-INFINITY", pcmk__valid_number,
++        pcmk__opt_context_schedulerd,
+         N_("The score to use for a node health attribute whose value is \"red\""),
+         N_("Only used when \"node-health-strategy\" is set to \"custom\" or \"progressive\".")
+     },
+@@ -279,6 +310,7 @@ static pcmk__cluster_option_t pe_opts[] = {
+         "placement-strategy", NULL, "select",
+         "default, utilization, minimal, balanced",
+         "default", pcmk__valid_placement_strategy,
++        pcmk__opt_context_schedulerd,
+         N_("How the cluster should allocate resources to nodes"),
+         NULL
+     },
+-- 
+2.31.1
+
+From cc7c3c87d333854d0f28abe461dd58d5c94b0888 Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Sat, 6 Jan 2024 18:47:25 -0800
+Subject: [PATCH 07/24] Refactor: libcrmcommon: Consolidate cluster option
+ metadata
+
+This isn't plugged in yet. It's also currently defined out, to avoid an
+unused variable warning from the compiler.
+
+Ref T746
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ lib/common/options.c | 499 +++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 499 insertions(+)
+
+diff --git a/lib/common/options.c b/lib/common/options.c
+index 1db41a2..ff73dcc 100644
+--- a/lib/common/options.c
++++ b/lib/common/options.c
+@@ -20,6 +20,7 @@
+ #include <sys/stat.h>
+ 
+ #include <crm/crm.h>
++#include <crm/msg_xml.h>
+ 
+ void
+ pcmk__cli_help(char cmd)
+@@ -38,6 +39,504 @@ pcmk__cli_help(char cmd)
+ }
+ 
+ 
++/*
++ * Option metadata
++ */
++
++#if 0
++static pcmk__cluster_option_t cluster_options[] = {
++    /* name, old name, type, allowed values,
++     * default value, validator,
++     * context,
++     * short description,
++     * long description
++     */
++    {
++        "dc-version", NULL, "string", NULL,
++        PCMK__VALUE_NONE, NULL,
++        pcmk__opt_context_controld,
++        N_("Pacemaker version on cluster node elected Designated Controller "
++            "(DC)"),
++        N_("Includes a hash which identifies the exact changeset the code was "
++            "built from. Used for diagnostic purposes."),
++    },
++    {
++        "cluster-infrastructure", NULL, "string", NULL,
++        "corosync", NULL,
++        pcmk__opt_context_controld,
++        N_("The messaging stack on which Pacemaker is currently running"),
++        N_("Used for informational and diagnostic purposes."),
++    },
++    {
++        "cluster-name", NULL, "string", NULL,
++        NULL, NULL,
++        pcmk__opt_context_controld,
++        N_("An arbitrary name for the cluster"),
++        N_("This optional value is mostly for users' convenience as desired "
++            "in administration, but may also be used in Pacemaker "
++            "configuration rules via the #cluster-name node attribute, and "
++            "by higher-level tools and resource agents."),
++    },
++    {
++        "dc-deadtime", NULL, "time", NULL,
++        "20s", pcmk__valid_interval_spec,
++        pcmk__opt_context_controld,
++        N_("How long to wait for a response from other nodes during start-up"),
++        N_("The optimal value will depend on the speed and load of your "
++            "network and the type of switches used."),
++    },
++    {
++        "cluster-recheck-interval", NULL, "time",
++        N_("Zero disables polling, while positive values are an interval in "
++            "seconds (unless other units are specified, for example \"5min\")"),
++        "15min", pcmk__valid_interval_spec,
++        pcmk__opt_context_controld,
++        N_("Polling interval to recheck cluster state and evaluate rules "
++            "with date specifications"),
++        N_("Pacemaker is primarily event-driven, and looks ahead to know when "
++            "to recheck cluster state for failure timeouts and most time-based "
++            "rules. However, it will also recheck the cluster after this "
++            "amount of inactivity, to evaluate rules with date specifications "
++            "and serve as a fail-safe for certain types of scheduler bugs."),
++    },
++    {
++        "fence-reaction", NULL, "select", "stop, panic",
++        "stop", NULL,
++        pcmk__opt_context_controld,
++        N_("How a cluster node should react if notified of its own fencing"),
++        N_("A cluster node may receive notification of its own fencing if "
++            "fencing is misconfigured, or if fabric fencing is in use that "
++            "doesn't cut cluster communication. Use \"stop\" to attempt to "
++            "immediately stop Pacemaker and stay stopped, or \"panic\" to "
++            "attempt to immediately reboot the local node, falling back to "
++            "stop on failure."),
++    },
++    {
++        "election-timeout", NULL, "time", NULL,
++        "2min", pcmk__valid_interval_spec,
++        pcmk__opt_context_controld,
++        N_("*** Advanced Use Only ***"),
++        N_("Declare an election failed if it is not decided within this much "
++            "time. If you need to adjust this value, it probably indicates "
++            "the presence of a bug."),
++    },
++    {
++        "shutdown-escalation", NULL, "time", NULL,
++        "20min", pcmk__valid_interval_spec,
++        pcmk__opt_context_controld,
++        N_("*** Advanced Use Only ***"),
++        N_("Exit immediately if shutdown does not complete within this much "
++            "time. If you need to adjust this value, it probably indicates "
++            "the presence of a bug."),
++    },
++    {
++        "join-integration-timeout", "crmd-integration-timeout", "time",
++            NULL,
++        "3min", pcmk__valid_interval_spec,
++        pcmk__opt_context_controld,
++        N_("*** Advanced Use Only ***"),
++        N_("If you need to adjust this value, it probably indicates "
++            "the presence of a bug."),
++    },
++    {
++        "join-finalization-timeout", "crmd-finalization-timeout",
++            "time", NULL,
++        "30min", pcmk__valid_interval_spec,
++        pcmk__opt_context_controld,
++        N_("*** Advanced Use Only ***"),
++        N_("If you need to adjust this value, it probably indicates "
++            "the presence of a bug."),
++    },
++    {
++        "transition-delay", "crmd-transition-delay", "time", NULL,
++        "0s", pcmk__valid_interval_spec,
++        pcmk__opt_context_controld,
++        N_("*** Advanced Use Only *** "
++            "Enabling this option will slow down cluster recovery under all "
++            "conditions"),
++        N_("Delay cluster recovery for this much time to allow for additional "
++            "events to occur. Useful if your configuration is sensitive to "
++            "the order in which ping updates arrive."),
++    },
++    {
++        "no-quorum-policy", NULL, "select",
++            "stop, freeze, ignore, demote, suicide",
++        "stop", pcmk__valid_quorum,
++        pcmk__opt_context_schedulerd,
++        N_("What to do when the cluster does not have quorum"),
++        NULL,
++    },
++    {
++        "shutdown-lock", NULL, "boolean", NULL,
++        XML_BOOLEAN_FALSE, pcmk__valid_boolean,
++        pcmk__opt_context_schedulerd,
++        N_("Whether to lock resources to a cleanly shut down node"),
++        N_("When true, resources active on a node when it is cleanly shut down "
++            "are kept \"locked\" to that node (not allowed to run elsewhere) "
++            "until they start again on that node after it rejoins (or for at "
++            "most shutdown-lock-limit, if set). Stonith resources and "
++            "Pacemaker Remote connections are never locked. Clone and bundle "
++            "instances and the promoted role of promotable clones are "
++            "currently never locked, though support could be added in a future "
++            "release."),
++    },
++    {
++        "shutdown-lock-limit", NULL, "time", NULL,
++        "0", pcmk__valid_interval_spec,
++        pcmk__opt_context_schedulerd,
++        N_("Do not lock resources to a cleanly shut down node longer than "
++           "this"),
++        N_("If shutdown-lock is true and this is set to a nonzero time "
++            "duration, shutdown locks will expire after this much time has "
++            "passed since the shutdown was initiated, even if the node has not "
++            "rejoined."),
++    },
++    {
++        "enable-acl", NULL, "boolean", NULL,
++        XML_BOOLEAN_FALSE, pcmk__valid_boolean,
++        pcmk__opt_context_based,
++        N_("Enable Access Control Lists (ACLs) for the CIB"),
++        NULL,
++    },
++    {
++        "symmetric-cluster", NULL, "boolean", NULL,
++        XML_BOOLEAN_TRUE, pcmk__valid_boolean,
++        pcmk__opt_context_schedulerd,
++        N_("Whether resources can run on any node by default"),
++        NULL,
++    },
++    {
++        "maintenance-mode", NULL, "boolean", NULL,
++        XML_BOOLEAN_FALSE, pcmk__valid_boolean,
++        pcmk__opt_context_schedulerd,
++        N_("Whether the cluster should refrain from monitoring, starting, and "
++            "stopping resources"),
++        NULL,
++    },
++    {
++        "start-failure-is-fatal", NULL, "boolean", NULL,
++        XML_BOOLEAN_TRUE, pcmk__valid_boolean,
++        pcmk__opt_context_schedulerd,
++        N_("Whether a start failure should prevent a resource from being "
++            "recovered on the same node"),
++        N_("When true, the cluster will immediately ban a resource from a node "
++            "if it fails to start there. When false, the cluster will instead "
++            "check the resource's fail count against its migration-threshold.")
++    },
++    {
++        "enable-startup-probes", NULL, "boolean", NULL,
++        XML_BOOLEAN_TRUE, pcmk__valid_boolean,
++        pcmk__opt_context_schedulerd,
++        N_("Whether the cluster should check for active resources during "
++            "start-up"),
++        NULL,
++    },
++
++    // Fencing-related options
++    {
++        "stonith-enabled", NULL, "boolean", NULL,
++        XML_BOOLEAN_TRUE, pcmk__valid_boolean,
++        pcmk__opt_context_schedulerd,
++        N_("*** Advanced Use Only *** "
++            "Whether nodes may be fenced as part of recovery"),
++        N_("If false, unresponsive nodes are immediately assumed to be "
++            "harmless, and resources that were active on them may be recovered "
++            "elsewhere. This can result in a \"split-brain\" situation, "
++            "potentially leading to data loss and/or service unavailability."),
++    },
++    {
++        "stonith-action", NULL, "select", "reboot, off, poweroff",
++        PCMK_ACTION_REBOOT, pcmk__is_fencing_action,
++        pcmk__opt_context_schedulerd,
++        N_("Action to send to fence device when a node needs to be fenced "
++            "(\"poweroff\" is a deprecated alias for \"off\")"),
++        NULL,
++    },
++    {
++        "stonith-timeout", NULL, "time", NULL,
++        "60s", pcmk__valid_interval_spec,
++        pcmk__opt_context_schedulerd,
++        N_("How long to wait for on, off, and reboot fence actions to complete "
++            "by default"),
++        NULL,
++    },
++    {
++        "have-watchdog", NULL, "boolean", NULL,
++        XML_BOOLEAN_FALSE, pcmk__valid_boolean,
++        pcmk__opt_context_schedulerd,
++        N_("Whether watchdog integration is enabled"),
++        N_("This is set automatically by the cluster according to whether SBD "
++            "is detected to be in use. User-configured values are ignored. "
++            "The value `true` is meaningful if diskless SBD is used and "
++            "`stonith-watchdog-timeout` is nonzero. In that case, if fencing "
++            "is required, watchdog-based self-fencing will be performed via "
++            "SBD without requiring a fencing resource explicitly configured."),
++    },
++    {
++        /* @COMPAT Currently, unparsable values default to -1 (auto-calculate),
++         * while missing values default to 0 (disable). All values are accepted
++         * (unless the controller finds that the value conflicts with the
++         * SBD_WATCHDOG_TIMEOUT).
++         *
++         * At a compatibility break: properly validate as a timeout, let
++         * either negative values or a particular string like "auto" mean auto-
++         * calculate, and use 0 as the single default for when the option either
++         * is unset or fails to validate.
++         */
++        "stonith-watchdog-timeout", NULL, "time", NULL,
++        "0", NULL,
++        pcmk__opt_context_controld,
++        N_("How long before nodes can be assumed to be safely down when "
++           "watchdog-based self-fencing via SBD is in use"),
++        N_("If this is set to a positive value, lost nodes are assumed to "
++           "self-fence using watchdog-based SBD within this much time. This "
++           "does not require a fencing resource to be explicitly configured, "
++           "though a fence_watchdog resource can be configured, to limit use "
++           "to specific nodes. If this is set to 0 (the default), the cluster "
++           "will never assume watchdog-based self-fencing. If this is set to a "
++           "negative value, the cluster will use twice the local value of the "
++           "`SBD_WATCHDOG_TIMEOUT` environment variable if that is positive, "
++           "or otherwise treat this as 0. WARNING: When used, this timeout "
++           "must be larger than `SBD_WATCHDOG_TIMEOUT` on all nodes that use "
++           "watchdog-based SBD, and Pacemaker will refuse to start on any of "
++           "those nodes where this is not true for the local value or SBD is "
++           "not active. When this is set to a negative value, "
++           "`SBD_WATCHDOG_TIMEOUT` must be set to the same value on all nodes "
++           "that use SBD, otherwise data corruption or loss could occur."),
++    },
++    {
++        "stonith-max-attempts", NULL, "integer", NULL,
++        "10", pcmk__valid_positive_number,
++        pcmk__opt_context_controld,
++        N_("How many times fencing can fail before it will no longer be "
++            "immediately re-attempted on a target"),
++        NULL,
++    },
++    {
++        "concurrent-fencing", NULL, "boolean", NULL,
++        PCMK__CONCURRENT_FENCING_DEFAULT, pcmk__valid_boolean,
++        pcmk__opt_context_schedulerd,
++        N_("Allow performing fencing operations in parallel"),
++        NULL,
++    },
++    {
++        "startup-fencing", NULL, "boolean", NULL,
++        XML_BOOLEAN_TRUE, pcmk__valid_boolean,
++        pcmk__opt_context_schedulerd,
++        N_("*** Advanced Use Only *** "
++            "Whether to fence unseen nodes at start-up"),
++        N_("Setting this to false may lead to a \"split-brain\" situation, "
++            "potentially leading to data loss and/or service unavailability."),
++    },
++    {
++        "priority-fencing-delay", NULL, "time", NULL,
++        "0", pcmk__valid_interval_spec,
++        pcmk__opt_context_schedulerd,
++        N_("Apply fencing delay targeting the lost nodes with the highest "
++            "total resource priority"),
++        N_("Apply specified delay for the fencings that are targeting the lost "
++            "nodes with the highest total resource priority in case we don't "
++            "have the majority of the nodes in our cluster partition, so that "
++            "the more significant nodes potentially win any fencing match, "
++            "which is especially meaningful under split-brain of 2-node "
++            "cluster. A promoted resource instance takes the base priority + 1 "
++            "on calculation if the base priority is not 0. Any static/random "
++            "delays that are introduced by `pcmk_delay_base/max` configured "
++            "for the corresponding fencing resources will be added to this "
++            "delay. This delay should be significantly greater than, safely "
++            "twice, the maximum `pcmk_delay_base/max`. By default, priority "
++            "fencing delay is disabled."),
++    },
++    {
++        "node-pending-timeout", NULL, "time", NULL,
++        "0", pcmk__valid_interval_spec,
++        pcmk__opt_context_schedulerd,
++        N_("How long to wait for a node that has joined the cluster to join "
++           "the controller process group"),
++        N_("Fence nodes that do not join the controller process group within "
++           "this much time after joining the cluster, to allow the cluster "
++           "to continue managing resources. A value of 0 means never fence "
++           "pending nodes. Setting the value to 2h means fence nodes after "
++           "2 hours."),
++    },
++    {
++        "cluster-delay", NULL, "time", NULL,
++        "60s", pcmk__valid_interval_spec,
++        pcmk__opt_context_schedulerd,
++        N_("Maximum time for node-to-node communication"),
++        N_("The node elected Designated Controller (DC) will consider an action "
++            "failed if it does not get a response from the node executing the "
++            "action within this time (after considering the action's own "
++            "timeout). The \"correct\" value will depend on the speed and "
++            "load of your network and cluster nodes.")
++    },
++
++    // Limits
++    {
++        "load-threshold", NULL, "percentage", NULL,
++        "80%", pcmk__valid_percentage,
++        pcmk__opt_context_controld,
++        N_("Maximum amount of system load that should be used by cluster "
++            "nodes"),
++        N_("The cluster will slow down its recovery process when the amount of "
++            "system resources used (currently CPU) approaches this limit"),
++    },
++    {
++        "node-action-limit", NULL, "integer", NULL,
++        "0", pcmk__valid_number,
++        pcmk__opt_context_controld,
++        N_("Maximum number of jobs that can be scheduled per node (defaults to "
++            "2x cores)"),
++        NULL,
++    },
++    {
++        "batch-limit", NULL, "integer", NULL,
++        "0", pcmk__valid_number,
++        pcmk__opt_context_schedulerd,
++        N_("Maximum number of jobs that the cluster may execute in parallel "
++            "across all nodes"),
++        N_("The \"correct\" value will depend on the speed and load of your "
++            "network and cluster nodes. If set to 0, the cluster will "
++            "impose a dynamically calculated limit when any node has a "
++            "high load."),
++    },
++    {
++        "migration-limit", NULL, "integer", NULL,
++        "-1", pcmk__valid_number,
++        pcmk__opt_context_schedulerd,
++        N_("The number of live migration actions that the cluster is allowed "
++            "to execute in parallel on a node (-1 means no limit)"),
++        NULL,
++    },
++    {
++        "cluster-ipc-limit", NULL, "integer", NULL,
++        "500", pcmk__valid_positive_number,
++        pcmk__opt_context_based,
++        N_("Maximum IPC message backlog before disconnecting a cluster daemon"),
++        N_("Raise this if log has \"Evicting client\" messages for cluster "
++            "daemon PIDs (a good value is the number of resources in the "
++            "cluster multiplied by the number of nodes)."),
++    },
++
++    // Orphans and stopping
++    {
++        "stop-all-resources", NULL, "boolean", NULL,
++        XML_BOOLEAN_FALSE, pcmk__valid_boolean,
++        pcmk__opt_context_schedulerd,
++        N_("Whether the cluster should stop all active resources"),
++        NULL,
++    },
++    {
++        "stop-orphan-resources", NULL, "boolean", NULL,
++        XML_BOOLEAN_TRUE, pcmk__valid_boolean,
++        pcmk__opt_context_schedulerd,
++        N_("Whether to stop resources that were removed from the "
++            "configuration"),
++        NULL,
++    },
++    {
++        "stop-orphan-actions", NULL, "boolean", NULL,
++        XML_BOOLEAN_TRUE, pcmk__valid_boolean,
++        pcmk__opt_context_schedulerd,
++        N_("Whether to cancel recurring actions removed from the "
++            "configuration"),
++        NULL,
++    },
++    {
++        "remove-after-stop", NULL, "boolean", NULL,
++        XML_BOOLEAN_FALSE, pcmk__valid_boolean,
++        pcmk__opt_context_schedulerd,
++        N_("*** Deprecated *** "
++            "Whether to remove stopped resources from the executor"),
++        N_("Values other than default are poorly tested and potentially "
++            "dangerous. This option will be removed in a future release."),
++    },
++
++    // Storing inputs
++    {
++        "pe-error-series-max", NULL, "integer", NULL,
++        "-1", pcmk__valid_number,
++        pcmk__opt_context_schedulerd,
++        N_("The number of scheduler inputs resulting in errors to save"),
++        N_("Zero to disable, -1 to store unlimited."),
++    },
++    {
++        "pe-warn-series-max", NULL, "integer", NULL,
++        "5000", pcmk__valid_number,
++        pcmk__opt_context_schedulerd,
++        N_("The number of scheduler inputs resulting in warnings to save"),
++        N_("Zero to disable, -1 to store unlimited."),
++    },
++    {
++        "pe-input-series-max", NULL, "integer", NULL,
++        "4000", pcmk__valid_number,
++        pcmk__opt_context_schedulerd,
++        N_("The number of scheduler inputs without errors or warnings to save"),
++        N_("Zero to disable, -1 to store unlimited."),
++    },
++
++    // Node health
++    {
++        "node-health-strategy", NULL, "select",
++            PCMK__VALUE_NONE ", " PCMK__VALUE_MIGRATE_ON_RED ", "
++                PCMK__VALUE_ONLY_GREEN ", " PCMK__VALUE_PROGRESSIVE ", "
++                PCMK__VALUE_CUSTOM,
++        PCMK__VALUE_NONE, pcmk__validate_health_strategy,
++        pcmk__opt_context_schedulerd,
++        N_("How cluster should react to node health attributes"),
++        N_("Requires external entities to create node attributes (named with "
++            "the prefix \"#health\") with values \"red\", \"yellow\", or "
++            "\"green\".")
++    },
++    {
++        "node-health-base", NULL, "integer", NULL,
++        "0", pcmk__valid_number,
++        pcmk__opt_context_schedulerd,
++        N_("Base health score assigned to a node"),
++        N_("Only used when \"node-health-strategy\" is set to "
++            "\"progressive\"."),
++    },
++    {
++        "node-health-green", NULL, "integer", NULL,
++        "0", pcmk__valid_number,
++        pcmk__opt_context_schedulerd,
++        N_("The score to use for a node health attribute whose value is "
++            "\"green\""),
++        N_("Only used when \"node-health-strategy\" is set to \"custom\" or "
++            "\"progressive\"."),
++    },
++    {
++        "node-health-yellow", NULL, "integer", NULL,
++        "0", pcmk__valid_number,
++        pcmk__opt_context_schedulerd,
++        N_("The score to use for a node health attribute whose value is "
++            "\"yellow\""),
++        N_("Only used when \"node-health-strategy\" is set to \"custom\" or "
++            "\"progressive\"."),
++    },
++    {
++        "node-health-red", NULL, "integer", NULL,
++        "-INFINITY", pcmk__valid_number,
++        pcmk__opt_context_schedulerd,
++        N_("The score to use for a node health attribute whose value is "
++            "\"red\""),
++        N_("Only used when \"node-health-strategy\" is set to \"custom\" or "
++            "\"progressive\".")
++    },
++
++    // Placement strategy
++    {
++        "placement-strategy", NULL, "select",
++            "default, utilization, minimal, balanced",
++        "default", pcmk__valid_placement_strategy,
++        pcmk__opt_context_schedulerd,
++        N_("How the cluster should allocate resources to nodes"),
++        NULL,
++    },
++};
++#endif  // 0
++
++
+ /*
+  * Environment variable option handling
+  */
+-- 
+2.31.1
+
+From 96fa08b7adc911cce417f7f9889029510ec1c428 Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Wed, 10 Jan 2024 23:35:22 -0800
+Subject: [PATCH 08/24] Refactor: libcrmcommon: New filter arg to
+ pcmk__format_option_metadata()
+
+Now each cluster option is in exactly one daemon's metadata. The four
+options that were previously in the metadata of both the controller and
+the scheduler are now only in the scheduler's metadata.
+
+All daemons still have access to all the options they use.
+
+All function calls in daemons still use the local options arrays rather
+than the one in libcrmcommon. That will change in upcoming commits.
+
+Closes T746
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ daemons/controld/controld_control.c   |  6 ++++--
+ daemons/fenced/pacemaker-fenced.c     | 17 +++++++++-------
+ include/crm/common/options_internal.h |  1 +
+ lib/cib/cib_utils.c                   |  7 ++++---
+ lib/common/options.c                  | 28 +++++++++++++++++++++++++--
+ lib/pengine/common.c                  |  7 ++++---
+ 6 files changed, 49 insertions(+), 17 deletions(-)
+
+diff --git a/daemons/controld/controld_control.c b/daemons/controld/controld_control.c
+index 4d7cb14..8fe09da 100644
+--- a/daemons/controld/controld_control.c
++++ b/daemons/controld/controld_control.c
+@@ -723,11 +723,13 @@ static pcmk__cluster_option_t controller_options[] = {
+ void
+ crmd_metadata(void)
+ {
++    const char *name = "pacemaker-controld";
+     const char *desc_short = "Pacemaker controller options";
+     const char *desc_long = "Cluster options used by Pacemaker's controller";
+ 
+-    gchar *s = pcmk__format_option_metadata("pacemaker-controld", desc_short,
+-                                            desc_long, controller_options,
++    gchar *s = pcmk__format_option_metadata(name, desc_short, desc_long,
++                                            pcmk__opt_context_controld,
++                                            controller_options,
+                                             PCMK__NELEM(controller_options));
+     printf("%s", s);
+     g_free(s);
+diff --git a/daemons/fenced/pacemaker-fenced.c b/daemons/fenced/pacemaker-fenced.c
+index b2f4742..d0b6c31 100644
+--- a/daemons/fenced/pacemaker-fenced.c
++++ b/daemons/fenced/pacemaker-fenced.c
+@@ -742,14 +742,17 @@ static pcmk__cluster_option_t fencer_options[] = {
+ void
+ fencer_metadata(void)
+ {
++    const char *name = "pacemaker-fenced";
+     const char *desc_short = N_("Instance attributes available for all "
+-                             "\"stonith\"-class resources");
+-    const char *desc_long = N_("Instance attributes available for all \"stonith\"-"
+-                            "class resources and used by Pacemaker's fence "
+-                            "daemon, formerly known as stonithd");
+-
+-    gchar *s = pcmk__format_option_metadata("pacemaker-fenced", desc_short,
+-                                            desc_long, fencer_options,
++                                "\"stonith\"-class resources");
++    const char *desc_long = N_("Instance attributes available for all "
++                               "\"stonith\"-class resources and used by "
++                               "Pacemaker's fence daemon, formerly known as "
++                               "stonithd");
++
++    gchar *s = pcmk__format_option_metadata(name, desc_short, desc_long,
++                                            pcmk__opt_context_none,
++                                            fencer_options,
+                                             PCMK__NELEM(fencer_options));
+     printf("%s", s);
+     g_free(s);
+diff --git a/include/crm/common/options_internal.h b/include/crm/common/options_internal.h
+index b2525ef..89d27d1 100644
+--- a/include/crm/common/options_internal.h
++++ b/include/crm/common/options_internal.h
+@@ -70,6 +70,7 @@ const char *pcmk__cluster_option(GHashTable *options,
+ 
+ gchar *pcmk__format_option_metadata(const char *name, const char *desc_short,
+                                     const char *desc_long,
++                                    enum pcmk__opt_context filter,
+                                     pcmk__cluster_option_t *option_list,
+                                     int len);
+ 
+diff --git a/lib/cib/cib_utils.c b/lib/cib/cib_utils.c
+index 9e4060b..2205d15 100644
+--- a/lib/cib/cib_utils.c
++++ b/lib/cib/cib_utils.c
+@@ -894,13 +894,14 @@ static pcmk__cluster_option_t cib_opts[] = {
+ void
+ cib_metadata(void)
+ {
++    const char *name = "pacemaker-based";
+     const char *desc_short = "Cluster Information Base manager options";
+     const char *desc_long = "Cluster options used by Pacemaker's Cluster "
+                             "Information Base manager";
+ 
+-    gchar *s = pcmk__format_option_metadata("pacemaker-based", desc_short,
+-                                            desc_long, cib_opts,
+-                                            PCMK__NELEM(cib_opts));
++    gchar *s = pcmk__format_option_metadata(name, desc_short, desc_long,
++                                            pcmk__opt_context_based,
++                                            cib_opts, PCMK__NELEM(cib_opts));
+     printf("%s", s);
+     g_free(s);
+ }
+diff --git a/lib/common/options.c b/lib/common/options.c
+index ff73dcc..d5b6c17 100644
+--- a/lib/common/options.c
++++ b/lib/common/options.c
+@@ -937,13 +937,32 @@ add_desc(GString *s, const char *tag, const char *desc, const char *values,
+     free(escaped_en);
+ }
+ 
++/*!
++ * \internal
++ * \brief Format option metadata as an OCF-like XML string
++ *
++ * \param[in] name         Daemon name
++ * \param[in] desc_short   Short description of the daemon
++ * \param[in] desc_long    Long description of the daemon
++ * \param[in] filter       If not \c pcmk__opt_context_none, include only
++ *                         those options whose \c context field is equal to
++ *                         \p filter
++ * \param[in] option_list  Options whose metadata to format
++ * \param[in] len          Number of items in \p option_list
++ *
++ * \return A string containing OCF-like option metadata XML
++ *
++ * \note The caller is responsible for freeing the return value using
++ *       \c g_free().
++ */
+ gchar *
+ pcmk__format_option_metadata(const char *name, const char *desc_short,
+                              const char *desc_long,
++                             enum pcmk__opt_context filter,
+                              pcmk__cluster_option_t *option_list, int len)
+ {
+-    /* big enough to hold "pacemaker-schedulerd metadata" output */
+-    GString *s = g_string_sized_new(13000);
++    // Large enough to hold current cluster options with room for growth (2^15)
++    GString *s = g_string_sized_new(32768);
+ 
+     pcmk__g_strcat(s,
+                    "<?xml version=\"1.0\"?>\n"
+@@ -964,6 +983,11 @@ pcmk__format_option_metadata(const char *name, const char *desc_short,
+         const char *opt_desc_short = option_list[lpc].description_short;
+         const char *opt_desc_long = option_list[lpc].description_long;
+ 
++        if ((filter != pcmk__opt_context_none)
++            && (filter != option_list[lpc].context)) {
++            continue;
++        }
++
+         // The standard requires long and short parameter descriptions
+         CRM_ASSERT((opt_desc_short != NULL) || (opt_desc_long != NULL));
+ 
+diff --git a/lib/pengine/common.c b/lib/pengine/common.c
+index 383c4af..e9aa2e2 100644
+--- a/lib/pengine/common.c
++++ b/lib/pengine/common.c
+@@ -319,12 +319,13 @@ static pcmk__cluster_option_t pe_opts[] = {
+ void
+ pe_metadata(pcmk__output_t *out)
+ {
++    const char *name = "pacemaker-schedulerd";
+     const char *desc_short = "Pacemaker scheduler options";
+     const char *desc_long = "Cluster options used by Pacemaker's scheduler";
+ 
+-    gchar *s = pcmk__format_option_metadata("pacemaker-schedulerd", desc_short,
+-                                            desc_long, pe_opts,
+-                                            PCMK__NELEM(pe_opts));
++    gchar *s = pcmk__format_option_metadata(name, desc_short, desc_long,
++                                            pcmk__opt_context_schedulerd,
++                                            pe_opts, PCMK__NELEM(pe_opts));
+     out->output_xml(out, "metadata", s);
+     g_free(s);
+ }
+-- 
+2.31.1
+
+From 96b59bf0c66fccc0656a9195ebe7580d54083eb3 Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Wed, 10 Jan 2024 23:59:39 -0800
+Subject: [PATCH 09/24] Test: cts-cli: Update daemon outputs for option
+ filtering
+
+Now each cluster option is in exactly one daemon's metadata. The four
+options that were previously in the metadata of both the controller and
+the scheduler are now only in the scheduler's metadata.
+
+All daemons still have access to all the options they use.
+
+Ref T746
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ cts/cli/regression.daemons.exp | 26 --------------------------
+ 1 file changed, 26 deletions(-)
+
+diff --git a/cts/cli/regression.daemons.exp b/cts/cli/regression.daemons.exp
+index 6a24089..9b2dd96 100644
+--- a/cts/cli/regression.daemons.exp
++++ b/cts/cli/regression.daemons.exp
+@@ -101,32 +101,6 @@
+       <shortdesc lang="en">How many times fencing can fail before it will no longer be immediately re-attempted on a target</shortdesc>
+       <content type="integer" default=""/>
+     </parameter>
+-    <parameter name="no-quorum-policy">
+-      <longdesc lang="en">What to do when the cluster does not have quorum  Allowed values: stop, freeze, ignore, demote, suicide</longdesc>
+-      <shortdesc lang="en">What to do when the cluster does not have quorum</shortdesc>
+-      <content type="select" default="">
+-        <option value="stop" />
+-        <option value="freeze" />
+-        <option value="ignore" />
+-        <option value="demote" />
+-        <option value="suicide" />
+-      </content>
+-    </parameter>
+-    <parameter name="shutdown-lock">
+-      <longdesc lang="en">When true, resources active on a node when it is cleanly shut down are kept &quot;locked&quot; to that node (not allowed to run elsewhere) until they start again on that node after it rejoins (or for at most shutdown-lock-limit, if set). Stonith resources and Pacemaker Remote connections are never locked. Clone and bundle instances and the promoted role of promotable clones are currently never locked, though support could be added in a future release.</longdesc>
+-      <shortdesc lang="en">Whether to lock resources to a cleanly shut down node</shortdesc>
+-      <content type="boolean" default=""/>
+-    </parameter>
+-    <parameter name="shutdown-lock-limit">
+-      <longdesc lang="en">If shutdown-lock is true and this is set to a nonzero time duration, shutdown locks will expire after this much time has passed since the shutdown was initiated, even if the node has not rejoined.</longdesc>
+-      <shortdesc lang="en">Do not lock resources to a cleanly shut down node longer than this</shortdesc>
+-      <content type="time" default=""/>
+-    </parameter>
+-    <parameter name="node-pending-timeout">
+-      <longdesc lang="en">Fence nodes that do not join the controller process group within this much time after joining the cluster, to allow the cluster to continue managing resources. A value of 0 means never fence pending nodes. Setting the value to 2h means fence nodes after 2 hours.</longdesc>
+-      <shortdesc lang="en">How long to wait for a node that has joined the cluster to join the controller process group</shortdesc>
+-      <content type="time" default=""/>
+-    </parameter>
+   </parameters>
+ </resource-agent>
+ =#=#=#= End test: Get controller metadata - OK (0) =#=#=#=
+-- 
+2.31.1
+
+From fec945824ed11395a8366882c29315c509de80f0 Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Sat, 6 Jan 2024 19:07:00 -0800
+Subject: [PATCH 10/24] Refactor: libcrmcommon, daemons: New
+ pcmk__cluster_option_metadata()
+
+This new function is a wrapper for pcmk__format_option_metadata() that
+always uses the shared cluster_options array and its length.
+
+Daemons can now call this function to get metadata instead of using
+their local options arrays for that purpose.
+
+Soon we'll introduce a command that outputs all cluster option metadata
+directly, instead of calling daemon metadata commands.
+
+Ref T746
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ daemons/controld/controld_control.c   |  7 +++----
+ include/crm/common/options_internal.h |  4 ++++
+ lib/cib/cib_utils.c                   |  6 +++---
+ lib/common/options.c                  | 28 +++++++++++++++++++++++++--
+ lib/pengine/common.c                  |  6 +++---
+ 5 files changed, 39 insertions(+), 12 deletions(-)
+
+diff --git a/daemons/controld/controld_control.c b/daemons/controld/controld_control.c
+index 8fe09da..82aa143 100644
+--- a/daemons/controld/controld_control.c
++++ b/daemons/controld/controld_control.c
+@@ -727,10 +727,9 @@ crmd_metadata(void)
+     const char *desc_short = "Pacemaker controller options";
+     const char *desc_long = "Cluster options used by Pacemaker's controller";
+ 
+-    gchar *s = pcmk__format_option_metadata(name, desc_short, desc_long,
+-                                            pcmk__opt_context_controld,
+-                                            controller_options,
+-                                            PCMK__NELEM(controller_options));
++    gchar *s = pcmk__cluster_option_metadata(name, desc_short, desc_long,
++                                             pcmk__opt_context_controld);
++
+     printf("%s", s);
+     g_free(s);
+ }
+diff --git a/include/crm/common/options_internal.h b/include/crm/common/options_internal.h
+index 89d27d1..a62015f 100644
+--- a/include/crm/common/options_internal.h
++++ b/include/crm/common/options_internal.h
+@@ -74,6 +74,10 @@ gchar *pcmk__format_option_metadata(const char *name, const char *desc_short,
+                                     pcmk__cluster_option_t *option_list,
+                                     int len);
+ 
++gchar *pcmk__cluster_option_metadata(const char *name, const char *desc_short,
++                                     const char *desc_long,
++                                     enum pcmk__opt_context filter);
++
+ void pcmk__validate_cluster_options(GHashTable *options,
+                                     pcmk__cluster_option_t *option_list,
+                                     int len);
+diff --git a/lib/cib/cib_utils.c b/lib/cib/cib_utils.c
+index 2205d15..479a7fb 100644
+--- a/lib/cib/cib_utils.c
++++ b/lib/cib/cib_utils.c
+@@ -899,9 +899,9 @@ cib_metadata(void)
+     const char *desc_long = "Cluster options used by Pacemaker's Cluster "
+                             "Information Base manager";
+ 
+-    gchar *s = pcmk__format_option_metadata(name, desc_short, desc_long,
+-                                            pcmk__opt_context_based,
+-                                            cib_opts, PCMK__NELEM(cib_opts));
++    gchar *s = pcmk__cluster_option_metadata(name, desc_short, desc_long,
++                                             pcmk__opt_context_based);
++
+     printf("%s", s);
+     g_free(s);
+ }
+diff --git a/lib/common/options.c b/lib/common/options.c
+index d5b6c17..df4a8b4 100644
+--- a/lib/common/options.c
++++ b/lib/common/options.c
+@@ -43,7 +43,6 @@ pcmk__cli_help(char cmd)
+  * Option metadata
+  */
+ 
+-#if 0
+ static pcmk__cluster_option_t cluster_options[] = {
+     /* name, old name, type, allowed values,
+      * default value, validator,
+@@ -534,7 +533,6 @@ static pcmk__cluster_option_t cluster_options[] = {
+         NULL,
+     },
+ };
+-#endif  // 0
+ 
+ 
+ /*
+@@ -1036,6 +1034,32 @@ pcmk__format_option_metadata(const char *name, const char *desc_short,
+     return g_string_free(s, FALSE);
+ }
+ 
++/*!
++ * \internal
++ * \brief Format cluster option metadata as an OCF-like XML string
++ *
++ * \param[in] name        Daemon name
++ * \param[in] desc_short  Short description of the daemon
++ * \param[in] desc_long   Long description of the daemon
++ * \param[in] filter      If not \c pcmk__opt_context_none, include only
++ *                        those options whose \c context field is equal to
++ *                        \p filter
++ *
++ * \return A string containing OCF-like cluster option metadata XML
++ *
++ * \note The caller is responsible for freeing the return value using
++ *       \c g_free().
++ */
++gchar *
++pcmk__cluster_option_metadata(const char *name, const char *desc_short,
++                              const char *desc_long,
++                              enum pcmk__opt_context filter)
++{
++    return pcmk__format_option_metadata(name, desc_short, desc_long, filter,
++                                        cluster_options,
++                                        PCMK__NELEM(cluster_options));
++}
++
+ void
+ pcmk__validate_cluster_options(GHashTable *options,
+                                pcmk__cluster_option_t *option_list, int len)
+diff --git a/lib/pengine/common.c b/lib/pengine/common.c
+index e9aa2e2..c9f1fc1 100644
+--- a/lib/pengine/common.c
++++ b/lib/pengine/common.c
+@@ -323,9 +323,9 @@ pe_metadata(pcmk__output_t *out)
+     const char *desc_short = "Pacemaker scheduler options";
+     const char *desc_long = "Cluster options used by Pacemaker's scheduler";
+ 
+-    gchar *s = pcmk__format_option_metadata(name, desc_short, desc_long,
+-                                            pcmk__opt_context_schedulerd,
+-                                            pe_opts, PCMK__NELEM(pe_opts));
++    gchar *s = pcmk__cluster_option_metadata(name, desc_short, desc_long,
++                                             pcmk__opt_context_schedulerd);
++
+     out->output_xml(out, "metadata", s);
+     g_free(s);
+ }
+-- 
+2.31.1
+
+From 9a7d33003dffea465e7b452abd0388db4a7d73b0 Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Thu, 11 Jan 2024 00:06:32 -0800
+Subject: [PATCH 11/24] Test: cts-cli: Update daemon outputs for reordering
+
+In the new libcrmcommon options array, some options have been reordered
+to be near other similar options.
+
+Ref T746
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ cts/cli/regression.daemons.exp | 40 +++++++++++++++++-----------------
+ 1 file changed, 20 insertions(+), 20 deletions(-)
+
+diff --git a/cts/cli/regression.daemons.exp b/cts/cli/regression.daemons.exp
+index 9b2dd96..43393df 100644
+--- a/cts/cli/regression.daemons.exp
++++ b/cts/cli/regression.daemons.exp
+@@ -51,16 +51,6 @@
+       <shortdesc lang="en">Polling interval to recheck cluster state and evaluate rules with date specifications</shortdesc>
+       <content type="time" default=""/>
+     </parameter>
+-    <parameter name="load-threshold">
+-      <longdesc lang="en">The cluster will slow down its recovery process when the amount of system resources used (currently CPU) approaches this limit</longdesc>
+-      <shortdesc lang="en">Maximum amount of system load that should be used by cluster nodes</shortdesc>
+-      <content type="percentage" default=""/>
+-    </parameter>
+-    <parameter name="node-action-limit">
+-      <longdesc lang="en">Maximum number of jobs that can be scheduled per node (defaults to 2x cores)</longdesc>
+-      <shortdesc lang="en">Maximum number of jobs that can be scheduled per node (defaults to 2x cores)</shortdesc>
+-      <content type="integer" default=""/>
+-    </parameter>
+     <parameter name="fence-reaction">
+       <longdesc lang="en">A cluster node may receive notification of its own fencing if fencing is misconfigured, or if fabric fencing is in use that doesn&apos;t cut cluster communication. Allowed values are &quot;stop&quot; to attempt to immediately stop Pacemaker and stay stopped, or &quot;panic&quot; to attempt to immediately reboot the local node, falling back to stop on failure.</longdesc>
+       <shortdesc lang="en">How a cluster node should react if notified of its own fencing</shortdesc>
+@@ -101,6 +91,16 @@
+       <shortdesc lang="en">How many times fencing can fail before it will no longer be immediately re-attempted on a target</shortdesc>
+       <content type="integer" default=""/>
+     </parameter>
++    <parameter name="load-threshold">
++      <longdesc lang="en">The cluster will slow down its recovery process when the amount of system resources used (currently CPU) approaches this limit</longdesc>
++      <shortdesc lang="en">Maximum amount of system load that should be used by cluster nodes</shortdesc>
++      <content type="percentage" default=""/>
++    </parameter>
++    <parameter name="node-action-limit">
++      <longdesc lang="en">Maximum number of jobs that can be scheduled per node (defaults to 2x cores)</longdesc>
++      <shortdesc lang="en">Maximum number of jobs that can be scheduled per node (defaults to 2x cores)</shortdesc>
++      <content type="integer" default=""/>
++    </parameter>
+   </parameters>
+ </resource-agent>
+ =#=#=#= End test: Get controller metadata - OK (0) =#=#=#=
+@@ -259,6 +259,16 @@
+         <option value="suicide" />
+       </content>
+     </parameter>
++    <parameter name="shutdown-lock">
++      <longdesc lang="en">When true, resources active on a node when it is cleanly shut down are kept &quot;locked&quot; to that node (not allowed to run elsewhere) until they start again on that node after it rejoins (or for at most shutdown-lock-limit, if set). Stonith resources and Pacemaker Remote connections are never locked. Clone and bundle instances and the promoted role of promotable clones are currently never locked, though support could be added in a future release.</longdesc>
++      <shortdesc lang="en">Whether to lock resources to a cleanly shut down node</shortdesc>
++      <content type="boolean" default=""/>
++    </parameter>
++    <parameter name="shutdown-lock-limit">
++      <longdesc lang="en">If shutdown-lock is true and this is set to a nonzero time duration, shutdown locks will expire after this much time has passed since the shutdown was initiated, even if the node has not rejoined.</longdesc>
++      <shortdesc lang="en">Do not lock resources to a cleanly shut down node longer than this</shortdesc>
++      <content type="time" default=""/>
++    </parameter>
+     <parameter name="symmetric-cluster">
+       <longdesc lang="en">Whether resources can run on any node by default</longdesc>
+       <shortdesc lang="en">Whether resources can run on any node by default</shortdesc>
+@@ -279,16 +289,6 @@
+       <shortdesc lang="en">Whether the cluster should check for active resources during start-up</shortdesc>
+       <content type="boolean" default=""/>
+     </parameter>
+-    <parameter name="shutdown-lock">
+-      <longdesc lang="en">When true, resources active on a node when it is cleanly shut down are kept &quot;locked&quot; to that node (not allowed to run elsewhere) until they start again on that node after it rejoins (or for at most shutdown-lock-limit, if set). Stonith resources and Pacemaker Remote connections are never locked. Clone and bundle instances and the promoted role of promotable clones are currently never locked, though support could be added in a future release.</longdesc>
+-      <shortdesc lang="en">Whether to lock resources to a cleanly shut down node</shortdesc>
+-      <content type="boolean" default=""/>
+-    </parameter>
+-    <parameter name="shutdown-lock-limit">
+-      <longdesc lang="en">If shutdown-lock is true and this is set to a nonzero time duration, shutdown locks will expire after this much time has passed since the shutdown was initiated, even if the node has not rejoined.</longdesc>
+-      <shortdesc lang="en">Do not lock resources to a cleanly shut down node longer than this</shortdesc>
+-      <content type="time" default=""/>
+-    </parameter>
+     <parameter name="stonith-enabled">
+       <longdesc lang="en">If false, unresponsive nodes are immediately assumed to be harmless, and resources that were active on them may be recovered elsewhere. This can result in a &quot;split-brain&quot; situation, potentially leading to data loss and/or service unavailability.</longdesc>
+       <shortdesc lang="en">*** Advanced Use Only *** Whether nodes may be fenced as part of recovery</shortdesc>
+-- 
+2.31.1
+
+From c085ff844deddefe4f00355e2a273f27eb35ce00 Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Thu, 11 Jan 2024 00:23:01 -0800
+Subject: [PATCH 12/24] Refactor: libcrmcommon, daemons: Use cluster_options
+ array in getters
+
+Drop the option_list and len arguments from pcmk__cluster_option() and
+pcmk__validate_cluster_options(). Use cluster_options in libcrmcommon
+instead.
+
+Now, all daemons fetch and validate the full set of cluster options,
+even the ones they don't use. This is only slightly less efficient. It
+ensures that there's no problem using the same option with multiple
+daemons, and it makes it easy to use new options in a given daemon in
+the future.
+
+Now that nothing is using the local, per-daemon options arrays anymore,
+we can drop them in an upcoming commit.
+
+Ref T746
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ daemons/controld/controld_control.c   |  9 +++---
+ include/crm/common/options_internal.h |  8 ++----
+ lib/cib/cib_utils.c                   |  7 +++--
+ lib/common/options.c                  | 40 ++++++++++++---------------
+ lib/pengine/common.c                  |  6 ++--
+ 5 files changed, 31 insertions(+), 39 deletions(-)
+
+diff --git a/daemons/controld/controld_control.c b/daemons/controld/controld_control.c
+index 82aa143..4208947 100644
+--- a/daemons/controld/controld_control.c
++++ b/daemons/controld/controld_control.c
+@@ -515,6 +515,7 @@ do_recover(long long action,
+     register_fsa_input(C_FSA_INTERNAL, I_TERMINATE, NULL);
+ }
+ 
++#if 0
+ static pcmk__cluster_option_t controller_options[] = {
+     /* name, old name, type, allowed values,
+      * default value, validator,
+@@ -719,6 +720,7 @@ static pcmk__cluster_option_t controller_options[] = {
+            "2 hours.")
+     },
+ };
++#endif  // 0
+ 
+ void
+ crmd_metadata(void)
+@@ -775,8 +777,7 @@ config_query_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, void
+                       config_hash, CIB_OPTIONS_FIRST, FALSE, now, NULL);
+ 
+     // Validate all options, and use defaults if not already present in hash
+-    pcmk__validate_cluster_options(config_hash, controller_options,
+-                                   PCMK__NELEM(controller_options));
++    pcmk__validate_cluster_options(config_hash);
+ 
+     /* Validate the watchdog timeout in the context of the local node
+      * environment. If invalid, the controller will exit with a fatal error.
+@@ -900,9 +901,7 @@ crm_shutdown(int nsig)
+      * config_query_callback() has been run at least once, it doesn't look like
+      * anything could have changed the timer period since then.
+      */
+-    value = pcmk__cluster_option(NULL, controller_options,
+-                                 PCMK__NELEM(controller_options),
+-                                 XML_CONFIG_ATTR_FORCE_QUIT);
++    value = pcmk__cluster_option(NULL, XML_CONFIG_ATTR_FORCE_QUIT);
+     default_period_ms = crm_parse_interval_spec(value);
+     controld_shutdown_start_countdown(default_period_ms);
+ }
+diff --git a/include/crm/common/options_internal.h b/include/crm/common/options_internal.h
+index a62015f..b727a58 100644
+--- a/include/crm/common/options_internal.h
++++ b/include/crm/common/options_internal.h
+@@ -64,9 +64,7 @@ typedef struct pcmk__cluster_option_s {
+ 
+ } pcmk__cluster_option_t;
+ 
+-const char *pcmk__cluster_option(GHashTable *options,
+-                                 const pcmk__cluster_option_t *option_list,
+-                                 int len, const char *name);
++const char *pcmk__cluster_option(GHashTable *options, const char *name);
+ 
+ gchar *pcmk__format_option_metadata(const char *name, const char *desc_short,
+                                     const char *desc_long,
+@@ -78,9 +76,7 @@ gchar *pcmk__cluster_option_metadata(const char *name, const char *desc_short,
+                                      const char *desc_long,
+                                      enum pcmk__opt_context filter);
+ 
+-void pcmk__validate_cluster_options(GHashTable *options,
+-                                    pcmk__cluster_option_t *option_list,
+-                                    int len);
++void pcmk__validate_cluster_options(GHashTable *options);
+ 
+ bool pcmk__valid_interval_spec(const char *value);
+ bool pcmk__valid_boolean(const char *value);
+diff --git a/lib/cib/cib_utils.c b/lib/cib/cib_utils.c
+index 479a7fb..97f62ac 100644
+--- a/lib/cib/cib_utils.c
++++ b/lib/cib/cib_utils.c
+@@ -866,6 +866,7 @@ cib_native_notify(gpointer data, gpointer user_data)
+     crm_trace("Callback invoked...");
+ }
+ 
++#if 0
+ static pcmk__cluster_option_t cib_opts[] = {
+     /* name, legacy name, type, allowed values,
+      * default value, validator,
+@@ -890,6 +891,7 @@ static pcmk__cluster_option_t cib_opts[] = {
+             " multiplied by the number of nodes).")
+     },
+ };
++#endif  // 0
+ 
+ void
+ cib_metadata(void)
+@@ -909,14 +911,13 @@ cib_metadata(void)
+ static void
+ verify_cib_options(GHashTable *options)
+ {
+-    pcmk__validate_cluster_options(options, cib_opts, PCMK__NELEM(cib_opts));
++    pcmk__validate_cluster_options(options);
+ }
+ 
+ const char *
+ cib_pref(GHashTable * options, const char *name)
+ {
+-    return pcmk__cluster_option(options, cib_opts, PCMK__NELEM(cib_opts),
+-                                name);
++    return pcmk__cluster_option(options, name);
+ }
+ 
+ gboolean
+diff --git a/lib/common/options.c b/lib/common/options.c
+index df4a8b4..13d58e3 100644
+--- a/lib/common/options.c
++++ b/lib/common/options.c
+@@ -852,27 +852,21 @@ cluster_option_value(GHashTable *options, bool (*validate)(const char *),
+  * \internal
+  * \brief Get the value of a cluster option
+  *
+- * \param[in,out] options      Name/value pairs for configured options
+- * \param[in]     option_list  Possible cluster options
+- * \param[in]     len          Length of \p option_list
+- * \param[in]     name         (Primary) option name to look for
++ * \param[in,out] options  Name/value pairs for configured options
++ * \param[in]     name     (Primary) option name to look for
+  *
+  * \return Option value
+  */
+ const char *
+-pcmk__cluster_option(GHashTable *options,
+-                     const pcmk__cluster_option_t *option_list,
+-                     int len, const char *name)
++pcmk__cluster_option(GHashTable *options, const char *name)
+ {
+-    const char *value = NULL;
+-
+-    for (int lpc = 0; lpc < len; lpc++) {
+-        if (pcmk__str_eq(name, option_list[lpc].name, pcmk__str_casei)) {
+-            value = cluster_option_value(options, option_list[lpc].is_valid,
+-                                         option_list[lpc].name,
+-                                         option_list[lpc].alt_name,
+-                                         option_list[lpc].default_value);
+-            return value;
++    for (int lpc = 0; lpc < PCMK__NELEM(cluster_options); lpc++) {
++        if (pcmk__str_eq(name, cluster_options[lpc].name, pcmk__str_casei)) {
++            return cluster_option_value(options,
++                                        cluster_options[lpc].is_valid,
++                                        cluster_options[lpc].name,
++                                        cluster_options[lpc].alt_name,
++                                        cluster_options[lpc].default_value);
+         }
+     }
+     CRM_CHECK(FALSE, crm_err("Bug: looking for unknown option '%s'", name));
+@@ -1061,13 +1055,13 @@ pcmk__cluster_option_metadata(const char *name, const char *desc_short,
+ }
+ 
+ void
+-pcmk__validate_cluster_options(GHashTable *options,
+-                               pcmk__cluster_option_t *option_list, int len)
++pcmk__validate_cluster_options(GHashTable *options)
+ {
+-    for (int lpc = 0; lpc < len; lpc++) {
+-        cluster_option_value(options, option_list[lpc].is_valid,
+-                             option_list[lpc].name,
+-                             option_list[lpc].alt_name,
+-                             option_list[lpc].default_value);
++    for (int lpc = 0; lpc < PCMK__NELEM(cluster_options); lpc++) {
++        cluster_option_value(options,
++                             cluster_options[lpc].is_valid,
++                             cluster_options[lpc].name,
++                             cluster_options[lpc].alt_name,
++                             cluster_options[lpc].default_value);
+     }
+ }
+diff --git a/lib/pengine/common.c b/lib/pengine/common.c
+index c9f1fc1..f99bd1b 100644
+--- a/lib/pengine/common.c
++++ b/lib/pengine/common.c
+@@ -21,6 +21,7 @@
+ gboolean was_processing_error = FALSE;
+ gboolean was_processing_warning = FALSE;
+ 
++#if 0
+ static pcmk__cluster_option_t pe_opts[] = {
+     /* name, old name, type, allowed values,
+      * default value, validator,
+@@ -315,6 +316,7 @@ static pcmk__cluster_option_t pe_opts[] = {
+         NULL
+     },
+ };
++#endif  // 0
+ 
+ void
+ pe_metadata(pcmk__output_t *out)
+@@ -333,13 +335,13 @@ pe_metadata(pcmk__output_t *out)
+ void
+ verify_pe_options(GHashTable * options)
+ {
+-    pcmk__validate_cluster_options(options, pe_opts, PCMK__NELEM(pe_opts));
++    pcmk__validate_cluster_options(options);
+ }
+ 
+ const char *
+ pe_pref(GHashTable * options, const char *name)
+ {
+-    return pcmk__cluster_option(options, pe_opts, PCMK__NELEM(pe_opts), name);
++    return pcmk__cluster_option(options, name);
+ }
+ 
+ const char *
+-- 
+2.31.1
+
+From de834cee2c5d8f4f796633e66f263ad77b9cd2eb Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Mon, 8 Jan 2024 03:06:27 -0800
+Subject: [PATCH 13/24] Refactor: various: Drop per-daemon cluster opt tables
+
+Ref T746
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ daemons/controld/controld_control.c | 207 -------------------
+ lib/cib/cib_utils.c                 |  27 ---
+ lib/pengine/common.c                | 297 ----------------------------
+ 3 files changed, 531 deletions(-)
+
+diff --git a/daemons/controld/controld_control.c b/daemons/controld/controld_control.c
+index 4208947..40b90f8 100644
+--- a/daemons/controld/controld_control.c
++++ b/daemons/controld/controld_control.c
+@@ -515,213 +515,6 @@ do_recover(long long action,
+     register_fsa_input(C_FSA_INTERNAL, I_TERMINATE, NULL);
+ }
+ 
+-#if 0
+-static pcmk__cluster_option_t controller_options[] = {
+-    /* name, old name, type, allowed values,
+-     * default value, validator,
+-     * context,
+-     * short description,
+-     * long description
+-     */
+-    {
+-        "dc-version", NULL, "string", NULL, PCMK__VALUE_NONE, NULL,
+-        pcmk__opt_context_controld,
+-        N_("Pacemaker version on cluster node elected Designated Controller (DC)"),
+-        N_("Includes a hash which identifies the exact changeset the code was "
+-            "built from. Used for diagnostic purposes.")
+-    },
+-    {
+-        "cluster-infrastructure", NULL, "string", NULL, "corosync", NULL,
+-        pcmk__opt_context_controld,
+-        N_("The messaging stack on which Pacemaker is currently running"),
+-        N_("Used for informational and diagnostic purposes.")
+-    },
+-    {
+-        "cluster-name", NULL, "string", NULL, NULL, NULL,
+-        pcmk__opt_context_controld,
+-        N_("An arbitrary name for the cluster"),
+-        N_("This optional value is mostly for users' convenience as desired "
+-            "in administration, but may also be used in Pacemaker "
+-            "configuration rules via the #cluster-name node attribute, and "
+-            "by higher-level tools and resource agents.")
+-    },
+-    {
+-        XML_CONFIG_ATTR_DC_DEADTIME, NULL, "time",
+-        NULL, "20s", pcmk__valid_interval_spec,
+-        pcmk__opt_context_controld,
+-        N_("How long to wait for a response from other nodes during start-up"),
+-        N_("The optimal value will depend on the speed and load of your network "
+-            "and the type of switches used.")
+-    },
+-    {
+-        XML_CONFIG_ATTR_RECHECK, NULL, "time",
+-        N_("Zero disables polling, while positive values are an interval in seconds"
+-            "(unless other units are specified, for example \"5min\")"),
+-        "15min", pcmk__valid_interval_spec,
+-        pcmk__opt_context_controld,
+-        N_("Polling interval to recheck cluster state and evaluate rules "
+-            "with date specifications"),
+-        N_("Pacemaker is primarily event-driven, and looks ahead to know when to "
+-            "recheck cluster state for failure timeouts and most time-based "
+-            "rules. However, it will also recheck the cluster after this "
+-            "amount of inactivity, to evaluate rules with date specifications "
+-            "and serve as a fail-safe for certain types of scheduler bugs.")
+-    },
+-    {
+-        "load-threshold", NULL, "percentage", NULL,
+-        "80%", pcmk__valid_percentage,
+-        pcmk__opt_context_controld,
+-        N_("Maximum amount of system load that should be used by cluster nodes"),
+-        N_("The cluster will slow down its recovery process when the amount of "
+-            "system resources used (currently CPU) approaches this limit"),
+-    },
+-    {
+-        "node-action-limit", NULL, "integer", NULL,
+-        "0", pcmk__valid_number,
+-        pcmk__opt_context_controld,
+-        N_("Maximum number of jobs that can be scheduled per node "
+-            "(defaults to 2x cores)")
+-    },
+-    { XML_CONFIG_ATTR_FENCE_REACTION, NULL, "string", NULL, "stop", NULL,
+-        pcmk__opt_context_controld,
+-        N_("How a cluster node should react if notified of its own fencing"),
+-        N_("A cluster node may receive notification of its own fencing if fencing "
+-        "is misconfigured, or if fabric fencing is in use that doesn't cut "
+-        "cluster communication. Allowed values are \"stop\" to attempt to "
+-        "immediately stop Pacemaker and stay stopped, or \"panic\" to attempt "
+-        "to immediately reboot the local node, falling back to stop on failure.")
+-    },
+-    {
+-        XML_CONFIG_ATTR_ELECTION_FAIL, NULL, "time", NULL,
+-        "2min", pcmk__valid_interval_spec,
+-        pcmk__opt_context_controld,
+-        "*** Advanced Use Only ***",
+-        N_("Declare an election failed if it is not decided within this much "
+-            "time. If you need to adjust this value, it probably indicates "
+-            "the presence of a bug.")
+-    },
+-    {
+-        XML_CONFIG_ATTR_FORCE_QUIT, NULL, "time", NULL,
+-        "20min", pcmk__valid_interval_spec,
+-        pcmk__opt_context_controld,
+-        "*** Advanced Use Only ***",
+-        N_("Exit immediately if shutdown does not complete within this much "
+-            "time. If you need to adjust this value, it probably indicates "
+-            "the presence of a bug.")
+-    },
+-    {
+-        "join-integration-timeout", "crmd-integration-timeout", "time", NULL,
+-        "3min", pcmk__valid_interval_spec,
+-        pcmk__opt_context_controld,
+-        "*** Advanced Use Only ***",
+-        N_("If you need to adjust this value, it probably indicates "
+-            "the presence of a bug.")
+-    },
+-    {
+-        "join-finalization-timeout", "crmd-finalization-timeout", "time", NULL,
+-        "30min", pcmk__valid_interval_spec,
+-        pcmk__opt_context_controld,
+-        "*** Advanced Use Only ***",
+-        N_("If you need to adjust this value, it probably indicates "
+-            "the presence of a bug.")
+-    },
+-    {
+-        "transition-delay", "crmd-transition-delay", "time", NULL,
+-        "0s", pcmk__valid_interval_spec,
+-        pcmk__opt_context_controld,
+-        N_("*** Advanced Use Only *** Enabling this option will slow down "
+-            "cluster recovery under all conditions"),
+-        N_("Delay cluster recovery for this much time to allow for additional "
+-            "events to occur. Useful if your configuration is sensitive to "
+-            "the order in which ping updates arrive.")
+-    },
+-    {
+-        /* @COMPAT Currently unparsable values default to -1 (auto-calculate),
+-         * while missing values default to 0 (disable). All values are accepted
+-         * (unless the controller finds that the value conflicts with the
+-         * SBD_WATCHDOG_TIMEOUT).
+-         *
+-         * At a compatibility break: properly validate as a timeout, let
+-         * either negative values or a particular string like "auto" mean auto-
+-         * calculate, and use 0 as the single default for when the option either
+-         * is unset or fails to validate.
+-         */
+-        "stonith-watchdog-timeout", NULL, "time", NULL,
+-        "0", NULL,
+-        pcmk__opt_context_controld,
+-        N_("How long before nodes can be assumed to be safely down when "
+-           "watchdog-based self-fencing via SBD is in use"),
+-        N_("If this is set to a positive value, lost nodes are assumed to "
+-           "self-fence using watchdog-based SBD within this much time. This "
+-           "does not require a fencing resource to be explicitly configured, "
+-           "though a fence_watchdog resource can be configured, to limit use "
+-           "to specific nodes. If this is set to 0 (the default), the cluster "
+-           "will never assume watchdog-based self-fencing. If this is set to a "
+-           "negative value, the cluster will use twice the local value of the "
+-           "`SBD_WATCHDOG_TIMEOUT` environment variable if that is positive, "
+-           "or otherwise treat this as 0. WARNING: When used, this timeout "
+-           "must be larger than `SBD_WATCHDOG_TIMEOUT` on all nodes that use "
+-           "watchdog-based SBD, and Pacemaker will refuse to start on any of "
+-           "those nodes where this is not true for the local value or SBD is "
+-           "not active. When this is set to a negative value, "
+-           "`SBD_WATCHDOG_TIMEOUT` must be set to the same value on all nodes "
+-           "that use SBD, otherwise data corruption or loss could occur.")
+-    },
+-    {
+-        "stonith-max-attempts", NULL, "integer", NULL,
+-        "10", pcmk__valid_positive_number,
+-        pcmk__opt_context_controld,
+-        N_("How many times fencing can fail before it will no longer be "
+-            "immediately re-attempted on a target")
+-    },
+-
+-    // Already documented in libpe_status (other values must be kept identical)
+-    {
+-        "no-quorum-policy", NULL, "select",
+-        "stop, freeze, ignore, demote, suicide", "stop", pcmk__valid_quorum,
+-        pcmk__opt_context_controld,
+-        N_("What to do when the cluster does not have quorum"), NULL
+-    },
+-    {
+-        XML_CONFIG_ATTR_SHUTDOWN_LOCK, NULL, "boolean", NULL,
+-        "false", pcmk__valid_boolean,
+-        pcmk__opt_context_controld,
+-        N_("Whether to lock resources to a cleanly shut down node"),
+-        N_("When true, resources active on a node when it is cleanly shut down "
+-            "are kept \"locked\" to that node (not allowed to run elsewhere) "
+-            "until they start again on that node after it rejoins (or for at "
+-            "most shutdown-lock-limit, if set). Stonith resources and "
+-            "Pacemaker Remote connections are never locked. Clone and bundle "
+-            "instances and the promoted role of promotable clones are "
+-            "currently never locked, though support could be added in a future "
+-            "release.")
+-    },
+-    {
+-        XML_CONFIG_ATTR_SHUTDOWN_LOCK_LIMIT, NULL, "time", NULL,
+-        "0", pcmk__valid_interval_spec,
+-        pcmk__opt_context_controld,
+-        N_("Do not lock resources to a cleanly shut down node longer than "
+-           "this"),
+-        N_("If shutdown-lock is true and this is set to a nonzero time "
+-            "duration, shutdown locks will expire after this much time has "
+-            "passed since the shutdown was initiated, even if the node has not "
+-            "rejoined.")
+-    },
+-    {
+-        XML_CONFIG_ATTR_NODE_PENDING_TIMEOUT, NULL, "time", NULL,
+-        "0", pcmk__valid_interval_spec,
+-        pcmk__opt_context_controld,
+-        N_("How long to wait for a node that has joined the cluster to join "
+-           "the controller process group"),
+-        N_("Fence nodes that do not join the controller process group within "
+-           "this much time after joining the cluster, to allow the cluster "
+-           "to continue managing resources. A value of 0 means never fence " 
+-           "pending nodes. Setting the value to 2h means fence nodes after "
+-           "2 hours.")
+-    },
+-};
+-#endif  // 0
+-
+ void
+ crmd_metadata(void)
+ {
+diff --git a/lib/cib/cib_utils.c b/lib/cib/cib_utils.c
+index 97f62ac..b83158c 100644
+--- a/lib/cib/cib_utils.c
++++ b/lib/cib/cib_utils.c
+@@ -866,33 +866,6 @@ cib_native_notify(gpointer data, gpointer user_data)
+     crm_trace("Callback invoked...");
+ }
+ 
+-#if 0
+-static pcmk__cluster_option_t cib_opts[] = {
+-    /* name, legacy name, type, allowed values,
+-     * default value, validator,
+-     * context,
+-     * short description,
+-     * long description
+-     */
+-    {
+-        "enable-acl", NULL, "boolean", NULL,
+-        "false", pcmk__valid_boolean,
+-        pcmk__opt_context_based,
+-        N_("Enable Access Control Lists (ACLs) for the CIB"),
+-        NULL
+-    },
+-    {
+-        "cluster-ipc-limit", NULL, "integer", NULL,
+-        "500", pcmk__valid_positive_number,
+-        pcmk__opt_context_based,
+-        N_("Maximum IPC message backlog before disconnecting a cluster daemon"),
+-        N_("Raise this if log has \"Evicting client\" messages for cluster daemon"
+-            " PIDs (a good value is the number of resources in the cluster"
+-            " multiplied by the number of nodes).")
+-    },
+-};
+-#endif  // 0
+-
+ void
+ cib_metadata(void)
+ {
+diff --git a/lib/pengine/common.c b/lib/pengine/common.c
+index f99bd1b..e96f0b5 100644
+--- a/lib/pengine/common.c
++++ b/lib/pengine/common.c
+@@ -21,303 +21,6 @@
+ gboolean was_processing_error = FALSE;
+ gboolean was_processing_warning = FALSE;
+ 
+-#if 0
+-static pcmk__cluster_option_t pe_opts[] = {
+-    /* name, old name, type, allowed values,
+-     * default value, validator,
+-     * context,
+-     * short description,
+-     * long description
+-     */
+-    {
+-        "no-quorum-policy", NULL, "select", "stop, freeze, ignore, demote, suicide",
+-        "stop", pcmk__valid_quorum,
+-        pcmk__opt_context_schedulerd,
+-        N_("What to do when the cluster does not have quorum"),
+-        NULL
+-    },
+-    {
+-        "symmetric-cluster", NULL, "boolean", NULL,
+-        "true", pcmk__valid_boolean,
+-        pcmk__opt_context_schedulerd,
+-        N_("Whether resources can run on any node by default"),
+-        NULL
+-    },
+-    {
+-        "maintenance-mode", NULL, "boolean", NULL,
+-        "false", pcmk__valid_boolean,
+-        pcmk__opt_context_schedulerd,
+-        N_("Whether the cluster should refrain from monitoring, starting, "
+-            "and stopping resources"),
+-        NULL
+-    },
+-    {
+-        "start-failure-is-fatal", NULL, "boolean", NULL,
+-        "true", pcmk__valid_boolean,
+-        pcmk__opt_context_schedulerd,
+-        N_("Whether a start failure should prevent a resource from being "
+-            "recovered on the same node"),
+-        N_("When true, the cluster will immediately ban a resource from a node "
+-            "if it fails to start there. When false, the cluster will instead "
+-            "check the resource's fail count against its migration-threshold.")
+-    },
+-    {
+-        "enable-startup-probes", NULL, "boolean", NULL,
+-        "true", pcmk__valid_boolean,
+-        pcmk__opt_context_schedulerd,
+-        N_("Whether the cluster should check for active resources during start-up"),
+-        NULL
+-    },
+-    {
+-        XML_CONFIG_ATTR_SHUTDOWN_LOCK, NULL, "boolean", NULL,
+-        "false", pcmk__valid_boolean,
+-        pcmk__opt_context_schedulerd,
+-        N_("Whether to lock resources to a cleanly shut down node"),
+-        N_("When true, resources active on a node when it is cleanly shut down "
+-            "are kept \"locked\" to that node (not allowed to run elsewhere) "
+-            "until they start again on that node after it rejoins (or for at "
+-            "most shutdown-lock-limit, if set). Stonith resources and "
+-            "Pacemaker Remote connections are never locked. Clone and bundle "
+-            "instances and the promoted role of promotable clones are "
+-            "currently never locked, though support could be added in a future "
+-            "release.")
+-    },
+-    {
+-        XML_CONFIG_ATTR_SHUTDOWN_LOCK_LIMIT, NULL, "time", NULL,
+-        "0", pcmk__valid_interval_spec,
+-        pcmk__opt_context_schedulerd,
+-        N_("Do not lock resources to a cleanly shut down node longer than "
+-           "this"),
+-        N_("If shutdown-lock is true and this is set to a nonzero time "
+-            "duration, shutdown locks will expire after this much time has "
+-            "passed since the shutdown was initiated, even if the node has not "
+-            "rejoined.")
+-    },
+-
+-    // Fencing-related options
+-    {
+-        "stonith-enabled", NULL, "boolean", NULL,
+-        "true", pcmk__valid_boolean,
+-        pcmk__opt_context_schedulerd,
+-        N_("*** Advanced Use Only *** "
+-            "Whether nodes may be fenced as part of recovery"),
+-        N_("If false, unresponsive nodes are immediately assumed to be harmless, "
+-            "and resources that were active on them may be recovered "
+-            "elsewhere. This can result in a \"split-brain\" situation, "
+-            "potentially leading to data loss and/or service unavailability.")
+-    },
+-    {
+-        "stonith-action", NULL, "select", "reboot, off, poweroff",
+-        PCMK_ACTION_REBOOT, pcmk__is_fencing_action,
+-        pcmk__opt_context_schedulerd,
+-        N_("Action to send to fence device when a node needs to be fenced "
+-            "(\"poweroff\" is a deprecated alias for \"off\")"),
+-        NULL
+-    },
+-    {
+-        "stonith-timeout", NULL, "time", NULL,
+-        "60s", pcmk__valid_interval_spec,
+-        pcmk__opt_context_schedulerd,
+-        N_("*** Advanced Use Only *** Unused by Pacemaker"),
+-        N_("This value is not used by Pacemaker, but is kept for backward "
+-            "compatibility, and certain legacy fence agents might use it.")
+-    },
+-    {
+-        XML_ATTR_HAVE_WATCHDOG, NULL, "boolean", NULL,
+-        "false", pcmk__valid_boolean,
+-        pcmk__opt_context_schedulerd,
+-        N_("Whether watchdog integration is enabled"),
+-        N_("This is set automatically by the cluster according to whether SBD "
+-            "is detected to be in use. User-configured values are ignored. "
+-            "The value `true` is meaningful if diskless SBD is used and "
+-            "`stonith-watchdog-timeout` is nonzero. In that case, if fencing "
+-            "is required, watchdog-based self-fencing will be performed via "
+-            "SBD without requiring a fencing resource explicitly configured.")
+-    },
+-    {
+-        "concurrent-fencing", NULL, "boolean", NULL,
+-        PCMK__CONCURRENT_FENCING_DEFAULT, pcmk__valid_boolean,
+-        pcmk__opt_context_schedulerd,
+-        N_("Allow performing fencing operations in parallel"),
+-        NULL
+-    },
+-    {
+-        "startup-fencing", NULL, "boolean", NULL,
+-        "true", pcmk__valid_boolean,
+-        pcmk__opt_context_schedulerd,
+-        N_("*** Advanced Use Only *** Whether to fence unseen nodes at start-up"),
+-        N_("Setting this to false may lead to a \"split-brain\" situation,"
+-            "potentially leading to data loss and/or service unavailability.")
+-    },
+-    {
+-        XML_CONFIG_ATTR_PRIORITY_FENCING_DELAY, NULL, "time", NULL,
+-        "0", pcmk__valid_interval_spec,
+-        pcmk__opt_context_schedulerd,
+-        N_("Apply fencing delay targeting the lost nodes with the highest total resource priority"),
+-        N_("Apply specified delay for the fencings that are targeting the lost "
+-            "nodes with the highest total resource priority in case we don't "
+-            "have the majority of the nodes in our cluster partition, so that "
+-            "the more significant nodes potentially win any fencing match, "
+-            "which is especially meaningful under split-brain of 2-node "
+-            "cluster. A promoted resource instance takes the base priority + 1 "
+-            "on calculation if the base priority is not 0. Any static/random "
+-            "delays that are introduced by `pcmk_delay_base/max` configured "
+-            "for the corresponding fencing resources will be added to this "
+-            "delay. This delay should be significantly greater than, safely "
+-            "twice, the maximum `pcmk_delay_base/max`. By default, priority "
+-            "fencing delay is disabled.")
+-    },
+-    {
+-        XML_CONFIG_ATTR_NODE_PENDING_TIMEOUT, NULL, "time", NULL,
+-        "0", pcmk__valid_interval_spec,
+-        pcmk__opt_context_schedulerd,
+-        N_("How long to wait for a node that has joined the cluster to join "
+-           "the controller process group"),
+-        N_("Fence nodes that do not join the controller process group within "
+-           "this much time after joining the cluster, to allow the cluster "
+-           "to continue managing resources. A value of 0 means never fence "
+-           "pending nodes. Setting the value to 2h means fence nodes after "
+-           "2 hours.")
+-    },
+-    {
+-        "cluster-delay", NULL, "time", NULL,
+-        "60s", pcmk__valid_interval_spec,
+-        pcmk__opt_context_schedulerd,
+-        N_("Maximum time for node-to-node communication"),
+-        N_("The node elected Designated Controller (DC) will consider an action "
+-            "failed if it does not get a response from the node executing the "
+-            "action within this time (after considering the action's own "
+-            "timeout). The \"correct\" value will depend on the speed and "
+-            "load of your network and cluster nodes.")
+-    },
+-    {
+-        "batch-limit", NULL, "integer", NULL,
+-        "0", pcmk__valid_number,
+-        pcmk__opt_context_schedulerd,
+-        N_("Maximum number of jobs that the cluster may execute in parallel "
+-            "across all nodes"),
+-        N_("The \"correct\" value will depend on the speed and load of your "
+-            "network and cluster nodes. If set to 0, the cluster will "
+-            "impose a dynamically calculated limit when any node has a "
+-            "high load.")
+-    },
+-    {
+-        "migration-limit", NULL, "integer", NULL,
+-        "-1", pcmk__valid_number,
+-        pcmk__opt_context_schedulerd,
+-        N_("The number of live migration actions that the cluster is allowed "
+-            "to execute in parallel on a node (-1 means no limit)")
+-    },
+-
+-    /* Orphans and stopping */
+-    {
+-        "stop-all-resources", NULL, "boolean", NULL,
+-        "false", pcmk__valid_boolean,
+-        pcmk__opt_context_schedulerd,
+-        N_("Whether the cluster should stop all active resources"),
+-        NULL
+-    },
+-    {
+-        "stop-orphan-resources", NULL, "boolean", NULL,
+-        "true", pcmk__valid_boolean,
+-        pcmk__opt_context_schedulerd,
+-        N_("Whether to stop resources that were removed from the configuration"),
+-        NULL
+-    },
+-    {
+-        "stop-orphan-actions", NULL, "boolean", NULL,
+-        "true", pcmk__valid_boolean,
+-        pcmk__opt_context_schedulerd,
+-        N_("Whether to cancel recurring actions removed from the configuration"),
+-        NULL
+-    },
+-    {
+-        "remove-after-stop", NULL, "boolean", NULL,
+-        "false", pcmk__valid_boolean,
+-        pcmk__opt_context_schedulerd,
+-        N_("*** Deprecated *** Whether to remove stopped resources from "
+-            "the executor"),
+-        N_("Values other than default are poorly tested and potentially dangerous."
+-            " This option will be removed in a future release.")
+-    },
+-
+-    /* Storing inputs */
+-    {
+-        "pe-error-series-max", NULL, "integer", NULL,
+-        "-1", pcmk__valid_number,
+-        pcmk__opt_context_schedulerd,
+-        N_("The number of scheduler inputs resulting in errors to save"),
+-        N_("Zero to disable, -1 to store unlimited.")
+-    },
+-    {
+-        "pe-warn-series-max",  NULL, "integer", NULL,
+-        "5000", pcmk__valid_number,
+-        pcmk__opt_context_schedulerd,
+-        N_("The number of scheduler inputs resulting in warnings to save"),
+-        N_("Zero to disable, -1 to store unlimited.")
+-    },
+-    {
+-        "pe-input-series-max", NULL, "integer", NULL,
+-        "4000", pcmk__valid_number,
+-        pcmk__opt_context_schedulerd,
+-        N_("The number of scheduler inputs without errors or warnings to save"),
+-        N_("Zero to disable, -1 to store unlimited.")
+-    },
+-
+-    /* Node health */
+-    {
+-        PCMK__OPT_NODE_HEALTH_STRATEGY, NULL, "select",
+-        PCMK__VALUE_NONE ", " PCMK__VALUE_MIGRATE_ON_RED ", "
+-            PCMK__VALUE_ONLY_GREEN ", " PCMK__VALUE_PROGRESSIVE ", "
+-            PCMK__VALUE_CUSTOM,
+-        PCMK__VALUE_NONE, pcmk__validate_health_strategy,
+-        pcmk__opt_context_schedulerd,
+-        N_("How cluster should react to node health attributes"),
+-        N_("Requires external entities to create node attributes (named with "
+-            "the prefix \"#health\") with values \"red\", "
+-            "\"yellow\", or \"green\".")
+-    },
+-    {
+-        PCMK__OPT_NODE_HEALTH_BASE, NULL, "integer", NULL,
+-        "0", pcmk__valid_number,
+-        pcmk__opt_context_schedulerd,
+-        N_("Base health score assigned to a node"),
+-        N_("Only used when \"node-health-strategy\" is set to \"progressive\".")
+-    },
+-    {
+-        PCMK__OPT_NODE_HEALTH_GREEN, NULL, "integer", NULL,
+-        "0", pcmk__valid_number,
+-        pcmk__opt_context_schedulerd,
+-        N_("The score to use for a node health attribute whose value is \"green\""),
+-        N_("Only used when \"node-health-strategy\" is set to \"custom\" or \"progressive\".")
+-    },
+-    {
+-        PCMK__OPT_NODE_HEALTH_YELLOW, NULL, "integer", NULL,
+-        "0", pcmk__valid_number,
+-        pcmk__opt_context_schedulerd,
+-        N_("The score to use for a node health attribute whose value is \"yellow\""),
+-        N_("Only used when \"node-health-strategy\" is set to \"custom\" or \"progressive\".")
+-    },
+-    {
+-        PCMK__OPT_NODE_HEALTH_RED, NULL, "integer", NULL,
+-        "-INFINITY", pcmk__valid_number,
+-        pcmk__opt_context_schedulerd,
+-        N_("The score to use for a node health attribute whose value is \"red\""),
+-        N_("Only used when \"node-health-strategy\" is set to \"custom\" or \"progressive\".")
+-    },
+-
+-    /*Placement Strategy*/
+-    {
+-        "placement-strategy", NULL, "select",
+-        "default, utilization, minimal, balanced",
+-        "default", pcmk__valid_placement_strategy,
+-        pcmk__opt_context_schedulerd,
+-        N_("How the cluster should allocate resources to nodes"),
+-        NULL
+-    },
+-};
+-#endif  // 0
+-
+ void
+ pe_metadata(pcmk__output_t *out)
+ {
+-- 
+2.31.1
+
+From 9a8bb049fcb49204932e96014c3a63e58fd95d23 Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Mon, 8 Jan 2024 20:36:34 -0800
+Subject: [PATCH 14/24] Refactor: libpe_status: Drop verify_pe_opts()
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ include/crm/pengine/internal.h | 1 -
+ lib/pengine/common.c           | 6 ------
+ lib/pengine/unpack.c           | 2 +-
+ 3 files changed, 1 insertion(+), 8 deletions(-)
+
+diff --git a/include/crm/pengine/internal.h b/include/crm/pengine/internal.h
+index 9c8068f..5835ef8 100644
+--- a/include/crm/pengine/internal.h
++++ b/include/crm/pengine/internal.h
+@@ -209,7 +209,6 @@ pcmk_node_t *native_location(const pcmk_resource_t *rsc, GList **list,
+                              int current);
+ 
+ void pe_metadata(pcmk__output_t *out);
+-void verify_pe_options(GHashTable * options);
+ 
+ void native_add_running(pcmk_resource_t *rsc, pcmk_node_t *node,
+                         pcmk_scheduler_t *scheduler, gboolean failed);
+diff --git a/lib/pengine/common.c b/lib/pengine/common.c
+index e96f0b5..402fae9 100644
+--- a/lib/pengine/common.c
++++ b/lib/pengine/common.c
+@@ -35,12 +35,6 @@ pe_metadata(pcmk__output_t *out)
+     g_free(s);
+ }
+ 
+-void
+-verify_pe_options(GHashTable * options)
+-{
+-    pcmk__validate_cluster_options(options);
+-}
+-
+ const char *
+ pe_pref(GHashTable * options, const char *name)
+ {
+diff --git a/lib/pengine/unpack.c b/lib/pengine/unpack.c
+index 3429d56..2a9b563 100644
+--- a/lib/pengine/unpack.c
++++ b/lib/pengine/unpack.c
+@@ -228,7 +228,7 @@ unpack_config(xmlNode *config, pcmk_scheduler_t *scheduler)
+     pe__unpack_dataset_nvpairs(config, XML_CIB_TAG_PROPSET, &rule_data, config_hash,
+                                CIB_OPTIONS_FIRST, FALSE, scheduler);
+ 
+-    verify_pe_options(scheduler->config_hash);
++    pcmk__validate_cluster_options(config_hash);
+ 
+     set_config_flag(scheduler, "enable-startup-probes",
+                     pcmk_sched_probe_resources);
+-- 
+2.31.1
+
+From af79c50b7a5626218bf2a9b34fe631f07b1e2bda Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Mon, 8 Jan 2024 08:40:13 -0800
+Subject: [PATCH 15/24] Refactor: libpe_status: Drop pe_pref() internally
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ daemons/schedulerd/schedulerd_messages.c |  3 ++-
+ include/crm/pengine/internal.h           | 10 +++++++---
+ lib/pacemaker/pcmk_graph_producer.c      |  9 +++++----
+ lib/pacemaker/pcmk_sched_nodes.c         |  5 +++--
+ lib/pengine/unpack.c                     |  4 +++-
+ tools/crm_resource_print.c               |  4 ++--
+ 6 files changed, 22 insertions(+), 13 deletions(-)
+
+diff --git a/daemons/schedulerd/schedulerd_messages.c b/daemons/schedulerd/schedulerd_messages.c
+index 5a97365..ff31fce 100644
+--- a/daemons/schedulerd/schedulerd_messages.c
++++ b/daemons/schedulerd/schedulerd_messages.c
+@@ -112,7 +112,8 @@ handle_pecalc_request(pcmk__request_t *request)
+         series_id = 2;
+     }
+ 
+-    value = pe_pref(scheduler->config_hash, series[series_id].param);
++    value = pcmk__cluster_option(scheduler->config_hash,
++                                 series[series_id].param);
+     if ((value == NULL)
+         || (pcmk__scan_min_int(value, &series_wrap, -1) != pcmk_rc_ok)) {
+         series_wrap = series[series_id].wrap;
+diff --git a/include/crm/pengine/internal.h b/include/crm/pengine/internal.h
+index 5835ef8..2b7f2eb 100644
+--- a/include/crm/pengine/internal.h
++++ b/include/crm/pengine/internal.h
+@@ -620,14 +620,18 @@ int pe__node_health(pcmk_node_t *node);
+ static inline enum pcmk__health_strategy
+ pe__health_strategy(pcmk_scheduler_t *scheduler)
+ {
+-    return pcmk__parse_health_strategy(pe_pref(scheduler->config_hash,
+-                                               PCMK__OPT_NODE_HEALTH_STRATEGY));
++    const char *strategy = pcmk__cluster_option(scheduler->config_hash,
++                                                PCMK__OPT_NODE_HEALTH_STRATEGY);
++
++    return pcmk__parse_health_strategy(strategy);
+ }
+ 
+ static inline int
+ pe__health_score(const char *option, pcmk_scheduler_t *scheduler)
+ {
+-    return char2score(pe_pref(scheduler->config_hash, option));
++    const char *value = pcmk__cluster_option(scheduler->config_hash, option);
++
++    return char2score(value);
+ }
+ 
+ /*!
+diff --git a/lib/pacemaker/pcmk_graph_producer.c b/lib/pacemaker/pcmk_graph_producer.c
+index 59b6176..3006775 100644
+--- a/lib/pacemaker/pcmk_graph_producer.c
++++ b/lib/pacemaker/pcmk_graph_producer.c
+@@ -1004,16 +1004,17 @@ pcmk__create_graph(pcmk_scheduler_t *scheduler)
+     GList *iter = NULL;
+     const char *value = NULL;
+     long long limit = 0LL;
++    GHashTable *config_hash = scheduler->config_hash;
+ 
+     transition_id++;
+     crm_trace("Creating transition graph %d", transition_id);
+ 
+     scheduler->graph = create_xml_node(NULL, XML_TAG_GRAPH);
+ 
+-    value = pe_pref(scheduler->config_hash, "cluster-delay");
++    value = pcmk__cluster_option(config_hash, "cluster-delay");
+     crm_xml_add(scheduler->graph, "cluster-delay", value);
+ 
+-    value = pe_pref(scheduler->config_hash, "stonith-timeout");
++    value = pcmk__cluster_option(config_hash, "stonith-timeout");
+     crm_xml_add(scheduler->graph, "stonith-timeout", value);
+ 
+     crm_xml_add(scheduler->graph, "failed-stop-offset", "INFINITY");
+@@ -1024,12 +1025,12 @@ pcmk__create_graph(pcmk_scheduler_t *scheduler)
+         crm_xml_add(scheduler->graph, "failed-start-offset", "1");
+     }
+ 
+-    value = pe_pref(scheduler->config_hash, "batch-limit");
++    value = pcmk__cluster_option(config_hash, "batch-limit");
+     crm_xml_add(scheduler->graph, "batch-limit", value);
+ 
+     crm_xml_add_int(scheduler->graph, "transition_id", transition_id);
+ 
+-    value = pe_pref(scheduler->config_hash, "migration-limit");
++    value = pcmk__cluster_option(config_hash, "migration-limit");
+     if ((pcmk__scan_ll(value, &limit, 0LL) == pcmk_rc_ok) && (limit > 0)) {
+         crm_xml_add(scheduler->graph, "migration-limit", value);
+     }
+diff --git a/lib/pacemaker/pcmk_sched_nodes.c b/lib/pacemaker/pcmk_sched_nodes.c
+index 9cf5545..03baa2c 100644
+--- a/lib/pacemaker/pcmk_sched_nodes.c
++++ b/lib/pacemaker/pcmk_sched_nodes.c
+@@ -360,8 +360,9 @@ pcmk__apply_node_health(pcmk_scheduler_t *scheduler)
+ {
+     int base_health = 0;
+     enum pcmk__health_strategy strategy;
+-    const char *strategy_str = pe_pref(scheduler->config_hash,
+-                                       PCMK__OPT_NODE_HEALTH_STRATEGY);
++    const char *strategy_str =
++        pcmk__cluster_option(scheduler->config_hash,
++                             PCMK__OPT_NODE_HEALTH_STRATEGY);
+ 
+     strategy = pcmk__parse_health_strategy(strategy_str);
+     if (strategy == pcmk__health_strategy_none) {
+diff --git a/lib/pengine/unpack.c b/lib/pengine/unpack.c
+index 2a9b563..49443c6 100644
+--- a/lib/pengine/unpack.c
++++ b/lib/pengine/unpack.c
+@@ -50,7 +50,9 @@ struct action_history {
+  * flag is stringified more readably in log messages.
+  */
+ #define set_config_flag(scheduler, option, flag) do {                         \
+-        const char *scf_value = pe_pref((scheduler)->config_hash, (option));  \
++        GHashTable *config_hash = (scheduler)->config_hash;                   \
++        const char *scf_value = pcmk__cluster_option(config_hash, (option));  \
++                                                                              \
+         if (scf_value != NULL) {                                              \
+             if (crm_is_true(scf_value)) {                                     \
+                 (scheduler)->flags = pcmk__set_flags_as(__func__, __LINE__,   \
+diff --git a/tools/crm_resource_print.c b/tools/crm_resource_print.c
+index bdf3ad9..26761dd 100644
+--- a/tools/crm_resource_print.c
++++ b/tools/crm_resource_print.c
+@@ -479,8 +479,8 @@ resource_check_list_default(pcmk__output_t *out, va_list args) {
+                        "'%s' cannot run on unhealthy nodes due to "
+                        PCMK__OPT_NODE_HEALTH_STRATEGY "='%s'",
+                        parent->id,
+-                       pe_pref(checks->rsc->cluster->config_hash,
+-                               PCMK__OPT_NODE_HEALTH_STRATEGY));
++                       pcmk__cluster_option(checks->rsc->cluster->config_hash,
++                                            PCMK__OPT_NODE_HEALTH_STRATEGY));
+     }
+ 
+     out->end_list(out);
+-- 
+2.31.1
+
+From 1e78e617965b1a2e1a5671aa15943ba42487b09a Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Mon, 8 Jan 2024 08:43:55 -0800
+Subject: [PATCH 16/24] API: libpe_status: Deprecate pe_pref()
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ include/crm/pengine/common.h        |  4 +---
+ include/crm/pengine/common_compat.h |  5 ++++-
+ lib/pengine/common.c                | 20 ++++++++++++++------
+ lib/pengine/unpack.c                | 28 ++++++++++++++--------------
+ 4 files changed, 33 insertions(+), 24 deletions(-)
+
+diff --git a/include/crm/pengine/common.h b/include/crm/pengine/common.h
+index 2feac8a..a935aa7 100644
+--- a/include/crm/pengine/common.h
++++ b/include/crm/pengine/common.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2004-2023 the Pacemaker project contributors
++ * Copyright 2004-2024 the Pacemaker project contributors
+  *
+  * The version control history for this file may have further details.
+  *
+@@ -28,8 +28,6 @@ enum rsc_role_e text2role(const char *role);
+ const char *role2text(enum rsc_role_e role);
+ const char *fail2text(enum action_fail_response fail);
+ 
+-const char *pe_pref(GHashTable * options, const char *name);
+-
+ /*!
+  * \brief Get readable description of a recovery type
+  *
+diff --git a/include/crm/pengine/common_compat.h b/include/crm/pengine/common_compat.h
+index 4330ccf..52e11f7 100644
+--- a/include/crm/pengine/common_compat.h
++++ b/include/crm/pengine/common_compat.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2004-2023 the Pacemaker project contributors
++ * Copyright 2004-2024 the Pacemaker project contributors
+  *
+  * The version control history for this file may have further details.
+  *
+@@ -54,6 +54,9 @@ extern "C" {
+ 
+ //! \deprecated Do not use
+ #define RSC_ROLE_MASTER_S               RSC_ROLE_PROMOTED_LEGACY_S
++ 
++//! \deprecated Do not use
++const char *pe_pref(GHashTable * options, const char *name);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/lib/pengine/common.c b/lib/pengine/common.c
+index 402fae9..0a4dfe6 100644
+--- a/lib/pengine/common.c
++++ b/lib/pengine/common.c
+@@ -35,12 +35,6 @@ pe_metadata(pcmk__output_t *out)
+     g_free(s);
+ }
+ 
+-const char *
+-pe_pref(GHashTable * options, const char *name)
+-{
+-    return pcmk__cluster_option(options, name);
+-}
+-
+ const char *
+ fail2text(enum action_fail_response fail)
+ {
+@@ -350,3 +344,17 @@ pe_node_attribute_raw(const pcmk_node_t *node, const char *name)
+     }
+     return g_hash_table_lookup(node->details->attrs, name);
+ }
++ 
++// Deprecated functions kept only for backward API compatibility
++// LCOV_EXCL_START
++
++#include <crm/pengine/common_compat.h>
++
++const char *
++pe_pref(GHashTable * options, const char *name)
++{
++    return pcmk__cluster_option(options, name);
++}
++
++// LCOV_EXCL_STOP
++// End deprecated API
+diff --git a/lib/pengine/unpack.c b/lib/pengine/unpack.c
+index 49443c6..d484e93 100644
+--- a/lib/pengine/unpack.c
++++ b/lib/pengine/unpack.c
+@@ -238,7 +238,7 @@ unpack_config(xmlNode *config, pcmk_scheduler_t *scheduler)
+         crm_info("Startup probes: disabled (dangerous)");
+     }
+ 
+-    value = pe_pref(scheduler->config_hash, XML_ATTR_HAVE_WATCHDOG);
++    value = pcmk__cluster_option(config_hash, XML_ATTR_HAVE_WATCHDOG);
+     if (value && crm_is_true(value)) {
+         crm_info("Watchdog-based self-fencing will be performed via SBD if "
+                  "fencing is required and stonith-watchdog-timeout is nonzero");
+@@ -251,7 +251,7 @@ unpack_config(xmlNode *config, pcmk_scheduler_t *scheduler)
+     set_if_xpath(pcmk_sched_enable_unfencing, XPATH_ENABLE_UNFENCING,
+                  scheduler);
+ 
+-    value = pe_pref(scheduler->config_hash, "stonith-timeout");
++    value = pcmk__cluster_option(config_hash, "stonith-timeout");
+     scheduler->stonith_timeout = (int) crm_parse_interval_spec(value);
+     crm_debug("STONITH timeout: %d", scheduler->stonith_timeout);
+ 
+@@ -262,8 +262,8 @@ unpack_config(xmlNode *config, pcmk_scheduler_t *scheduler)
+         crm_debug("STONITH of failed nodes is disabled");
+     }
+ 
+-    scheduler->stonith_action = pe_pref(scheduler->config_hash,
+-                                        "stonith-action");
++    scheduler->stonith_action = pcmk__cluster_option(config_hash,
++                                                     "stonith-action");
+     if (!strcmp(scheduler->stonith_action, "poweroff")) {
+         pe_warn_once(pcmk__wo_poweroff,
+                      "Support for stonith-action of 'poweroff' is deprecated "
+@@ -280,8 +280,8 @@ unpack_config(xmlNode *config, pcmk_scheduler_t *scheduler)
+         crm_debug("Concurrent fencing is disabled");
+     }
+ 
+-    value = pe_pref(scheduler->config_hash,
+-                    XML_CONFIG_ATTR_PRIORITY_FENCING_DELAY);
++    value = pcmk__cluster_option(config_hash,
++                                 XML_CONFIG_ATTR_PRIORITY_FENCING_DELAY);
+     if (value) {
+         scheduler->priority_fencing_delay = crm_parse_interval_spec(value)
+                                             / 1000;
+@@ -299,7 +299,7 @@ unpack_config(xmlNode *config, pcmk_scheduler_t *scheduler)
+         crm_debug("Cluster is symmetric" " - resources can run anywhere by default");
+     }
+ 
+-    value = pe_pref(scheduler->config_hash, "no-quorum-policy");
++    value = pcmk__cluster_option(config_hash, "no-quorum-policy");
+ 
+     if (pcmk__str_eq(value, "ignore", pcmk__str_casei)) {
+         scheduler->no_quorum_policy = pcmk_no_quorum_ignore;
+@@ -367,7 +367,7 @@ unpack_config(xmlNode *config, pcmk_scheduler_t *scheduler)
+         crm_trace("Orphan resource actions are ignored");
+     }
+ 
+-    value = pe_pref(scheduler->config_hash, "remove-after-stop");
++    value = pcmk__cluster_option(config_hash, "remove-after-stop");
+     if (value != NULL) {
+         if (crm_is_true(value)) {
+             pe__set_working_set_flags(scheduler, pcmk_sched_remove_after_stop);
+@@ -407,14 +407,14 @@ unpack_config(xmlNode *config, pcmk_scheduler_t *scheduler)
+ 
+     pe__unpack_node_health_scores(scheduler);
+ 
+-    scheduler->placement_strategy = pe_pref(scheduler->config_hash,
+-                                            "placement-strategy");
++    scheduler->placement_strategy =
++        pcmk__cluster_option(config_hash, "placement-strategy");
+     crm_trace("Placement strategy: %s", scheduler->placement_strategy);
+ 
+     set_config_flag(scheduler, "shutdown-lock", pcmk_sched_shutdown_lock);
+     if (pcmk_is_set(scheduler->flags, pcmk_sched_shutdown_lock)) {
+-        value = pe_pref(scheduler->config_hash,
+-                        XML_CONFIG_ATTR_SHUTDOWN_LOCK_LIMIT);
++        value = pcmk__cluster_option(config_hash,
++                                     XML_CONFIG_ATTR_SHUTDOWN_LOCK_LIMIT);
+         scheduler->shutdown_lock = crm_parse_interval_spec(value) / 1000;
+         crm_trace("Resources will be locked to nodes that were cleanly "
+                   "shut down (locks expire after %s)",
+@@ -424,8 +424,8 @@ unpack_config(xmlNode *config, pcmk_scheduler_t *scheduler)
+                   "shut down");
+     }
+ 
+-    value = pe_pref(scheduler->config_hash,
+-                    XML_CONFIG_ATTR_NODE_PENDING_TIMEOUT);
++    value = pcmk__cluster_option(config_hash,
++                                 XML_CONFIG_ATTR_NODE_PENDING_TIMEOUT);
+     scheduler->node_pending_timeout = crm_parse_interval_spec(value) / 1000;
+     if (scheduler->node_pending_timeout == 0) {
+         crm_trace("Do not fence pending nodes");
+-- 
+2.31.1
+
+From 866877401075e7ea4c3bc278e69ed94ea3a7af99 Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Mon, 8 Jan 2024 20:32:36 -0800
+Subject: [PATCH 17/24] Refactor: libpe_status, scheduler: Drop pe_metadata()
+
+Replace with static scheduler_metadata() in the scheduler since we don't
+rely on a static options array in lib/pengine/common.c anymore.
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ daemons/schedulerd/pacemaker-schedulerd.c | 18 ++++++++++++++++--
+ include/crm/pengine/internal.h            |  2 --
+ lib/pengine/common.c                      | 14 --------------
+ 3 files changed, 16 insertions(+), 18 deletions(-)
+
+diff --git a/daemons/schedulerd/pacemaker-schedulerd.c b/daemons/schedulerd/pacemaker-schedulerd.c
+index 3f2a3e8..27c96da 100644
+--- a/daemons/schedulerd/pacemaker-schedulerd.c
++++ b/daemons/schedulerd/pacemaker-schedulerd.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2004-2023 the Pacemaker project contributors
++ * Copyright 2004-2024 the Pacemaker project contributors
+  *
+  * The version control history for this file may have further details.
+  *
+@@ -46,6 +46,20 @@ pcmk__supported_format_t formats[] = {
+ 
+ void pengine_shutdown(int nsig);
+ 
++static void
++scheduler_metadata(pcmk__output_t *out)
++{
++    const char *name = "pacemaker-schedulerd";
++    const char *desc_short = "Pacemaker scheduler options";
++    const char *desc_long = "Cluster options used by Pacemaker's scheduler";
++
++    gchar *s = pcmk__cluster_option_metadata(name, desc_short, desc_long,
++                                             pcmk__opt_context_schedulerd);
++
++    out->output_xml(out, "metadata", s);
++    g_free(s);
++}
++
+ static GOptionContext *
+ build_arg_context(pcmk__common_args_t *args, GOptionGroup **group) {
+     GOptionContext *context = NULL;
+@@ -98,7 +112,7 @@ main(int argc, char **argv)
+     if (options.remainder) {
+         if (g_strv_length(options.remainder) == 1 &&
+             pcmk__str_eq("metadata", options.remainder[0], pcmk__str_casei)) {
+-            pe_metadata(out);
++            scheduler_metadata(out);
+             goto done;
+         } else {
+             exit_code = CRM_EX_USAGE;
+diff --git a/include/crm/pengine/internal.h b/include/crm/pengine/internal.h
+index 2b7f2eb..5965c1a 100644
+--- a/include/crm/pengine/internal.h
++++ b/include/crm/pengine/internal.h
+@@ -208,8 +208,6 @@ char *native_parameter(pcmk_resource_t *rsc, pcmk_node_t *node, gboolean create,
+ pcmk_node_t *native_location(const pcmk_resource_t *rsc, GList **list,
+                              int current);
+ 
+-void pe_metadata(pcmk__output_t *out);
+-
+ void native_add_running(pcmk_resource_t *rsc, pcmk_node_t *node,
+                         pcmk_scheduler_t *scheduler, gboolean failed);
+ 
+diff --git a/lib/pengine/common.c b/lib/pengine/common.c
+index 0a4dfe6..6551d10 100644
+--- a/lib/pengine/common.c
++++ b/lib/pengine/common.c
+@@ -21,20 +21,6 @@
+ gboolean was_processing_error = FALSE;
+ gboolean was_processing_warning = FALSE;
+ 
+-void
+-pe_metadata(pcmk__output_t *out)
+-{
+-    const char *name = "pacemaker-schedulerd";
+-    const char *desc_short = "Pacemaker scheduler options";
+-    const char *desc_long = "Cluster options used by Pacemaker's scheduler";
+-
+-    gchar *s = pcmk__cluster_option_metadata(name, desc_short, desc_long,
+-                                             pcmk__opt_context_schedulerd);
+-
+-    out->output_xml(out, "metadata", s);
+-    g_free(s);
+-}
+-
+ const char *
+ fail2text(enum action_fail_response fail)
+ {
+-- 
+2.31.1
+
+From 700c906d621887f257c73ddfd7c82c773cb32c8e Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Mon, 8 Jan 2024 20:40:18 -0800
+Subject: [PATCH 18/24] Refactor: libcib: Drop verify_cib_options()
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ lib/cib/cib_utils.c | 8 +-------
+ 1 file changed, 1 insertion(+), 7 deletions(-)
+
+diff --git a/lib/cib/cib_utils.c b/lib/cib/cib_utils.c
+index b83158c..227a50f 100644
+--- a/lib/cib/cib_utils.c
++++ b/lib/cib/cib_utils.c
+@@ -881,12 +881,6 @@ cib_metadata(void)
+     g_free(s);
+ }
+ 
+-static void
+-verify_cib_options(GHashTable *options)
+-{
+-    pcmk__validate_cluster_options(options);
+-}
+-
+ const char *
+ cib_pref(GHashTable * options, const char *name)
+ {
+@@ -913,7 +907,7 @@ cib_read_config(GHashTable * options, xmlNode * current_cib)
+                           options, CIB_OPTIONS_FIRST, TRUE, now, NULL);
+     }
+ 
+-    verify_cib_options(options);
++    pcmk__validate_cluster_options(options);
+ 
+     crm_time_free(now);
+ 
+-- 
+2.31.1
+
+From 6284a3a79b88fd20630bfbfe866a4c2c3686a246 Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Mon, 8 Jan 2024 20:24:19 -0800
+Subject: [PATCH 19/24] Refactor: libcib: Drop cib_pref() internally
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ lib/cib/cib_utils.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/lib/cib/cib_utils.c b/lib/cib/cib_utils.c
+index 227a50f..5b241ae 100644
+--- a/lib/cib/cib_utils.c
++++ b/lib/cib/cib_utils.c
+@@ -281,7 +281,7 @@ cib_acl_enabled(xmlNode *xml, const char *user)
+         GHashTable *options = pcmk__strkey_table(free, free);
+ 
+         cib_read_config(options, xml);
+-        value = cib_pref(options, "enable-acl");
++        value = pcmk__cluster_option(options, "enable-acl");
+         rc = crm_is_true(value);
+         g_hash_table_destroy(options);
+     }
+-- 
+2.31.1
+
+From 1806822590b0060079b94b7d2867722ef2430bf9 Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Mon, 8 Jan 2024 20:26:29 -0800
+Subject: [PATCH 20/24] API: libcib: Deprecate cib_pref()
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ include/crm/cib/util.h        |  1 -
+ include/crm/cib/util_compat.h |  3 +++
+ lib/cib/cib_utils.c           | 12 ++++++------
+ 3 files changed, 9 insertions(+), 7 deletions(-)
+
+diff --git a/include/crm/cib/util.h b/include/crm/cib/util.h
+index 18726bb..47894cb 100644
+--- a/include/crm/cib/util.h
++++ b/include/crm/cib/util.h
+@@ -57,7 +57,6 @@ int set_standby(cib_t * the_cib, const char *uuid, const char *scope, const char
+ xmlNode *cib_get_generation(cib_t * cib);
+ 
+ void cib_metadata(void);
+-const char *cib_pref(GHashTable * options, const char *name);
+ 
+ int cib_apply_patch_event(xmlNode *event, xmlNode *input, xmlNode **output,
+                           int level);
+diff --git a/include/crm/cib/util_compat.h b/include/crm/cib/util_compat.h
+index 20f1e2d..d6ccd4d 100644
+--- a/include/crm/cib/util_compat.h
++++ b/include/crm/cib/util_compat.h
+@@ -33,6 +33,9 @@ const char *get_object_parent(const char *object_type);
+ //! \deprecated Use pcmk_cib_xpath_for() instead
+ xmlNode *get_object_root(const char *object_type, xmlNode *the_root);
+ 
++//! \deprecated Do not use
++const char *cib_pref(GHashTable * options, const char *name);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/lib/cib/cib_utils.c b/lib/cib/cib_utils.c
+index 5b241ae..f9c463e 100644
+--- a/lib/cib/cib_utils.c
++++ b/lib/cib/cib_utils.c
+@@ -881,12 +881,6 @@ cib_metadata(void)
+     g_free(s);
+ }
+ 
+-const char *
+-cib_pref(GHashTable * options, const char *name)
+-{
+-    return pcmk__cluster_option(options, name);
+-}
+-
+ gboolean
+ cib_read_config(GHashTable * options, xmlNode * current_cib)
+ {
+@@ -1085,5 +1079,11 @@ get_object_root(const char *object_type, xmlNode *the_root)
+     return pcmk_find_cib_element(the_root, object_type);
+ }
+ 
++const char *
++cib_pref(GHashTable * options, const char *name)
++{
++    return pcmk__cluster_option(options, name);
++}
++
+ // LCOV_EXCL_STOP
+ // End deprecated API
+-- 
+2.31.1
+
+From 422fb81250aa733d2601b4d412c3fbcbf5b74420 Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Mon, 8 Jan 2024 20:29:29 -0800
+Subject: [PATCH 21/24] Refactor: based, libcib: Drop cib_metadata() internally
+
+Replace with a static based_metadata() in pacemaker-based since we don't
+depend on a static options array in lib/cib/cib_utils.c anymore.
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ daemons/based/pacemaker-based.c | 17 ++++++++++++++++-
+ 1 file changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/daemons/based/pacemaker-based.c b/daemons/based/pacemaker-based.c
+index 5dd7938..78bcd51 100644
+--- a/daemons/based/pacemaker-based.c
++++ b/daemons/based/pacemaker-based.c
+@@ -126,6 +126,21 @@ setup_stand_alone(GError **error)
+     return pcmk_rc_ok;
+ }
+ 
++static void
++based_metadata(void)
++{
++    const char *name = "pacemaker-based";
++    const char *desc_short = "Cluster Information Base manager options";
++    const char *desc_long = "Cluster options used by Pacemaker's Cluster "
++                            "Information Base manager";
++
++    gchar *s = pcmk__cluster_option_metadata(name, desc_short, desc_long,
++                                             pcmk__opt_context_based);
++
++    printf("%s", s);
++    g_free(s);
++}
++
+ static GOptionEntry entries[] = {
+     { "stand-alone", 's', G_OPTION_FLAG_NONE, G_OPTION_ARG_NONE, &stand_alone,
+       "(Advanced use only) Run in stand-alone mode", NULL },
+@@ -204,7 +219,7 @@ main(int argc, char **argv)
+ 
+     if ((g_strv_length(processed_args) >= 2)
+         && pcmk__str_eq(processed_args[1], "metadata", pcmk__str_none)) {
+-        cib_metadata();
++        based_metadata();
+         goto done;
+     }
+ 
+-- 
+2.31.1
+
+From 05b3e08de7c515c38cf42bbbeaf18e3346eb360d Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Mon, 8 Jan 2024 20:30:16 -0800
+Subject: [PATCH 22/24] API: libcib: Deprecate cib_metadata()
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ include/crm/cib/util.h        |  2 --
+ include/crm/cib/util_compat.h |  3 +++
+ lib/cib/cib_utils.c           | 30 +++++++++++++++---------------
+ 3 files changed, 18 insertions(+), 17 deletions(-)
+
+diff --git a/include/crm/cib/util.h b/include/crm/cib/util.h
+index 47894cb..ce6cbeb 100644
+--- a/include/crm/cib/util.h
++++ b/include/crm/cib/util.h
+@@ -56,8 +56,6 @@ int set_standby(cib_t * the_cib, const char *uuid, const char *scope, const char
+ 
+ xmlNode *cib_get_generation(cib_t * cib);
+ 
+-void cib_metadata(void);
+-
+ int cib_apply_patch_event(xmlNode *event, xmlNode *input, xmlNode **output,
+                           int level);
+ 
+diff --git a/include/crm/cib/util_compat.h b/include/crm/cib/util_compat.h
+index d6ccd4d..95e0766 100644
+--- a/include/crm/cib/util_compat.h
++++ b/include/crm/cib/util_compat.h
+@@ -36,6 +36,9 @@ xmlNode *get_object_root(const char *object_type, xmlNode *the_root);
+ //! \deprecated Do not use
+ const char *cib_pref(GHashTable * options, const char *name);
+ 
++//! \deprecated Do not use
++void cib_metadata(void);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/lib/cib/cib_utils.c b/lib/cib/cib_utils.c
+index f9c463e..75dda16 100644
+--- a/lib/cib/cib_utils.c
++++ b/lib/cib/cib_utils.c
+@@ -866,21 +866,6 @@ cib_native_notify(gpointer data, gpointer user_data)
+     crm_trace("Callback invoked...");
+ }
+ 
+-void
+-cib_metadata(void)
+-{
+-    const char *name = "pacemaker-based";
+-    const char *desc_short = "Cluster Information Base manager options";
+-    const char *desc_long = "Cluster options used by Pacemaker's Cluster "
+-                            "Information Base manager";
+-
+-    gchar *s = pcmk__cluster_option_metadata(name, desc_short, desc_long,
+-                                             pcmk__opt_context_based);
+-
+-    printf("%s", s);
+-    g_free(s);
+-}
+-
+ gboolean
+ cib_read_config(GHashTable * options, xmlNode * current_cib)
+ {
+@@ -1085,5 +1070,20 @@ cib_pref(GHashTable * options, const char *name)
+     return pcmk__cluster_option(options, name);
+ }
+ 
++void
++cib_metadata(void)
++{
++    const char *name = "pacemaker-based";
++    const char *desc_short = "Cluster Information Base manager options";
++    const char *desc_long = "Cluster options used by Pacemaker's Cluster "
++                            "Information Base manager";
++
++    gchar *s = pcmk__cluster_option_metadata(name, desc_short, desc_long,
++                                             pcmk__opt_context_based);
++
++    printf("%s", s);
++    g_free(s);
++}
++
+ // LCOV_EXCL_STOP
+ // End deprecated API
+-- 
+2.31.1
+
+From f8ee575a51f6bacf82abb1d1f41eba1092776682 Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Mon, 8 Jan 2024 20:42:37 -0800
+Subject: [PATCH 23/24] Refactor: controller: Replace crmd_metadata() with
+ controld_metadata()
+
+Can be static since we don't rely on an options array that lives in
+controld_control.c anymore.
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ daemons/controld/controld_control.c   | 14 --------------
+ daemons/controld/pacemaker-controld.c | 18 ++++++++++++++++--
+ daemons/controld/pacemaker-controld.h |  3 +--
+ 3 files changed, 17 insertions(+), 18 deletions(-)
+
+diff --git a/daemons/controld/controld_control.c b/daemons/controld/controld_control.c
+index 40b90f8..9b54900 100644
+--- a/daemons/controld/controld_control.c
++++ b/daemons/controld/controld_control.c
+@@ -515,20 +515,6 @@ do_recover(long long action,
+     register_fsa_input(C_FSA_INTERNAL, I_TERMINATE, NULL);
+ }
+ 
+-void
+-crmd_metadata(void)
+-{
+-    const char *name = "pacemaker-controld";
+-    const char *desc_short = "Pacemaker controller options";
+-    const char *desc_long = "Cluster options used by Pacemaker's controller";
+-
+-    gchar *s = pcmk__cluster_option_metadata(name, desc_short, desc_long,
+-                                             pcmk__opt_context_controld);
+-
+-    printf("%s", s);
+-    g_free(s);
+-}
+-
+ static void
+ config_query_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, void *user_data)
+ {
+diff --git a/daemons/controld/pacemaker-controld.c b/daemons/controld/pacemaker-controld.c
+index e4a72c2..d80644d 100644
+--- a/daemons/controld/pacemaker-controld.c
++++ b/daemons/controld/pacemaker-controld.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2004-2023 the Pacemaker project contributors
++ * Copyright 2004-2024 the Pacemaker project contributors
+  *
+  * The version control history for this file may have further details.
+  *
+@@ -46,6 +46,20 @@ static pcmk__supported_format_t formats[] = {
+     { NULL, NULL, NULL }
+ };
+ 
++static void
++controld_metadata(void)
++{
++    const char *name = "pacemaker-controld";
++    const char *desc_short = "Pacemaker controller options";
++    const char *desc_long = "Cluster options used by Pacemaker's controller";
++
++    gchar *s = pcmk__cluster_option_metadata(name, desc_short, desc_long,
++                                             pcmk__opt_context_controld);
++
++    printf("%s", s);
++    g_free(s);
++}
++
+ static GOptionContext *
+ build_arg_context(pcmk__common_args_t *args, GOptionGroup **group)
+ {
+@@ -96,7 +110,7 @@ main(int argc, char **argv)
+ 
+     if ((g_strv_length(processed_args) >= 2)
+         && pcmk__str_eq(processed_args[1], "metadata", pcmk__str_none)) {
+-        crmd_metadata();
++        controld_metadata();
+         initialize = false;
+         goto done;
+     }
+diff --git a/daemons/controld/pacemaker-controld.h b/daemons/controld/pacemaker-controld.h
+index 2334cce..ba8dc8f 100644
+--- a/daemons/controld/pacemaker-controld.h
++++ b/daemons/controld/pacemaker-controld.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2004-2023 the Pacemaker project contributors
++ * Copyright 2004-2024 the Pacemaker project contributors
+  *
+  * The version control history for this file may have further details.
+  *
+@@ -28,7 +28,6 @@
+ #  define controld_trigger_config()  \
+     controld_trigger_config_as(__func__, __LINE__)
+ 
+-void crmd_metadata(void);
+ void controld_trigger_config_as(const char *fn, int line);
+ void controld_election_init(const char *uname);
+ void controld_configure_election(GHashTable *options);
+-- 
+2.31.1
+
+From 282e9eb026699abef5a28fc37f54b9330029da1c Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Tue, 2 Jan 2024 19:56:11 -0800
+Subject: [PATCH 24/24] Test: cts-cli: Update daemon tests after fence-reaction
+ select
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ cts/cli/regression.daemons.exp | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/cts/cli/regression.daemons.exp b/cts/cli/regression.daemons.exp
+index 43393df..543d62f 100644
+--- a/cts/cli/regression.daemons.exp
++++ b/cts/cli/regression.daemons.exp
+@@ -52,9 +52,12 @@
+       <content type="time" default=""/>
+     </parameter>
+     <parameter name="fence-reaction">
+-      <longdesc lang="en">A cluster node may receive notification of its own fencing if fencing is misconfigured, or if fabric fencing is in use that doesn&apos;t cut cluster communication. Allowed values are &quot;stop&quot; to attempt to immediately stop Pacemaker and stay stopped, or &quot;panic&quot; to attempt to immediately reboot the local node, falling back to stop on failure.</longdesc>
++      <longdesc lang="en">A cluster node may receive notification of its own fencing if fencing is misconfigured, or if fabric fencing is in use that doesn&apos;t cut cluster communication. Use &quot;stop&quot; to attempt to immediately stop Pacemaker and stay stopped, or &quot;panic&quot; to attempt to immediately reboot the local node, falling back to stop on failure.  Allowed values: stop, panic</longdesc>
+       <shortdesc lang="en">How a cluster node should react if notified of its own fencing</shortdesc>
+-      <content type="string" default=""/>
++      <content type="select" default="">
++        <option value="stop" />
++        <option value="panic" />
++      </content>
+     </parameter>
+     <parameter name="election-timeout">
+       <longdesc lang="en">Declare an election failed if it is not decided within this much time. If you need to adjust this value, it probably indicates the presence of a bug.</longdesc>
+-- 
+2.31.1
+

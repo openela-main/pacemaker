@@ -1,0 +1,276 @@
+From d50bbafc32428e873c0052a9defcf93d2e52667e Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Wed, 10 Jan 2024 11:35:11 -0500
+Subject: [PATCH 1/3] Refactor: libcrmcommon: Split feature set check into its
+ own function.
+
+---
+ include/crm/common/cib_internal.h |  4 +++-
+ lib/cib/cib_utils.c               | 12 ++++++------
+ lib/common/cib.c                  | 18 +++++++++++++++++-
+ 3 files changed, 26 insertions(+), 8 deletions(-)
+
+diff --git a/include/crm/common/cib_internal.h b/include/crm/common/cib_internal.h
+index c41c12e..fa65e58 100644
+--- a/include/crm/common/cib_internal.h
++++ b/include/crm/common/cib_internal.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2023 the Pacemaker project contributors
++ * Copyright 2023-2024 the Pacemaker project contributors
+  *
+  * The version control history for this file may have further details.
+  *
+@@ -16,6 +16,8 @@ extern "C" {
+ 
+ const char *pcmk__cib_abs_xpath_for(const char *element);
+ 
++int pcmk__check_feature_set(const char *cib_version);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/lib/cib/cib_utils.c b/lib/cib/cib_utils.c
+index 0082eef..bf2982c 100644
+--- a/lib/cib/cib_utils.c
++++ b/lib/cib/cib_utils.c
+@@ -353,7 +353,6 @@ cib_perform_op(const char *op, int call_options, cib__op_fn_t fn, bool is_query,
+     xmlNode *patchset_cib = NULL;
+     xmlNode *local_diff = NULL;
+ 
+-    const char *new_version = NULL;
+     const char *user = crm_element_value(req, F_CIB_USER);
+     bool with_digest = false;
+ 
+@@ -470,12 +469,13 @@ cib_perform_op(const char *op, int call_options, cib__op_fn_t fn, bool is_query,
+     }
+ 
+     if (scratch) {
+-        new_version = crm_element_value(scratch, XML_ATTR_CRM_VERSION);
++        const char *new_version = crm_element_value(scratch, XML_ATTR_CRM_VERSION);
+ 
+-        if (new_version && compare_version(new_version, CRM_FEATURE_SET) > 0) {
+-            crm_err("Discarding update with feature set '%s' greater than our own '%s'",
+-                    new_version, CRM_FEATURE_SET);
+-            rc = -EPROTONOSUPPORT;
++        rc = pcmk__check_feature_set(new_version);
++        if (rc != pcmk_rc_ok) {
++            pcmk__config_err("Discarding update with feature set '%s' greater than our own '%s'",
++                             new_version, CRM_FEATURE_SET);
++            rc = pcmk_rc2legacy(rc);
+             goto done;
+         }
+     }
+diff --git a/lib/common/cib.c b/lib/common/cib.c
+index fee7881..cbebc2e 100644
+--- a/lib/common/cib.c
++++ b/lib/common/cib.c
+@@ -1,6 +1,6 @@
+ /*
+  * Original copyright 2004 International Business Machines
+- * Later changes copyright 2008-2023 the Pacemaker project contributors
++ * Later changes copyright 2008-2024 the Pacemaker project contributors
+  *
+  * The version control history for this file may have further details.
+  *
+@@ -173,3 +173,19 @@ pcmk_find_cib_element(xmlNode *cib, const char *element_name)
+ {
+     return get_xpath_object(pcmk_cib_xpath_for(element_name), cib, LOG_TRACE);
+ }
++
++/*!
++ * \internal
++ * \brief Check that the feature set in the CIB is supported on this node
++ *
++ * \param[in] new_version   XML_ATTR_CRM_VERSION attribute from the CIB
++ */
++int
++pcmk__check_feature_set(const char *cib_version)
++{
++    if (cib_version && compare_version(cib_version, CRM_FEATURE_SET) > 0) {
++        return EPROTONOSUPPORT;
++    }
++
++    return pcmk_rc_ok;
++}
+-- 
+2.31.1
+
+From d89fd8336ae47d892201513c99773705d57f15f0 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Wed, 10 Jan 2024 13:46:42 -0500
+Subject: [PATCH 2/3] Feature: scheduler: Check the CIB feature set in
+ cluster_status.
+
+This adds the check that was previously only in cib_perform_op to the
+scheduler code, ensuring that any daemon or tool that calls the
+scheduler will check that the feature set in the CIB is supported.
+---
+ lib/pengine/status.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/lib/pengine/status.c b/lib/pengine/status.c
+index e6ec237..1294803 100644
+--- a/lib/pengine/status.c
++++ b/lib/pengine/status.c
+@@ -14,6 +14,7 @@
+ #include <crm/crm.h>
+ #include <crm/msg_xml.h>
+ #include <crm/common/xml.h>
++#include <crm/common/cib_internal.h>
+ 
+ #include <glib.h>
+ 
+@@ -70,12 +71,21 @@ pe_free_working_set(pcmk_scheduler_t *scheduler)
+ gboolean
+ cluster_status(pcmk_scheduler_t * scheduler)
+ {
++    const char *new_version = NULL;
+     xmlNode *section = NULL;
+ 
+     if ((scheduler == NULL) || (scheduler->input == NULL)) {
+         return FALSE;
+     }
+ 
++    new_version = crm_element_value(scheduler->input, XML_ATTR_CRM_VERSION);
++
++    if (pcmk__check_feature_set(new_version) != pcmk_rc_ok) {
++        pcmk__config_err("Can't process CIB with feature set '%s' greater than our own '%s'",
++                         new_version, CRM_FEATURE_SET);
++        return FALSE;
++    }
++
+     crm_trace("Beginning unpack");
+ 
+     if (scheduler->failed != NULL) {
+-- 
+2.31.1
+
+From a3428926d37af506014a6b462d1308d8541c5932 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Wed, 10 Jan 2024 14:56:36 -0500
+Subject: [PATCH 3/3] Low: libcib: Do not check CIB feature set for files in
+ cib_perform_op.
+
+This is related to the previous feature for transferring schema files to
+older remote nodes.  In that case, the newer schema files may also have
+a newer feature set than the node supports, so the transferred files are
+still not usable.
+
+However, the feature set only matters for the scheduler, not for most
+command line tools (obviously, crm_simulate would still care).  So in
+those cases, we can just disable the feature set check if the CIB was
+read in from a file.  For the scheduler, the check is still performed as
+part of cluster_status.
+---
+ cts/cli/regression.tools.exp    |  2 +-
+ daemons/based/based_callbacks.c |  4 ++--
+ include/crm/cib/internal.h      |  4 ++--
+ lib/cib/cib_file.c              |  2 +-
+ lib/cib/cib_utils.c             | 15 +++++++++------
+ 5 files changed, 15 insertions(+), 12 deletions(-)
+
+diff --git a/cts/cli/regression.tools.exp b/cts/cli/regression.tools.exp
+index 417b5cd..c81c420 100644
+--- a/cts/cli/regression.tools.exp
++++ b/cts/cli/regression.tools.exp
+@@ -7939,7 +7939,7 @@ unpack_config 	warning: Blind faith: not fencing unseen nodes
+ =#=#=#= End test: Verbosely verify a file-specified invalid configuration, outputting as xml - Invalid configuration (78) =#=#=#=
+ * Passed: crm_verify     - Verbosely verify a file-specified invalid configuration, outputting as xml
+ =#=#=#= Begin test: Verbosely verify another file-specified invalid configuration, outputting as xml =#=#=#=
+-(cluster_status@status.c:113) 	warning: Fencing and resource management disabled due to lack of quorum
++(cluster_status@status.c:123) 	warning: Fencing and resource management disabled due to lack of quorum
+ <pacemaker-result api-version="X" request="crm_verify_invalid_no_stonith.xml --output-as=xml --verbose">
+   <status code="78" message="Invalid configuration">
+     <errors>
+diff --git a/daemons/based/based_callbacks.c b/daemons/based/based_callbacks.c
+index 5f3dc62..f16e4d9 100644
+--- a/daemons/based/based_callbacks.c
++++ b/daemons/based/based_callbacks.c
+@@ -1362,7 +1362,7 @@ cib_process_command(xmlNode *request, const cib__operation_t *operation,
+     input = prepare_input(request, operation->type, &section);
+ 
+     if (!pcmk_is_set(operation->flags, cib__op_attr_modifies)) {
+-        rc = cib_perform_op(op, call_options, op_function, true, section,
++        rc = cib_perform_op(NULL, op, call_options, op_function, true, section,
+                             request, input, false, &config_changed, &the_cib,
+                             &result_cib, NULL, &output);
+ 
+@@ -1395,7 +1395,7 @@ cib_process_command(xmlNode *request, const cib__operation_t *operation,
+     }
+ 
+     // result_cib must not be modified after cib_perform_op() returns
+-    rc = cib_perform_op(op, call_options, op_function, false, section,
++    rc = cib_perform_op(NULL, op, call_options, op_function, false, section,
+                         request, input, manage_counters, &config_changed,
+                         &the_cib, &result_cib, cib_diff, &output);
+ 
+diff --git a/include/crm/cib/internal.h b/include/crm/cib/internal.h
+index 9d54d52..b6d6871 100644
+--- a/include/crm/cib/internal.h
++++ b/include/crm/cib/internal.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2004-2023 the Pacemaker project contributors
++ * Copyright 2004-2024 the Pacemaker project contributors
+  *
+  * The version control history for this file may have further details.
+  *
+@@ -206,7 +206,7 @@ int cib__get_notify_patchset(const xmlNode *msg, const xmlNode **patchset);
+ 
+ bool cib__element_in_patchset(const xmlNode *patchset, const char *element);
+ 
+-int cib_perform_op(const char *op, int call_options, cib__op_fn_t fn,
++int cib_perform_op(cib_t *cib, const char *op, int call_options, cib__op_fn_t fn,
+                    bool is_query, const char *section, xmlNode *req,
+                    xmlNode *input, bool manage_counters, bool *config_changed,
+                    xmlNode **current_cib, xmlNode **result_cib, xmlNode **diff,
+diff --git a/lib/cib/cib_file.c b/lib/cib/cib_file.c
+index a279823..9dd952c 100644
+--- a/lib/cib/cib_file.c
++++ b/lib/cib/cib_file.c
+@@ -245,7 +245,7 @@ cib_file_process_request(cib_t *cib, xmlNode *request, xmlNode **output)
+         data = pcmk_find_cib_element(data, section);
+     }
+ 
+-    rc = cib_perform_op(op, call_options, op_function, read_only, section,
++    rc = cib_perform_op(cib, op, call_options, op_function, read_only, section,
+                         request, data, true, &changed, &private->cib_xml,
+                         &result_cib, &cib_diff, output);
+ 
+diff --git a/lib/cib/cib_utils.c b/lib/cib/cib_utils.c
+index bf2982c..9c3f9f1 100644
+--- a/lib/cib/cib_utils.c
++++ b/lib/cib/cib_utils.c
+@@ -339,11 +339,10 @@ should_copy_cib(const char *op, const char *section, int call_options)
+ }
+ 
+ int
+-cib_perform_op(const char *op, int call_options, cib__op_fn_t fn, bool is_query,
+-               const char *section, xmlNode *req, xmlNode *input,
+-               bool manage_counters, bool *config_changed,
+-               xmlNode **current_cib, xmlNode **result_cib, xmlNode **diff,
+-               xmlNode **output)
++cib_perform_op(cib_t *cib, const char *op, int call_options, cib__op_fn_t fn,
++               bool is_query, const char *section, xmlNode *req, xmlNode *input,
++               bool manage_counters, bool *config_changed, xmlNode **current_cib,
++               xmlNode **result_cib, xmlNode **diff, xmlNode **output)
+ {
+     int rc = pcmk_ok;
+     bool check_schema = true;
+@@ -468,7 +467,11 @@ cib_perform_op(const char *op, int call_options, cib__op_fn_t fn, bool is_query,
+         goto done;
+     }
+ 
+-    if (scratch) {
++    /* If the CIB is from a file, we don't need to check that the feature set is
++     * supported.  All we care about in that case is the schema version, which
++     * is checked elsewhere.
++     */
++    if (scratch && (cib == NULL || cib->variant != cib_file)) {
+         const char *new_version = crm_element_value(scratch, XML_ATTR_CRM_VERSION);
+ 
+         rc = pcmk__check_feature_set(new_version);
+-- 
+2.31.1
+

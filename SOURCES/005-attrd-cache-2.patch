@@ -1,0 +1,2786 @@
+From 843ef27542aac43ed7789b15255dd4f30004f0d1 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Mon, 18 Dec 2023 10:08:30 -0600
+Subject: [PATCH 1/9] Fix: attrd: write Pacemaker Remote node attributes even
+ if not in cache
+
+Previously, we required a node to be in one of the node caches in order to
+write out its attributes. However for Pacemaker Remote nodes, we only need the
+node name to do the write, and we already have that even if it's not cached.
+---
+ daemons/attrd/attrd_cib.c | 55 +++++++++++++++++++++------------------
+ 1 file changed, 30 insertions(+), 25 deletions(-)
+
+diff --git a/daemons/attrd/attrd_cib.c b/daemons/attrd/attrd_cib.c
+index ae65648..b22137a 100644
+--- a/daemons/attrd/attrd_cib.c
++++ b/daemons/attrd/attrd_cib.c
+@@ -20,6 +20,7 @@
+ #include <crm/common/results.h>
+ #include <crm/common/strings_internal.h>
+ #include <crm/common/xml.h>
++#include <crm/cluster/internal.h>   // pcmk__get_peer_full()
+ 
+ #include "pacemaker-attrd.h"
+ 
+@@ -556,20 +557,26 @@ write_attribute(attribute_t *a, bool ignore_delay)
+     /* Iterate over each peer value of this attribute */
+     g_hash_table_iter_init(&iter, a->values);
+     while (g_hash_table_iter_next(&iter, NULL, (gpointer *) &v)) {
+-        crm_node_t *peer = crm_get_peer_full(v->nodeid, v->nodename,
+-                                             CRM_GET_PEER_ANY);
++        const char *uuid = NULL;
+ 
+-        /* If the value's peer info does not correspond to a peer, ignore it */
+-        if (peer == NULL) {
+-            crm_notice("Cannot update %s[%s]=%s because peer not known",
+-                       a->id, v->nodename, v->current);
+-            continue;
+-        }
++        if (pcmk_is_set(v->flags, attrd_value_remote)) {
++            /* If this is a Pacemaker Remote node, the node's UUID is the same
++             * as its name, which we already have.
++             */
++            uuid = v->nodename;
+ 
+-        /* If we're just learning the peer's node id, remember it */
+-        if (peer->id && (v->nodeid == 0)) {
+-            crm_trace("Learned ID %u for node %s", peer->id, v->nodename);
+-            v->nodeid = peer->id;
++        } else {
++            // This will create a cluster node cache entry if none exists
++            crm_node_t *peer = pcmk__get_peer_full(v->nodeid, v->nodename, NULL,
++                                                   CRM_GET_PEER_ANY);
++
++            uuid = peer->uuid;
++
++            // Remember peer's node ID if we're just now learning it
++            if ((peer->id != 0) && (v->nodeid == 0)) {
++                crm_trace("Learned ID %u for node %s", peer->id, v->nodename);
++                v->nodeid = peer->id;
++            }
+         }
+ 
+         /* If this is a private attribute, no update needs to be sent */
+@@ -578,29 +585,27 @@ write_attribute(attribute_t *a, bool ignore_delay)
+             continue;
+         }
+ 
+-        /* If the peer is found, but its uuid is unknown, defer write */
+-        if (peer->uuid == NULL) {
++        // Defer write if this is a cluster node that's never been seen
++        if (uuid == NULL) {
+             a->unknown_peer_uuids = true;
+-            crm_notice("Cannot update %s[%s]=%s because peer UUID not known "
+-                       "(will retry if learned)",
++            crm_notice("Cannot update %s[%s]='%s' now because node's UUID is "
++                       "unknown (will retry if learned)",
+                        a->id, v->nodename, v->current);
+             continue;
+         }
+ 
+         // Update this value as part of the CIB transaction we're building
+-        rc = add_attr_update(a, v->current, peer->uuid);
++        rc = add_attr_update(a, v->current, uuid);
+         if (rc != pcmk_rc_ok) {
+-            crm_err("Failed to update %s[%s]=%s (peer known as %s, UUID %s, "
+-                    "ID %" PRIu32 "/%" PRIu32 "): %s",
+-                    a->id, v->nodename, v->current, peer->uname, peer->uuid,
+-                    peer->id, v->nodeid, pcmk_rc_str(rc));
++            crm_err("Failed to update %s[%s]='%s': %s "
++                    CRM_XS " node uuid=%s id=%" PRIu32,
++                    a->id, v->nodename, v->current, pcmk_rc_str(rc),
++                    uuid, v->nodeid);
+             continue;
+         }
+ 
+-        crm_debug("Updating %s[%s]=%s (peer known as %s, UUID %s, ID "
+-                  "%" PRIu32 "/%" PRIu32 ")",
+-                  a->id, v->nodename, v->current,
+-                  peer->uname, peer->uuid, peer->id, v->nodeid);
++        crm_debug("Updating %s[%s]=%s (node uuid=%s id=%" PRIu32 ")",
++                  a->id, v->nodename, v->current, uuid, v->nodeid);
+         cib_updates++;
+ 
+         /* Preservation of the attribute to transmit alert */
+-- 
+2.31.1
+
+From 724e6db9830475e212381430a30014ccda43c901 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Tue, 19 Dec 2023 14:59:54 -0600
+Subject: [PATCH 2/9] API: libcrmcluster: deprecate crm_get_peer_full()
+
+---
+ daemons/attrd/attrd_messages.c    |  1 +
+ daemons/controld/controld_execd.c |  2 +-
+ include/crm/cluster.h             |  5 +----
+ include/crm/cluster/compat.h      |  5 ++++-
+ lib/cluster/membership.c          | 21 ++++++---------------
+ 5 files changed, 13 insertions(+), 21 deletions(-)
+
+diff --git a/daemons/attrd/attrd_messages.c b/daemons/attrd/attrd_messages.c
+index ac32e18..53c70bd 100644
+--- a/daemons/attrd/attrd_messages.c
++++ b/daemons/attrd/attrd_messages.c
+@@ -12,6 +12,7 @@
+ #include <glib.h>
+ 
+ #include <crm/common/messages_internal.h>
++#include <crm/cluster/internal.h>   // pcmk__get_peer()
+ #include <crm/msg_xml.h>
+ 
+ #include "pacemaker-attrd.h"
+diff --git a/daemons/controld/controld_execd.c b/daemons/controld/controld_execd.c
+index 480d37d..381b0be 100644
+--- a/daemons/controld/controld_execd.c
++++ b/daemons/controld/controld_execd.c
+@@ -581,7 +581,7 @@ controld_query_executor_state(void)
+         return NULL;
+     }
+ 
+-    peer = crm_get_peer_full(0, lrm_state->node_name, CRM_GET_PEER_ANY);
++    peer = pcmk__get_peer_full(0, lrm_state->node_name, NULL, CRM_GET_PEER_ANY);
+     CRM_CHECK(peer != NULL, return NULL);
+ 
+     xml_state = create_node_state_update(peer,
+diff --git a/include/crm/cluster.h b/include/crm/cluster.h
+index b61fd70..137684d 100644
+--- a/include/crm/cluster.h
++++ b/include/crm/cluster.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2004-2023 the Pacemaker project contributors
++ * Copyright 2004-2024 the Pacemaker project contributors
+  *
+  * The version control history for this file may have further details.
+  *
+@@ -146,9 +146,6 @@ void crm_remote_peer_cache_refresh(xmlNode *cib);
+ crm_node_t *crm_remote_peer_get(const char *node_name);
+ void crm_remote_peer_cache_remove(const char *node_name);
+ 
+-/* allows filtering of remote and cluster nodes using crm_get_peer_flags */
+-crm_node_t *crm_get_peer_full(unsigned int id, const char *uname, int flags);
+-
+ /* only searches cluster nodes */
+ crm_node_t *crm_get_peer(unsigned int id, const char *uname);
+ 
+diff --git a/include/crm/cluster/compat.h b/include/crm/cluster/compat.h
+index 89a03fd..fc68f27 100644
+--- a/include/crm/cluster/compat.h
++++ b/include/crm/cluster/compat.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2004-2023 the Pacemaker project contributors
++ * Copyright 2004-2024 the Pacemaker project contributors
+  *
+  * The version control history for this file may have further details.
+  *
+@@ -26,6 +26,9 @@ extern "C" {
+  *             release.
+  */
+ 
++// \deprecated Do not use Pacemaker for cluster node cacheing
++crm_node_t *crm_get_peer_full(unsigned int id, const char *uname, int flags);
++
+ // \deprecated Use stonith_api_kick() from libstonithd instead
+ int crm_terminate_member(int nodeid, const char *uname, void *unused);
+ 
+diff --git a/lib/cluster/membership.c b/lib/cluster/membership.c
+index a653617..52db840 100644
+--- a/lib/cluster/membership.c
++++ b/lib/cluster/membership.c
+@@ -634,21 +634,6 @@ pcmk__purge_node_from_cache(const char *node_name, uint32_t node_id)
+     free(node_name_copy);
+ }
+ 
+-/*!
+- * \brief Get a node cache entry (cluster or Pacemaker Remote)
+- *
+- * \param[in] id     If not 0, cluster node ID to search for
+- * \param[in] uname  If not NULL, node name to search for
+- * \param[in] flags  Bitmask of enum crm_get_peer_flags
+- *
+- * \return (Possibly newly created) node cache entry
+- */
+-crm_node_t *
+-crm_get_peer_full(unsigned int id, const char *uname, int flags)
+-{
+-    return pcmk__get_peer_full(id, uname, NULL, flags);
+-}
+-
+ /*!
+  * \internal
+  * \brief Search cluster node cache
+@@ -1444,5 +1429,11 @@ crm_terminate_member_no_mainloop(int nodeid, const char *uname, int *connection)
+     return stonith_api_kick(nodeid, uname, 120, TRUE);
+ }
+ 
++crm_node_t *
++crm_get_peer_full(unsigned int id, const char *uname, int flags)
++{
++    return pcmk__get_peer_full(id, uname, NULL, flags);
++}
++
+ // LCOV_EXCL_STOP
+ // End deprecated API
+-- 
+2.31.1
+
+From 8a263fa254a62b07f3b591844e7eacd5cdd0538f Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Tue, 19 Dec 2023 15:07:47 -0600
+Subject: [PATCH 3/9] API: libcrmcluster: deprecate crm_get_peer()
+
+Use pcmk__get_peer() internally
+---
+ daemons/attrd/attrd_corosync.c          |  8 +++-----
+ daemons/attrd/attrd_messages.c          |  6 +++---
+ daemons/based/based_callbacks.c         |  5 +++--
+ daemons/based/based_messages.c          |  7 ++++---
+ daemons/controld/controld_corosync.c    |  2 +-
+ daemons/controld/controld_election.c    |  3 ++-
+ daemons/controld/controld_execd.c       |  2 +-
+ daemons/controld/controld_fencing.c     |  2 +-
+ daemons/controld/controld_join_client.c |  6 +++---
+ daemons/controld/controld_join_dc.c     | 10 +++++-----
+ daemons/controld/controld_messages.c    |  2 +-
+ daemons/controld/controld_remote_ra.c   |  2 +-
+ daemons/controld/controld_te_actions.c  |  8 +++++---
+ daemons/controld/controld_te_events.c   |  3 ++-
+ daemons/controld/controld_utils.c       |  2 +-
+ daemons/fenced/fenced_commands.c        |  8 ++++----
+ daemons/fenced/fenced_remote.c          |  8 +++++---
+ include/crm/cluster.h                   |  3 ---
+ include/crm/cluster/compat.h            |  3 +++
+ lib/cluster/corosync.c                  |  8 ++++----
+ lib/cluster/cpg.c                       |  8 ++++----
+ lib/cluster/election.c                  |  6 +++---
+ lib/cluster/membership.c                | 21 ++++++---------------
+ 23 files changed, 65 insertions(+), 68 deletions(-)
+
+diff --git a/daemons/attrd/attrd_corosync.c b/daemons/attrd/attrd_corosync.c
+index eba734c..3b2880b 100644
+--- a/daemons/attrd/attrd_corosync.c
++++ b/daemons/attrd/attrd_corosync.c
+@@ -119,9 +119,7 @@ attrd_cpg_dispatch(cpg_handle_t handle,
+     if (xml == NULL) {
+         crm_err("Bad message of class %d received from %s[%u]: '%.120s'", kind, from, nodeid, data);
+     } else {
+-        crm_node_t *peer = crm_get_peer(nodeid, from);
+-
+-        attrd_peer_message(peer, xml);
++        attrd_peer_message(pcmk__get_peer(nodeid, from, NULL), xml);
+     }
+ 
+     free_xml(xml);
+@@ -254,7 +252,7 @@ attrd_peer_change_cb(enum crm_status_type kind, crm_node_t *peer, const void *da
+ static void
+ record_peer_nodeid(attribute_value_t *v, const char *host)
+ {
+-    crm_node_t *known_peer = crm_get_peer(v->nodeid, host);
++    crm_node_t *known_peer = pcmk__get_peer(v->nodeid, host, NULL);
+ 
+     crm_trace("Learned %s has node id %s", known_peer->uname, known_peer->uuid);
+     if (attrd_election_won()) {
+@@ -439,7 +437,7 @@ attrd_peer_clear_failure(pcmk__request_t *request)
+     GHashTableIter iter;
+     regex_t regex;
+ 
+-    crm_node_t *peer = crm_get_peer(0, request->peer);
++    crm_node_t *peer = pcmk__get_peer(0, request->peer, NULL);
+ 
+     if (attrd_failure_regex(&regex, rsc, op, interval_ms) != pcmk_ok) {
+         crm_info("Ignoring invalid request to clear failures for %s",
+diff --git a/daemons/attrd/attrd_messages.c b/daemons/attrd/attrd_messages.c
+index 53c70bd..5536207 100644
+--- a/daemons/attrd/attrd_messages.c
++++ b/daemons/attrd/attrd_messages.c
+@@ -177,7 +177,7 @@ static xmlNode *
+ handle_sync_request(pcmk__request_t *request)
+ {
+     if (request->peer != NULL) {
+-        crm_node_t *peer = crm_get_peer(0, request->peer);
++        crm_node_t *peer = pcmk__get_peer(0, request->peer, NULL);
+ 
+         attrd_peer_sync(peer, request->xml);
+         pcmk__set_result(&request->result, CRM_EX_OK, PCMK_EXEC_DONE, NULL);
+@@ -194,7 +194,7 @@ handle_sync_response_request(pcmk__request_t *request)
+         return handle_unknown_request(request);
+     } else {
+         if (request->peer != NULL) {
+-            crm_node_t *peer = crm_get_peer(0, request->peer);
++            crm_node_t *peer = pcmk__get_peer(0, request->peer, NULL);
+             bool peer_won = attrd_check_for_new_writer(peer, request->xml);
+ 
+             if (!pcmk__str_eq(peer->uname, attrd_cluster->uname, pcmk__str_casei)) {
+@@ -212,7 +212,7 @@ handle_update_request(pcmk__request_t *request)
+ {
+     if (request->peer != NULL) {
+         const char *host = crm_element_value(request->xml, PCMK__XA_ATTR_NODE_NAME);
+-        crm_node_t *peer = crm_get_peer(0, request->peer);
++        crm_node_t *peer = pcmk__get_peer(0, request->peer, NULL);
+ 
+         attrd_peer_update(peer, request->xml, host, false);
+         pcmk__set_result(&request->result, CRM_EX_OK, PCMK_EXEC_DONE, NULL);
+diff --git a/daemons/based/based_callbacks.c b/daemons/based/based_callbacks.c
+index 4fac222..02f3425 100644
+--- a/daemons/based/based_callbacks.c
++++ b/daemons/based/based_callbacks.c
+@@ -928,7 +928,7 @@ forward_request(xmlNode *request)
+ 
+     crm_xml_add(request, F_CIB_DELEGATED, OUR_NODENAME);
+ 
+-    send_cluster_message(((host != NULL)? crm_get_peer(0, host) : NULL),
++    send_cluster_message(((host != NULL)? pcmk__get_peer(0, host, NULL) : NULL),
+                          crm_msg_cib, request, FALSE);
+ 
+     // Return the request to its original state
+@@ -986,7 +986,8 @@ send_peer_reply(xmlNode * msg, xmlNode * result_diff, const char *originator, gb
+         /* send reply via HA to originating node */
+         crm_trace("Sending request result to %s only", originator);
+         crm_xml_add(msg, F_CIB_ISREPLY, originator);
+-        return send_cluster_message(crm_get_peer(0, originator), crm_msg_cib, msg, FALSE);
++        return send_cluster_message(pcmk__get_peer(0, originator, NULL),
++                                    crm_msg_cib, msg, FALSE);
+     }
+ 
+     return FALSE;
+diff --git a/daemons/based/based_messages.c b/daemons/based/based_messages.c
+index a87d9ac..08521e4 100644
+--- a/daemons/based/based_messages.c
++++ b/daemons/based/based_messages.c
+@@ -127,7 +127,8 @@ send_sync_request(const char *host)
+     crm_xml_add(sync_me, F_CIB_DELEGATED,
+                 stand_alone? "localhost" : crm_cluster->uname);
+ 
+-    send_cluster_message(host ? crm_get_peer(0, host) : NULL, crm_msg_cib, sync_me, FALSE);
++    send_cluster_message((host == NULL)? NULL : pcmk__get_peer(0, host, NULL),
++                         crm_msg_cib, sync_me, FALSE);
+     free_xml(sync_me);
+ }
+ 
+@@ -443,8 +444,8 @@ sync_our_cib(xmlNode * request, gboolean all)
+ 
+     add_message_xml(replace_request, F_CIB_CALLDATA, the_cib);
+ 
+-    if (send_cluster_message
+-        (all ? NULL : crm_get_peer(0, host), crm_msg_cib, replace_request, FALSE) == FALSE) {
++    if (!send_cluster_message(all? NULL : pcmk__get_peer(0, host, NULL),
++                              crm_msg_cib, replace_request, FALSE)) {
+         result = -ENOTCONN;
+     }
+     free_xml(replace_request);
+diff --git a/daemons/controld/controld_corosync.c b/daemons/controld/controld_corosync.c
+index b69e821..c2953b5 100644
+--- a/daemons/controld/controld_corosync.c
++++ b/daemons/controld/controld_corosync.c
+@@ -49,7 +49,7 @@ crmd_cs_dispatch(cpg_handle_t handle, const struct cpg_name *groupName,
+         crm_xml_add(xml, F_ORIG, from);
+         /* crm_xml_add_int(xml, F_SEQ, wrapper->id); Fake? */
+ 
+-        peer = crm_get_peer(0, from);
++        peer = pcmk__get_peer(0, from, NULL);
+         if (!pcmk_is_set(peer->processes, crm_proc_cpg)) {
+             /* If we can still talk to our peer process on that node,
+              * then it must be part of the corosync membership
+diff --git a/daemons/controld/controld_election.c b/daemons/controld/controld_election.c
+index 70ffecc..6e22067 100644
+--- a/daemons/controld/controld_election.c
++++ b/daemons/controld/controld_election.c
+@@ -265,7 +265,8 @@ do_dc_release(long long action,
+         crm_info("DC role released");
+         if (pcmk_is_set(controld_globals.fsa_input_register, R_SHUTDOWN)) {
+             xmlNode *update = NULL;
+-            crm_node_t *node = crm_get_peer(0, controld_globals.our_nodename);
++            crm_node_t *node = pcmk__get_peer(0, controld_globals.our_nodename,
++                                              NULL);
+ 
+             pcmk__update_peer_expected(__func__, node, CRMD_JOINSTATE_DOWN);
+             update = create_node_state_update(node, node_update_expected, NULL,
+diff --git a/daemons/controld/controld_execd.c b/daemons/controld/controld_execd.c
+index 381b0be..45b6b58 100644
+--- a/daemons/controld/controld_execd.c
++++ b/daemons/controld/controld_execd.c
+@@ -1752,7 +1752,7 @@ controld_ack_event_directly(const char *to_host, const char *to_sys,
+         to_sys = CRM_SYSTEM_TENGINE;
+     }
+ 
+-    peer = crm_get_peer(0, controld_globals.our_nodename);
++    peer = pcmk__get_peer(0, controld_globals.our_nodename, NULL);
+     update = create_node_state_update(peer, node_update_none, NULL,
+                                       __func__);
+ 
+diff --git a/daemons/controld/controld_fencing.c b/daemons/controld/controld_fencing.c
+index 9557d9e..6c0ee09 100644
+--- a/daemons/controld/controld_fencing.c
++++ b/daemons/controld/controld_fencing.c
+@@ -374,7 +374,7 @@ execute_stonith_cleanup(void)
+ 
+     for (iter = stonith_cleanup_list; iter != NULL; iter = iter->next) {
+         char *target = iter->data;
+-        crm_node_t *target_node = crm_get_peer(0, target);
++        crm_node_t *target_node = pcmk__get_peer(0, target, NULL);
+         const char *uuid = crm_peer_uuid(target_node);
+ 
+         crm_notice("Marking %s, target of a previous stonith action, as clean", target);
+diff --git a/daemons/controld/controld_join_client.c b/daemons/controld/controld_join_client.c
+index 805ecbd..2b5267d 100644
+--- a/daemons/controld/controld_join_client.c
++++ b/daemons/controld/controld_join_client.c
+@@ -35,7 +35,7 @@ update_dc_expected(const xmlNode *msg)
+ {
+     if ((controld_globals.dc_name != NULL)
+         && pcmk__xe_attr_is_true(msg, F_CRM_DC_LEAVING)) {
+-        crm_node_t *dc_node = crm_get_peer(0, controld_globals.dc_name);
++        crm_node_t *dc_node = pcmk__get_peer(0, controld_globals.dc_name, NULL);
+ 
+         pcmk__update_peer_expected(__func__, dc_node, CRMD_JOINSTATE_DOWN);
+     }
+@@ -177,7 +177,7 @@ join_query_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, void *
+ 
+         crm_xml_add(reply, F_CRM_JOIN_ID, join_id);
+         crm_xml_add(reply, XML_ATTR_CRM_VERSION, CRM_FEATURE_SET);
+-        send_cluster_message(crm_get_peer(0, controld_globals.dc_name),
++        send_cluster_message(pcmk__get_peer(0, controld_globals.dc_name, NULL),
+                              crm_msg_crmd, reply, TRUE);
+         free_xml(reply);
+     }
+@@ -333,7 +333,7 @@ do_cl_join_finalize_respond(long long action,
+             }
+         }
+ 
+-        send_cluster_message(crm_get_peer(0, controld_globals.dc_name),
++        send_cluster_message(pcmk__get_peer(0, controld_globals.dc_name, NULL),
+                              crm_msg_crmd, reply, TRUE);
+         free_xml(reply);
+ 
+diff --git a/daemons/controld/controld_join_dc.c b/daemons/controld/controld_join_dc.c
+index 2fe6710..45e1eba 100644
+--- a/daemons/controld/controld_join_dc.c
++++ b/daemons/controld/controld_join_dc.c
+@@ -318,7 +318,7 @@ do_dc_join_offer_one(long long action,
+         crm_err("Can't make join-%d offer to unknown node", current_join_id);
+         return;
+     }
+-    member = crm_get_peer(0, join_to);
++    member = pcmk__get_peer(0, join_to, NULL);
+ 
+     /* It is possible that a node will have been sick or starting up when the
+      * original offer was made. However, it will either re-announce itself in
+@@ -332,7 +332,7 @@ do_dc_join_offer_one(long long action,
+      * well, to ensure the correct value for max_generation_from.
+      */
+     if (strcasecmp(join_to, controld_globals.our_nodename) != 0) {
+-        member = crm_get_peer(0, controld_globals.our_nodename);
++        member = pcmk__get_peer(0, controld_globals.our_nodename, NULL);
+         join_make_offer(NULL, member, NULL);
+     }
+ 
+@@ -396,7 +396,7 @@ do_dc_join_filter_offer(long long action,
+         crm_err("Ignoring invalid join request without node name");
+         return;
+     }
+-    join_node = crm_get_peer(0, join_from);
++    join_node = pcmk__get_peer(0, join_from, NULL);
+ 
+     crm_element_value_int(join_ack->msg, F_CRM_JOIN_ID, &join_id);
+     if (join_id != current_join_id) {
+@@ -732,7 +732,7 @@ do_dc_join_ack(long long action,
+         goto done;
+     }
+ 
+-    peer = crm_get_peer(0, join_from);
++    peer = pcmk__get_peer(0, join_from, NULL);
+     if (peer->join != crm_join_finalized) {
+         crm_info("Ignoring out-of-sequence join-%d confirmation from %s "
+                  "(currently %s not %s)",
+@@ -866,7 +866,7 @@ finalize_join_for(gpointer key, gpointer value, gpointer user_data)
+         return;
+     }
+ 
+-    join_node = crm_get_peer(0, join_to);
++    join_node = pcmk__get_peer(0, join_to, NULL);
+     if (!crm_is_peer_active(join_node)) {
+         /*
+          * NACK'ing nodes that the membership layer doesn't know about yet
+diff --git a/daemons/controld/controld_messages.c b/daemons/controld/controld_messages.c
+index 39f3c7a..8d3cef7 100644
+--- a/daemons/controld/controld_messages.c
++++ b/daemons/controld/controld_messages.c
+@@ -458,7 +458,7 @@ relay_message(xmlNode * msg, gboolean originated_locally)
+                       ref, pcmk__s(host_to, "broadcast"));
+             crm_log_xml_trace(msg, "relayed");
+             if (!broadcast) {
+-                node_to = crm_get_peer(0, host_to);
++                node_to = pcmk__get_peer(0, host_to, NULL);
+             }
+             send_cluster_message(node_to, dest, msg, TRUE);
+             return TRUE;
+diff --git a/daemons/controld/controld_remote_ra.c b/daemons/controld/controld_remote_ra.c
+index d692ef6..a9c398d 100644
+--- a/daemons/controld/controld_remote_ra.c
++++ b/daemons/controld/controld_remote_ra.c
+@@ -206,7 +206,7 @@ should_purge_attributes(crm_node_t *node)
+     /* Get the node that was hosting the remote connection resource from the
+      * peer cache.  That's the one we really care about here.
+      */
+-    conn_node = crm_get_peer(0, node->conn_host);
++    conn_node = pcmk__get_peer(0, node->conn_host, NULL);
+     if (conn_node == NULL) {
+         return purge;
+     }
+diff --git a/daemons/controld/controld_te_actions.c b/daemons/controld/controld_te_actions.c
+index fe6b744..e76174b 100644
+--- a/daemons/controld/controld_te_actions.c
++++ b/daemons/controld/controld_te_actions.c
+@@ -158,7 +158,7 @@ execute_cluster_action(pcmk__graph_t *graph, pcmk__graph_action_t *action)
+         return pcmk_rc_ok;
+ 
+     } else if (pcmk__str_eq(task, PCMK_ACTION_DO_SHUTDOWN, pcmk__str_none)) {
+-        crm_node_t *peer = crm_get_peer(0, router_node);
++        crm_node_t *peer = pcmk__get_peer(0, router_node, NULL);
+ 
+         pcmk__update_peer_expected(__func__, peer, CRMD_JOINSTATE_DOWN);
+     }
+@@ -170,7 +170,8 @@ execute_cluster_action(pcmk__graph_t *graph, pcmk__graph_action_t *action)
+                                    controld_globals.te_uuid);
+     crm_xml_add(cmd, XML_ATTR_TRANSITION_KEY, counter);
+ 
+-    rc = send_cluster_message(crm_get_peer(0, router_node), crm_msg_crmd, cmd, TRUE);
++    rc = send_cluster_message(pcmk__get_peer(0, router_node, NULL),
++                              crm_msg_crmd, cmd, TRUE);
+     free(counter);
+     free_xml(cmd);
+ 
+@@ -421,7 +422,8 @@ execute_rsc_action(pcmk__graph_t *graph, pcmk__graph_action_t *action)
+                       I_NULL, &msg);
+ 
+     } else {
+-        rc = send_cluster_message(crm_get_peer(0, router_node), crm_msg_lrmd, cmd, TRUE);
++        rc = send_cluster_message(pcmk__get_peer(0, router_node, NULL),
++                                  crm_msg_lrmd, cmd, TRUE);
+     }
+ 
+     free(counter);
+diff --git a/daemons/controld/controld_te_events.c b/daemons/controld/controld_te_events.c
+index 28977c0..c8cceed 100644
+--- a/daemons/controld/controld_te_events.c
++++ b/daemons/controld/controld_te_events.c
+@@ -119,7 +119,8 @@ fail_incompletable_actions(pcmk__graph_t *graph, const char *down_node)
+             target_uuid = crm_element_value(action->xml, XML_LRM_ATTR_TARGET_UUID);
+             router = crm_element_value(action->xml, XML_LRM_ATTR_ROUTER_NODE);
+             if (router) {
+-                crm_node_t *node = crm_get_peer(0, router);
++                crm_node_t *node = pcmk__get_peer(0, router, NULL);
++
+                 if (node) {
+                     router_uuid = node->uuid;
+                 }
+diff --git a/daemons/controld/controld_utils.c b/daemons/controld/controld_utils.c
+index 9b306ee..55790c0 100644
+--- a/daemons/controld/controld_utils.c
++++ b/daemons/controld/controld_utils.c
+@@ -734,7 +734,7 @@ update_dc(xmlNode * msg)
+         /* do nothing */
+ 
+     } else if (controld_globals.dc_name != NULL) {
+-        crm_node_t *dc_node = crm_get_peer(0, controld_globals.dc_name);
++        crm_node_t *dc_node = pcmk__get_peer(0, controld_globals.dc_name, NULL);
+ 
+         crm_info("Set DC to %s (%s)",
+                  controld_globals.dc_name,
+diff --git a/daemons/fenced/fenced_commands.c b/daemons/fenced/fenced_commands.c
+index 7a62ed6..28f08dd 100644
+--- a/daemons/fenced/fenced_commands.c
++++ b/daemons/fenced/fenced_commands.c
+@@ -645,7 +645,7 @@ schedule_stonith_command(async_command_t * cmd, stonith_device_t * device)
+     }
+ 
+     if (device->include_nodeid && (cmd->target != NULL)) {
+-        crm_node_t *node = crm_get_peer(0, cmd->target);
++        crm_node_t *node = pcmk__get_peer(0, cmd->target, NULL);
+ 
+         cmd->target_nodeid = node->id;
+     }
+@@ -2402,8 +2402,8 @@ stonith_send_reply(const xmlNode *reply, int call_options,
+     if (remote_peer == NULL) {
+         do_local_reply(reply, client, call_options);
+     } else {
+-        send_cluster_message(crm_get_peer(0, remote_peer), crm_msg_stonith_ng,
+-                             reply, FALSE);
++        send_cluster_message(pcmk__get_peer(0, remote_peer, NULL),
++                             crm_msg_stonith_ng, reply, FALSE);
+     }
+ }
+ 
+@@ -3371,7 +3371,7 @@ handle_fence_request(pcmk__request_t *request)
+             crm_xml_add(request->xml, F_STONITH_CLIENTID,
+                         request->ipc_client->id);
+             crm_xml_add(request->xml, F_STONITH_REMOTE_OP_ID, op->id);
+-            send_cluster_message(crm_get_peer(0, alternate_host),
++            send_cluster_message(pcmk__get_peer(0, alternate_host, NULL),
+                                  crm_msg_stonith_ng, request->xml, FALSE);
+             pcmk__set_result(&request->result, CRM_EX_OK, PCMK_EXEC_PENDING,
+                              NULL);
+diff --git a/daemons/fenced/fenced_remote.c b/daemons/fenced/fenced_remote.c
+index 843b3d4..3c176c8 100644
+--- a/daemons/fenced/fenced_remote.c
++++ b/daemons/fenced/fenced_remote.c
+@@ -1030,7 +1030,7 @@ merge_duplicates(remote_fencing_op_t *op)
+                       op->id, other->id, other->target);
+             continue;
+         }
+-        if (!fencing_peer_active(crm_get_peer(0, other->originator))) {
++        if (!fencing_peer_active(pcmk__get_peer(0, other->originator, NULL))) {
+             crm_notice("Failing action '%s' targeting %s originating from "
+                        "client %s@%s: Originator is dead " CRM_XS " id=%.8s",
+                        other->action, other->target, other->client_name,
+@@ -1663,7 +1663,8 @@ report_timeout_period(remote_fencing_op_t * op, int op_timeout)
+     crm_xml_add(update, F_STONITH_CALLID, call_id);
+     crm_xml_add_int(update, F_STONITH_TIMEOUT, op_timeout);
+ 
+-    send_cluster_message(crm_get_peer(0, client_node), crm_msg_stonith_ng, update, FALSE);
++    send_cluster_message(pcmk__get_peer(0, client_node, NULL),
++                         crm_msg_stonith_ng, update, FALSE);
+ 
+     free_xml(update);
+ 
+@@ -1916,7 +1917,8 @@ request_peer_fencing(remote_fencing_op_t *op, peer_device_info_t *peer)
+             op->op_timer_one = g_timeout_add((1000 * timeout_one), remote_op_timeout_one, op);
+         }
+ 
+-        send_cluster_message(crm_get_peer(0, peer->host), crm_msg_stonith_ng, remote_op, FALSE);
++        send_cluster_message(pcmk__get_peer(0, peer->host, NULL),
++                             crm_msg_stonith_ng, remote_op, FALSE);
+         peer->tried = TRUE;
+         free_xml(remote_op);
+         return;
+diff --git a/include/crm/cluster.h b/include/crm/cluster.h
+index 137684d..302b807 100644
+--- a/include/crm/cluster.h
++++ b/include/crm/cluster.h
+@@ -146,9 +146,6 @@ void crm_remote_peer_cache_refresh(xmlNode *cib);
+ crm_node_t *crm_remote_peer_get(const char *node_name);
+ void crm_remote_peer_cache_remove(const char *node_name);
+ 
+-/* only searches cluster nodes */
+-crm_node_t *crm_get_peer(unsigned int id, const char *uname);
+-
+ guint crm_active_peers(void);
+ gboolean crm_is_peer_active(const crm_node_t * node);
+ guint reap_crm_member(uint32_t id, const char *name);
+diff --git a/include/crm/cluster/compat.h b/include/crm/cluster/compat.h
+index fc68f27..e853fd8 100644
+--- a/include/crm/cluster/compat.h
++++ b/include/crm/cluster/compat.h
+@@ -26,6 +26,9 @@ extern "C" {
+  *             release.
+  */
+ 
++// \deprecated Do not use Pacemaker for cluster node cacheing
++crm_node_t *crm_get_peer(unsigned int id, const char *uname);
++
+ // \deprecated Do not use Pacemaker for cluster node cacheing
+ crm_node_t *crm_get_peer_full(unsigned int id, const char *uname, int flags);
+ 
+diff --git a/lib/cluster/corosync.c b/lib/cluster/corosync.c
+index 08280ce..34a31fb 100644
+--- a/lib/cluster/corosync.c
++++ b/lib/cluster/corosync.c
+@@ -309,12 +309,12 @@ quorum_notification_cb(quorum_handle_t handle, uint32_t quorate,
+         crm_debug("Member[%d] %u ", i, id);
+ 
+         /* Get this node's peer cache entry (adding one if not already there) */
+-        node = crm_get_peer(id, NULL);
++        node = pcmk__get_peer(id, NULL, NULL);
+         if (node->uname == NULL) {
+             char *name = pcmk__corosync_name(0, id);
+ 
+             crm_info("Obtaining name for new node %u", id);
+-            node = crm_get_peer(id, name);
++            node = pcmk__get_peer(id, name, NULL);
+             free(name);
+         }
+ 
+@@ -480,7 +480,7 @@ pcmk__corosync_connect(crm_cluster_t *cluster)
+     }
+ 
+     // Ensure local node always exists in peer cache
+-    peer = crm_get_peer(cluster->nodeid, cluster->uname);
++    peer = pcmk__get_peer(cluster->nodeid, cluster->uname, NULL);
+     cluster->uuid = pcmk__corosync_uuid(peer);
+ 
+     return TRUE;
+@@ -640,7 +640,7 @@ pcmk__corosync_add_nodes(xmlNode *xml_parent)
+ 
+         if (nodeid > 0 || name != NULL) {
+             crm_trace("Initializing node[%d] %u = %s", lpc, nodeid, name);
+-            crm_get_peer(nodeid, name);
++            pcmk__get_peer(nodeid, name, NULL);
+         }
+ 
+         if (nodeid > 0 && name != NULL) {
+diff --git a/lib/cluster/cpg.c b/lib/cluster/cpg.c
+index d1decc6..778368f 100644
+--- a/lib/cluster/cpg.c
++++ b/lib/cluster/cpg.c
+@@ -465,7 +465,7 @@ pcmk_message_common_cs(cpg_handle_t handle, uint32_t nodeid, uint32_t pid, void
+ 
+         msg->sender.id = nodeid;
+         if (msg->sender.size == 0) {
+-            crm_node_t *peer = crm_get_peer(nodeid, NULL);
++            crm_node_t *peer = pcmk__get_peer(nodeid, NULL, NULL);
+ 
+             if (peer == NULL) {
+                 crm_err("Peer with nodeid=%u is unknown", nodeid);
+@@ -526,7 +526,7 @@ pcmk_message_common_cs(cpg_handle_t handle, uint32_t nodeid, uint32_t pid, void
+     }
+ 
+     // Is this necessary?
+-    crm_get_peer(msg->sender.id, msg->sender.uname);
++    pcmk__get_peer(msg->sender.id, msg->sender.uname, NULL);
+ 
+     crm_trace("Payload: %.200s", data);
+     return data;
+@@ -720,7 +720,7 @@ pcmk_cpg_membership(cpg_handle_t handle,
+     }
+ 
+     for (i = 0; i < member_list_entries; i++) {
+-        crm_node_t *peer = crm_get_peer(member_list[i].nodeid, NULL);
++        crm_node_t *peer = pcmk__get_peer(member_list[i].nodeid, NULL, NULL);
+ 
+         if (member_list[i].nodeid == local_nodeid
+                 && member_list[i].pid != getpid()) {
+@@ -873,7 +873,7 @@ cluster_connect_cpg(crm_cluster_t *cluster)
+         return FALSE;
+     }
+ 
+-    peer = crm_get_peer(id, NULL);
++    peer = pcmk__get_peer(id, NULL, NULL);
+     crm_update_peer_proc(__func__, peer, crm_proc_cpg, ONLINESTATUS);
+     return TRUE;
+ }
+diff --git a/lib/cluster/election.c b/lib/cluster/election.c
+index ebbae72..31867f2 100644
+--- a/lib/cluster/election.c
++++ b/lib/cluster/election.c
+@@ -298,7 +298,7 @@ election_vote(election_t *e)
+         return;
+     }
+ 
+-    our_node = crm_get_peer(0, e->uname);
++    our_node = pcmk__get_peer(0, e->uname, NULL);
+     if ((our_node == NULL) || (crm_is_peer_active(our_node) == FALSE)) {
+         crm_trace("Cannot vote in %s yet: local node not connected to cluster",
+                   e->name);
+@@ -547,8 +547,8 @@ election_count_vote(election_t *e, const xmlNode *message, bool can_win)
+         return election_error;
+     }
+ 
+-    your_node = crm_get_peer(0, vote.from);
+-    our_node = crm_get_peer(0, e->uname);
++    your_node = pcmk__get_peer(0, vote.from, NULL);
++    our_node = pcmk__get_peer(0, e->uname, NULL);
+     we_are_owner = (our_node != NULL)
+                    && pcmk__str_eq(our_node->uuid, vote.election_owner,
+                                    pcmk__str_none);
+diff --git a/lib/cluster/membership.c b/lib/cluster/membership.c
+index 52db840..41e0fa3 100644
+--- a/lib/cluster/membership.c
++++ b/lib/cluster/membership.c
+@@ -868,21 +868,6 @@ pcmk__get_peer(unsigned int id, const char *uname, const char *uuid)
+     return node;
+ }
+ 
+-/*!
+- * \brief Get a cluster node cache entry
+- *
+- * \param[in] id     If not 0, cluster node ID to search for
+- * \param[in] uname  If not NULL, node name to search for
+- *
+- * \return (Possibly newly created) cluster node cache entry
+- */
+-/* coverity[-alloc] Memory is referenced in one or both hashtables */
+-crm_node_t *
+-crm_get_peer(unsigned int id, const char *uname)
+-{
+-    return pcmk__get_peer(id, uname, NULL);
+-}
+-
+ /*!
+  * \internal
+  * \brief Update a node's uname
+@@ -1429,6 +1414,12 @@ crm_terminate_member_no_mainloop(int nodeid, const char *uname, int *connection)
+     return stonith_api_kick(nodeid, uname, 120, TRUE);
+ }
+ 
++crm_node_t *
++crm_get_peer(unsigned int id, const char *uname)
++{
++    return pcmk__get_peer(id, uname, NULL);
++}
++
+ crm_node_t *
+ crm_get_peer_full(unsigned int id, const char *uname, int flags)
+ {
+-- 
+2.31.1
+
+From 39e949a698afb5b0177b05e7d81b403cbb27a57a Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Tue, 19 Dec 2023 15:23:59 -0600
+Subject: [PATCH 4/9] Refactor: libcrmcluster: consolidate pcmk__get_peer() and
+ pcmk__get_peer_full()
+
+... into a new function pcmk__get_node() (since it can handle Pacemaker Remote
+nodes, which aren't peers)
+---
+ daemons/attrd/attrd_cib.c               |  6 +--
+ daemons/attrd/attrd_corosync.c          | 10 +++--
+ daemons/attrd/attrd_messages.c          | 11 ++++--
+ daemons/based/based_callbacks.c         | 10 +++--
+ daemons/based/based_messages.c          | 14 +++++--
+ daemons/controld/controld_corosync.c    |  2 +-
+ daemons/controld/controld_election.c    |  4 +-
+ daemons/controld/controld_execd.c       |  5 ++-
+ daemons/controld/controld_fencing.c     |  5 ++-
+ daemons/controld/controld_join_client.c |  9 +++--
+ daemons/controld/controld_join_dc.c     | 11 +++---
+ daemons/controld/controld_messages.c    |  3 +-
+ daemons/controld/controld_remote_ra.c   |  2 +-
+ daemons/controld/controld_te_actions.c  |  9 +++--
+ daemons/controld/controld_te_events.c   |  3 +-
+ daemons/controld/controld_utils.c       |  3 +-
+ daemons/fenced/fenced_commands.c        |  9 +++--
+ daemons/fenced/fenced_remote.c          |  9 +++--
+ include/crm/cluster/internal.h          |  8 ++--
+ lib/cluster/corosync.c                  |  9 +++--
+ lib/cluster/cpg.c                       | 13 ++++---
+ lib/cluster/election.c                  |  6 +--
+ lib/cluster/membership.c                | 52 ++++++++-----------------
+ 23 files changed, 116 insertions(+), 97 deletions(-)
+
+diff --git a/daemons/attrd/attrd_cib.c b/daemons/attrd/attrd_cib.c
+index b22137a..7018a32 100644
+--- a/daemons/attrd/attrd_cib.c
++++ b/daemons/attrd/attrd_cib.c
+@@ -20,7 +20,7 @@
+ #include <crm/common/results.h>
+ #include <crm/common/strings_internal.h>
+ #include <crm/common/xml.h>
+-#include <crm/cluster/internal.h>   // pcmk__get_peer_full()
++#include <crm/cluster/internal.h>   // pcmk__get_node()
+ 
+ #include "pacemaker-attrd.h"
+ 
+@@ -567,8 +567,8 @@ write_attribute(attribute_t *a, bool ignore_delay)
+ 
+         } else {
+             // This will create a cluster node cache entry if none exists
+-            crm_node_t *peer = pcmk__get_peer_full(v->nodeid, v->nodename, NULL,
+-                                                   CRM_GET_PEER_ANY);
++            crm_node_t *peer = pcmk__get_node(v->nodeid, v->nodename, NULL,
++                                              CRM_GET_PEER_ANY);
+ 
+             uuid = peer->uuid;
+ 
+diff --git a/daemons/attrd/attrd_corosync.c b/daemons/attrd/attrd_corosync.c
+index 3b2880b..c9e11e6 100644
+--- a/daemons/attrd/attrd_corosync.c
++++ b/daemons/attrd/attrd_corosync.c
+@@ -119,7 +119,9 @@ attrd_cpg_dispatch(cpg_handle_t handle,
+     if (xml == NULL) {
+         crm_err("Bad message of class %d received from %s[%u]: '%.120s'", kind, from, nodeid, data);
+     } else {
+-        attrd_peer_message(pcmk__get_peer(nodeid, from, NULL), xml);
++        attrd_peer_message(pcmk__get_node(nodeid, from, NULL,
++                                          CRM_GET_PEER_CLUSTER),
++                           xml);
+     }
+ 
+     free_xml(xml);
+@@ -252,7 +254,8 @@ attrd_peer_change_cb(enum crm_status_type kind, crm_node_t *peer, const void *da
+ static void
+ record_peer_nodeid(attribute_value_t *v, const char *host)
+ {
+-    crm_node_t *known_peer = pcmk__get_peer(v->nodeid, host, NULL);
++    crm_node_t *known_peer = pcmk__get_node(v->nodeid, host, NULL,
++                                            CRM_GET_PEER_CLUSTER);
+ 
+     crm_trace("Learned %s has node id %s", known_peer->uname, known_peer->uuid);
+     if (attrd_election_won()) {
+@@ -437,7 +440,8 @@ attrd_peer_clear_failure(pcmk__request_t *request)
+     GHashTableIter iter;
+     regex_t regex;
+ 
+-    crm_node_t *peer = pcmk__get_peer(0, request->peer, NULL);
++    crm_node_t *peer = pcmk__get_node(0, request->peer, NULL,
++                                      CRM_GET_PEER_CLUSTER);
+ 
+     if (attrd_failure_regex(&regex, rsc, op, interval_ms) != pcmk_ok) {
+         crm_info("Ignoring invalid request to clear failures for %s",
+diff --git a/daemons/attrd/attrd_messages.c b/daemons/attrd/attrd_messages.c
+index 5536207..c6c1b9a 100644
+--- a/daemons/attrd/attrd_messages.c
++++ b/daemons/attrd/attrd_messages.c
+@@ -12,7 +12,7 @@
+ #include <glib.h>
+ 
+ #include <crm/common/messages_internal.h>
+-#include <crm/cluster/internal.h>   // pcmk__get_peer()
++#include <crm/cluster/internal.h>   // pcmk__get_node()
+ #include <crm/msg_xml.h>
+ 
+ #include "pacemaker-attrd.h"
+@@ -177,7 +177,8 @@ static xmlNode *
+ handle_sync_request(pcmk__request_t *request)
+ {
+     if (request->peer != NULL) {
+-        crm_node_t *peer = pcmk__get_peer(0, request->peer, NULL);
++        crm_node_t *peer = pcmk__get_node(0, request->peer, NULL,
++                                          CRM_GET_PEER_CLUSTER);
+ 
+         attrd_peer_sync(peer, request->xml);
+         pcmk__set_result(&request->result, CRM_EX_OK, PCMK_EXEC_DONE, NULL);
+@@ -194,7 +195,8 @@ handle_sync_response_request(pcmk__request_t *request)
+         return handle_unknown_request(request);
+     } else {
+         if (request->peer != NULL) {
+-            crm_node_t *peer = pcmk__get_peer(0, request->peer, NULL);
++            crm_node_t *peer = pcmk__get_node(0, request->peer, NULL,
++                                              CRM_GET_PEER_CLUSTER);
+             bool peer_won = attrd_check_for_new_writer(peer, request->xml);
+ 
+             if (!pcmk__str_eq(peer->uname, attrd_cluster->uname, pcmk__str_casei)) {
+@@ -212,7 +214,8 @@ handle_update_request(pcmk__request_t *request)
+ {
+     if (request->peer != NULL) {
+         const char *host = crm_element_value(request->xml, PCMK__XA_ATTR_NODE_NAME);
+-        crm_node_t *peer = pcmk__get_peer(0, request->peer, NULL);
++        crm_node_t *peer = pcmk__get_node(0, request->peer, NULL,
++                                          CRM_GET_PEER_CLUSTER);
+ 
+         attrd_peer_update(peer, request->xml, host, false);
+         pcmk__set_result(&request->result, CRM_EX_OK, PCMK_EXEC_DONE, NULL);
+diff --git a/daemons/based/based_callbacks.c b/daemons/based/based_callbacks.c
+index 02f3425..b1f3b4b 100644
+--- a/daemons/based/based_callbacks.c
++++ b/daemons/based/based_callbacks.c
+@@ -910,6 +910,7 @@ forward_request(xmlNode *request)
+     const char *originator = crm_element_value(request, F_ORIG);
+     const char *client_name = crm_element_value(request, F_CIB_CLIENTNAME);
+     const char *call_id = crm_element_value(request, F_CIB_CALLID);
++    crm_node_t *peer = NULL;
+ 
+     int log_level = LOG_INFO;
+ 
+@@ -928,8 +929,10 @@ forward_request(xmlNode *request)
+ 
+     crm_xml_add(request, F_CIB_DELEGATED, OUR_NODENAME);
+ 
+-    send_cluster_message(((host != NULL)? pcmk__get_peer(0, host, NULL) : NULL),
+-                         crm_msg_cib, request, FALSE);
++    if (host != NULL) {
++        peer = pcmk__get_node(0, host, NULL, CRM_GET_PEER_CLUSTER);
++    }
++    send_cluster_message(peer, crm_msg_cib, request, FALSE);
+ 
+     // Return the request to its original state
+     xml_remove_prop(request, F_CIB_DELEGATED);
+@@ -986,7 +989,8 @@ send_peer_reply(xmlNode * msg, xmlNode * result_diff, const char *originator, gb
+         /* send reply via HA to originating node */
+         crm_trace("Sending request result to %s only", originator);
+         crm_xml_add(msg, F_CIB_ISREPLY, originator);
+-        return send_cluster_message(pcmk__get_peer(0, originator, NULL),
++        return send_cluster_message(pcmk__get_node(0, originator, NULL,
++                                                   CRM_GET_PEER_CLUSTER),
+                                     crm_msg_cib, msg, FALSE);
+     }
+ 
+diff --git a/daemons/based/based_messages.c b/daemons/based/based_messages.c
+index 08521e4..ff1a6aa 100644
+--- a/daemons/based/based_messages.c
++++ b/daemons/based/based_messages.c
+@@ -118,6 +118,7 @@ void
+ send_sync_request(const char *host)
+ {
+     xmlNode *sync_me = create_xml_node(NULL, "sync-me");
++    crm_node_t *peer = NULL;
+ 
+     crm_info("Requesting re-sync from %s", (host? host : "all peers"));
+     sync_in_progress = 1;
+@@ -127,8 +128,10 @@ send_sync_request(const char *host)
+     crm_xml_add(sync_me, F_CIB_DELEGATED,
+                 stand_alone? "localhost" : crm_cluster->uname);
+ 
+-    send_cluster_message((host == NULL)? NULL : pcmk__get_peer(0, host, NULL),
+-                         crm_msg_cib, sync_me, FALSE);
++    if (host != NULL) {
++        peer = pcmk__get_node(0, host, NULL, CRM_GET_PEER_CLUSTER);
++    }
++    send_cluster_message(peer, crm_msg_cib, sync_me, FALSE);
+     free_xml(sync_me);
+ }
+ 
+@@ -418,6 +421,7 @@ sync_our_cib(xmlNode * request, gboolean all)
+     const char *host = crm_element_value(request, F_ORIG);
+     const char *op = crm_element_value(request, F_CIB_OPERATION);
+ 
++    crm_node_t *peer = NULL;
+     xmlNode *replace_request = NULL;
+ 
+     CRM_CHECK(the_cib != NULL, return -EINVAL);
+@@ -444,8 +448,10 @@ sync_our_cib(xmlNode * request, gboolean all)
+ 
+     add_message_xml(replace_request, F_CIB_CALLDATA, the_cib);
+ 
+-    if (!send_cluster_message(all? NULL : pcmk__get_peer(0, host, NULL),
+-                              crm_msg_cib, replace_request, FALSE)) {
++    if (!all) {
++        peer = pcmk__get_node(0, host, NULL, CRM_GET_PEER_CLUSTER);
++    }
++    if (!send_cluster_message(peer, crm_msg_cib, replace_request, FALSE)) {
+         result = -ENOTCONN;
+     }
+     free_xml(replace_request);
+diff --git a/daemons/controld/controld_corosync.c b/daemons/controld/controld_corosync.c
+index c2953b5..fa1df6f 100644
+--- a/daemons/controld/controld_corosync.c
++++ b/daemons/controld/controld_corosync.c
+@@ -49,7 +49,7 @@ crmd_cs_dispatch(cpg_handle_t handle, const struct cpg_name *groupName,
+         crm_xml_add(xml, F_ORIG, from);
+         /* crm_xml_add_int(xml, F_SEQ, wrapper->id); Fake? */
+ 
+-        peer = pcmk__get_peer(0, from, NULL);
++        peer = pcmk__get_node(0, from, NULL, CRM_GET_PEER_CLUSTER);
+         if (!pcmk_is_set(peer->processes, crm_proc_cpg)) {
+             /* If we can still talk to our peer process on that node,
+              * then it must be part of the corosync membership
+diff --git a/daemons/controld/controld_election.c b/daemons/controld/controld_election.c
+index 6e22067..734064d 100644
+--- a/daemons/controld/controld_election.c
++++ b/daemons/controld/controld_election.c
+@@ -265,8 +265,8 @@ do_dc_release(long long action,
+         crm_info("DC role released");
+         if (pcmk_is_set(controld_globals.fsa_input_register, R_SHUTDOWN)) {
+             xmlNode *update = NULL;
+-            crm_node_t *node = pcmk__get_peer(0, controld_globals.our_nodename,
+-                                              NULL);
++            crm_node_t *node = pcmk__get_node(0, controld_globals.our_nodename,
++                                              NULL, CRM_GET_PEER_CLUSTER);
+ 
+             pcmk__update_peer_expected(__func__, node, CRMD_JOINSTATE_DOWN);
+             update = create_node_state_update(node, node_update_expected, NULL,
+diff --git a/daemons/controld/controld_execd.c b/daemons/controld/controld_execd.c
+index 45b6b58..df715aa 100644
+--- a/daemons/controld/controld_execd.c
++++ b/daemons/controld/controld_execd.c
+@@ -581,7 +581,7 @@ controld_query_executor_state(void)
+         return NULL;
+     }
+ 
+-    peer = pcmk__get_peer_full(0, lrm_state->node_name, NULL, CRM_GET_PEER_ANY);
++    peer = pcmk__get_node(0, lrm_state->node_name, NULL, CRM_GET_PEER_ANY);
+     CRM_CHECK(peer != NULL, return NULL);
+ 
+     xml_state = create_node_state_update(peer,
+@@ -1752,7 +1752,8 @@ controld_ack_event_directly(const char *to_host, const char *to_sys,
+         to_sys = CRM_SYSTEM_TENGINE;
+     }
+ 
+-    peer = pcmk__get_peer(0, controld_globals.our_nodename, NULL);
++    peer = pcmk__get_node(0, controld_globals.our_nodename, NULL,
++                          CRM_GET_PEER_CLUSTER);
+     update = create_node_state_update(peer, node_update_none, NULL,
+                                       __func__);
+ 
+diff --git a/daemons/controld/controld_fencing.c b/daemons/controld/controld_fencing.c
+index 6c0ee09..60a7f9f 100644
+--- a/daemons/controld/controld_fencing.c
++++ b/daemons/controld/controld_fencing.c
+@@ -222,7 +222,7 @@ send_stonith_update(pcmk__graph_action_t *action, const char *target,
+      * Try getting any existing node cache entry also by node uuid in case it
+      * doesn't have an uname yet.
+      */
+-    peer = pcmk__get_peer_full(0, target, uuid, CRM_GET_PEER_ANY);
++    peer = pcmk__get_node(0, target, uuid, CRM_GET_PEER_ANY);
+ 
+     CRM_CHECK(peer != NULL, return);
+ 
+@@ -374,7 +374,8 @@ execute_stonith_cleanup(void)
+ 
+     for (iter = stonith_cleanup_list; iter != NULL; iter = iter->next) {
+         char *target = iter->data;
+-        crm_node_t *target_node = pcmk__get_peer(0, target, NULL);
++        crm_node_t *target_node = pcmk__get_node(0, target, NULL,
++                                                 CRM_GET_PEER_CLUSTER);
+         const char *uuid = crm_peer_uuid(target_node);
+ 
+         crm_notice("Marking %s, target of a previous stonith action, as clean", target);
+diff --git a/daemons/controld/controld_join_client.c b/daemons/controld/controld_join_client.c
+index 2b5267d..6f20ef2 100644
+--- a/daemons/controld/controld_join_client.c
++++ b/daemons/controld/controld_join_client.c
+@@ -35,7 +35,8 @@ update_dc_expected(const xmlNode *msg)
+ {
+     if ((controld_globals.dc_name != NULL)
+         && pcmk__xe_attr_is_true(msg, F_CRM_DC_LEAVING)) {
+-        crm_node_t *dc_node = pcmk__get_peer(0, controld_globals.dc_name, NULL);
++        crm_node_t *dc_node = pcmk__get_node(0, controld_globals.dc_name, NULL,
++                                             CRM_GET_PEER_CLUSTER);
+ 
+         pcmk__update_peer_expected(__func__, dc_node, CRMD_JOINSTATE_DOWN);
+     }
+@@ -177,7 +178,8 @@ join_query_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, void *
+ 
+         crm_xml_add(reply, F_CRM_JOIN_ID, join_id);
+         crm_xml_add(reply, XML_ATTR_CRM_VERSION, CRM_FEATURE_SET);
+-        send_cluster_message(pcmk__get_peer(0, controld_globals.dc_name, NULL),
++        send_cluster_message(pcmk__get_node(0, controld_globals.dc_name, NULL,
++                                            CRM_GET_PEER_CLUSTER),
+                              crm_msg_crmd, reply, TRUE);
+         free_xml(reply);
+     }
+@@ -333,7 +335,8 @@ do_cl_join_finalize_respond(long long action,
+             }
+         }
+ 
+-        send_cluster_message(pcmk__get_peer(0, controld_globals.dc_name, NULL),
++        send_cluster_message(pcmk__get_node(0, controld_globals.dc_name, NULL,
++                                            CRM_GET_PEER_CLUSTER),
+                              crm_msg_crmd, reply, TRUE);
+         free_xml(reply);
+ 
+diff --git a/daemons/controld/controld_join_dc.c b/daemons/controld/controld_join_dc.c
+index 45e1eba..064649f 100644
+--- a/daemons/controld/controld_join_dc.c
++++ b/daemons/controld/controld_join_dc.c
+@@ -318,7 +318,7 @@ do_dc_join_offer_one(long long action,
+         crm_err("Can't make join-%d offer to unknown node", current_join_id);
+         return;
+     }
+-    member = pcmk__get_peer(0, join_to, NULL);
++    member = pcmk__get_node(0, join_to, NULL, CRM_GET_PEER_CLUSTER);
+ 
+     /* It is possible that a node will have been sick or starting up when the
+      * original offer was made. However, it will either re-announce itself in
+@@ -332,7 +332,8 @@ do_dc_join_offer_one(long long action,
+      * well, to ensure the correct value for max_generation_from.
+      */
+     if (strcasecmp(join_to, controld_globals.our_nodename) != 0) {
+-        member = pcmk__get_peer(0, controld_globals.our_nodename, NULL);
++        member = pcmk__get_node(0, controld_globals.our_nodename, NULL,
++                                CRM_GET_PEER_CLUSTER);
+         join_make_offer(NULL, member, NULL);
+     }
+ 
+@@ -396,7 +397,7 @@ do_dc_join_filter_offer(long long action,
+         crm_err("Ignoring invalid join request without node name");
+         return;
+     }
+-    join_node = pcmk__get_peer(0, join_from, NULL);
++    join_node = pcmk__get_node(0, join_from, NULL, CRM_GET_PEER_CLUSTER);
+ 
+     crm_element_value_int(join_ack->msg, F_CRM_JOIN_ID, &join_id);
+     if (join_id != current_join_id) {
+@@ -732,7 +733,7 @@ do_dc_join_ack(long long action,
+         goto done;
+     }
+ 
+-    peer = pcmk__get_peer(0, join_from, NULL);
++    peer = pcmk__get_node(0, join_from, NULL, CRM_GET_PEER_CLUSTER);
+     if (peer->join != crm_join_finalized) {
+         crm_info("Ignoring out-of-sequence join-%d confirmation from %s "
+                  "(currently %s not %s)",
+@@ -866,7 +867,7 @@ finalize_join_for(gpointer key, gpointer value, gpointer user_data)
+         return;
+     }
+ 
+-    join_node = pcmk__get_peer(0, join_to, NULL);
++    join_node = pcmk__get_node(0, join_to, NULL, CRM_GET_PEER_CLUSTER);
+     if (!crm_is_peer_active(join_node)) {
+         /*
+          * NACK'ing nodes that the membership layer doesn't know about yet
+diff --git a/daemons/controld/controld_messages.c b/daemons/controld/controld_messages.c
+index 8d3cef7..71f5680 100644
+--- a/daemons/controld/controld_messages.c
++++ b/daemons/controld/controld_messages.c
+@@ -458,7 +458,8 @@ relay_message(xmlNode * msg, gboolean originated_locally)
+                       ref, pcmk__s(host_to, "broadcast"));
+             crm_log_xml_trace(msg, "relayed");
+             if (!broadcast) {
+-                node_to = pcmk__get_peer(0, host_to, NULL);
++                node_to = pcmk__get_node(0, host_to, NULL,
++                                         CRM_GET_PEER_CLUSTER);
+             }
+             send_cluster_message(node_to, dest, msg, TRUE);
+             return TRUE;
+diff --git a/daemons/controld/controld_remote_ra.c b/daemons/controld/controld_remote_ra.c
+index a9c398d..9c4bb58 100644
+--- a/daemons/controld/controld_remote_ra.c
++++ b/daemons/controld/controld_remote_ra.c
+@@ -206,7 +206,7 @@ should_purge_attributes(crm_node_t *node)
+     /* Get the node that was hosting the remote connection resource from the
+      * peer cache.  That's the one we really care about here.
+      */
+-    conn_node = pcmk__get_peer(0, node->conn_host, NULL);
++    conn_node = pcmk__get_node(0, node->conn_host, NULL, CRM_GET_PEER_CLUSTER);
+     if (conn_node == NULL) {
+         return purge;
+     }
+diff --git a/daemons/controld/controld_te_actions.c b/daemons/controld/controld_te_actions.c
+index e76174b..01ba4a0 100644
+--- a/daemons/controld/controld_te_actions.c
++++ b/daemons/controld/controld_te_actions.c
+@@ -158,7 +158,8 @@ execute_cluster_action(pcmk__graph_t *graph, pcmk__graph_action_t *action)
+         return pcmk_rc_ok;
+ 
+     } else if (pcmk__str_eq(task, PCMK_ACTION_DO_SHUTDOWN, pcmk__str_none)) {
+-        crm_node_t *peer = pcmk__get_peer(0, router_node, NULL);
++        crm_node_t *peer = pcmk__get_node(0, router_node, NULL,
++                                          CRM_GET_PEER_CLUSTER);
+ 
+         pcmk__update_peer_expected(__func__, peer, CRMD_JOINSTATE_DOWN);
+     }
+@@ -170,7 +171,8 @@ execute_cluster_action(pcmk__graph_t *graph, pcmk__graph_action_t *action)
+                                    controld_globals.te_uuid);
+     crm_xml_add(cmd, XML_ATTR_TRANSITION_KEY, counter);
+ 
+-    rc = send_cluster_message(pcmk__get_peer(0, router_node, NULL),
++    rc = send_cluster_message(pcmk__get_node(0, router_node, NULL,
++                                             CRM_GET_PEER_CLUSTER),
+                               crm_msg_crmd, cmd, TRUE);
+     free(counter);
+     free_xml(cmd);
+@@ -422,7 +424,8 @@ execute_rsc_action(pcmk__graph_t *graph, pcmk__graph_action_t *action)
+                       I_NULL, &msg);
+ 
+     } else {
+-        rc = send_cluster_message(pcmk__get_peer(0, router_node, NULL),
++        rc = send_cluster_message(pcmk__get_node(0, router_node, NULL,
++                                                 CRM_GET_PEER_CLUSTER),
+                                   crm_msg_lrmd, cmd, TRUE);
+     }
+ 
+diff --git a/daemons/controld/controld_te_events.c b/daemons/controld/controld_te_events.c
+index c8cceed..84bef5b 100644
+--- a/daemons/controld/controld_te_events.c
++++ b/daemons/controld/controld_te_events.c
+@@ -119,7 +119,8 @@ fail_incompletable_actions(pcmk__graph_t *graph, const char *down_node)
+             target_uuid = crm_element_value(action->xml, XML_LRM_ATTR_TARGET_UUID);
+             router = crm_element_value(action->xml, XML_LRM_ATTR_ROUTER_NODE);
+             if (router) {
+-                crm_node_t *node = pcmk__get_peer(0, router, NULL);
++                crm_node_t *node = pcmk__get_node(0, router, NULL,
++                                                  CRM_GET_PEER_CLUSTER);
+ 
+                 if (node) {
+                     router_uuid = node->uuid;
+diff --git a/daemons/controld/controld_utils.c b/daemons/controld/controld_utils.c
+index 55790c0..0e92416 100644
+--- a/daemons/controld/controld_utils.c
++++ b/daemons/controld/controld_utils.c
+@@ -734,7 +734,8 @@ update_dc(xmlNode * msg)
+         /* do nothing */
+ 
+     } else if (controld_globals.dc_name != NULL) {
+-        crm_node_t *dc_node = pcmk__get_peer(0, controld_globals.dc_name, NULL);
++        crm_node_t *dc_node = pcmk__get_node(0, controld_globals.dc_name, NULL,
++                                             CRM_GET_PEER_CLUSTER);
+ 
+         crm_info("Set DC to %s (%s)",
+                  controld_globals.dc_name,
+diff --git a/daemons/fenced/fenced_commands.c b/daemons/fenced/fenced_commands.c
+index 28f08dd..c519607 100644
+--- a/daemons/fenced/fenced_commands.c
++++ b/daemons/fenced/fenced_commands.c
+@@ -645,7 +645,8 @@ schedule_stonith_command(async_command_t * cmd, stonith_device_t * device)
+     }
+ 
+     if (device->include_nodeid && (cmd->target != NULL)) {
+-        crm_node_t *node = pcmk__get_peer(0, cmd->target, NULL);
++        crm_node_t *node = pcmk__get_node(0, cmd->target, NULL,
++                                          CRM_GET_PEER_CLUSTER);
+ 
+         cmd->target_nodeid = node->id;
+     }
+@@ -2402,7 +2403,8 @@ stonith_send_reply(const xmlNode *reply, int call_options,
+     if (remote_peer == NULL) {
+         do_local_reply(reply, client, call_options);
+     } else {
+-        send_cluster_message(pcmk__get_peer(0, remote_peer, NULL),
++        send_cluster_message(pcmk__get_node(0, remote_peer, NULL,
++                                            CRM_GET_PEER_CLUSTER),
+                              crm_msg_stonith_ng, reply, FALSE);
+     }
+ }
+@@ -3371,7 +3373,8 @@ handle_fence_request(pcmk__request_t *request)
+             crm_xml_add(request->xml, F_STONITH_CLIENTID,
+                         request->ipc_client->id);
+             crm_xml_add(request->xml, F_STONITH_REMOTE_OP_ID, op->id);
+-            send_cluster_message(pcmk__get_peer(0, alternate_host, NULL),
++            send_cluster_message(pcmk__get_node(0, alternate_host, NULL,
++                                                CRM_GET_PEER_CLUSTER),
+                                  crm_msg_stonith_ng, request->xml, FALSE);
+             pcmk__set_result(&request->result, CRM_EX_OK, PCMK_EXEC_PENDING,
+                              NULL);
+diff --git a/daemons/fenced/fenced_remote.c b/daemons/fenced/fenced_remote.c
+index 3c176c8..96b518a 100644
+--- a/daemons/fenced/fenced_remote.c
++++ b/daemons/fenced/fenced_remote.c
+@@ -1030,7 +1030,8 @@ merge_duplicates(remote_fencing_op_t *op)
+                       op->id, other->id, other->target);
+             continue;
+         }
+-        if (!fencing_peer_active(pcmk__get_peer(0, other->originator, NULL))) {
++        if (!fencing_peer_active(pcmk__get_node(0, other->originator, NULL,
++                                                CRM_GET_PEER_CLUSTER))) {
+             crm_notice("Failing action '%s' targeting %s originating from "
+                        "client %s@%s: Originator is dead " CRM_XS " id=%.8s",
+                        other->action, other->target, other->client_name,
+@@ -1663,7 +1664,8 @@ report_timeout_period(remote_fencing_op_t * op, int op_timeout)
+     crm_xml_add(update, F_STONITH_CALLID, call_id);
+     crm_xml_add_int(update, F_STONITH_TIMEOUT, op_timeout);
+ 
+-    send_cluster_message(pcmk__get_peer(0, client_node, NULL),
++    send_cluster_message(pcmk__get_node(0, client_node, NULL,
++                                        CRM_GET_PEER_CLUSTER),
+                          crm_msg_stonith_ng, update, FALSE);
+ 
+     free_xml(update);
+@@ -1917,7 +1919,8 @@ request_peer_fencing(remote_fencing_op_t *op, peer_device_info_t *peer)
+             op->op_timer_one = g_timeout_add((1000 * timeout_one), remote_op_timeout_one, op);
+         }
+ 
+-        send_cluster_message(pcmk__get_peer(0, peer->host, NULL),
++        send_cluster_message(pcmk__get_node(0, peer->host, NULL,
++                                            CRM_GET_PEER_CLUSTER),
+                              crm_msg_stonith_ng, remote_op, FALSE);
+         peer->tried = TRUE;
+         free_xml(remote_op);
+diff --git a/include/crm/cluster/internal.h b/include/crm/cluster/internal.h
+index c71069b..bea4086 100644
+--- a/include/crm/cluster/internal.h
++++ b/include/crm/cluster/internal.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2004-2023 the Pacemaker project contributors
++ * Copyright 2004-2024 the Pacemaker project contributors
+  *
+  * The version control history for this file may have further details.
+  *
+@@ -132,9 +132,7 @@ void pcmk__refresh_node_caches_from_cib(xmlNode *cib);
+ crm_node_t *pcmk__search_known_node_cache(unsigned int id, const char *uname,
+                                           uint32_t flags);
+ 
+-crm_node_t *pcmk__get_peer(unsigned int id, const char *uname,
+-                           const char *uuid);
+-crm_node_t *pcmk__get_peer_full(unsigned int id, const char *uname,
+-                                const char *uuid, int flags);
++crm_node_t *pcmk__get_node(unsigned int id, const char *uname,
++                           const char *uuid, uint32_t flags);
+ 
+ #endif // PCMK__CRM_CLUSTER_INTERNAL__H
+diff --git a/lib/cluster/corosync.c b/lib/cluster/corosync.c
+index 34a31fb..47a3321 100644
+--- a/lib/cluster/corosync.c
++++ b/lib/cluster/corosync.c
+@@ -309,12 +309,12 @@ quorum_notification_cb(quorum_handle_t handle, uint32_t quorate,
+         crm_debug("Member[%d] %u ", i, id);
+ 
+         /* Get this node's peer cache entry (adding one if not already there) */
+-        node = pcmk__get_peer(id, NULL, NULL);
++        node = pcmk__get_node(id, NULL, NULL, CRM_GET_PEER_CLUSTER);
+         if (node->uname == NULL) {
+             char *name = pcmk__corosync_name(0, id);
+ 
+             crm_info("Obtaining name for new node %u", id);
+-            node = pcmk__get_peer(id, name, NULL);
++            node = pcmk__get_node(id, name, NULL, CRM_GET_PEER_CLUSTER);
+             free(name);
+         }
+ 
+@@ -480,7 +480,8 @@ pcmk__corosync_connect(crm_cluster_t *cluster)
+     }
+ 
+     // Ensure local node always exists in peer cache
+-    peer = pcmk__get_peer(cluster->nodeid, cluster->uname, NULL);
++    peer = pcmk__get_node(cluster->nodeid, cluster->uname, NULL,
++                          CRM_GET_PEER_CLUSTER);
+     cluster->uuid = pcmk__corosync_uuid(peer);
+ 
+     return TRUE;
+@@ -640,7 +641,7 @@ pcmk__corosync_add_nodes(xmlNode *xml_parent)
+ 
+         if (nodeid > 0 || name != NULL) {
+             crm_trace("Initializing node[%d] %u = %s", lpc, nodeid, name);
+-            pcmk__get_peer(nodeid, name, NULL);
++            pcmk__get_node(nodeid, name, NULL, CRM_GET_PEER_CLUSTER);
+         }
+ 
+         if (nodeid > 0 && name != NULL) {
+diff --git a/lib/cluster/cpg.c b/lib/cluster/cpg.c
+index 778368f..bc251da 100644
+--- a/lib/cluster/cpg.c
++++ b/lib/cluster/cpg.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2004-2023 the Pacemaker project contributors
++ * Copyright 2004-2024 the Pacemaker project contributors
+  *
+  * The version control history for this file may have further details.
+  *
+@@ -465,7 +465,8 @@ pcmk_message_common_cs(cpg_handle_t handle, uint32_t nodeid, uint32_t pid, void
+ 
+         msg->sender.id = nodeid;
+         if (msg->sender.size == 0) {
+-            crm_node_t *peer = pcmk__get_peer(nodeid, NULL, NULL);
++            crm_node_t *peer = pcmk__get_node(nodeid, NULL, NULL,
++                                              CRM_GET_PEER_CLUSTER);
+ 
+             if (peer == NULL) {
+                 crm_err("Peer with nodeid=%u is unknown", nodeid);
+@@ -526,7 +527,8 @@ pcmk_message_common_cs(cpg_handle_t handle, uint32_t nodeid, uint32_t pid, void
+     }
+ 
+     // Is this necessary?
+-    pcmk__get_peer(msg->sender.id, msg->sender.uname, NULL);
++    pcmk__get_node(msg->sender.id, msg->sender.uname, NULL,
++                   CRM_GET_PEER_CLUSTER);
+ 
+     crm_trace("Payload: %.200s", data);
+     return data;
+@@ -720,7 +722,8 @@ pcmk_cpg_membership(cpg_handle_t handle,
+     }
+ 
+     for (i = 0; i < member_list_entries; i++) {
+-        crm_node_t *peer = pcmk__get_peer(member_list[i].nodeid, NULL, NULL);
++        crm_node_t *peer = pcmk__get_node(member_list[i].nodeid, NULL, NULL,
++                                          CRM_GET_PEER_CLUSTER);
+ 
+         if (member_list[i].nodeid == local_nodeid
+                 && member_list[i].pid != getpid()) {
+@@ -873,7 +876,7 @@ cluster_connect_cpg(crm_cluster_t *cluster)
+         return FALSE;
+     }
+ 
+-    peer = pcmk__get_peer(id, NULL, NULL);
++    peer = pcmk__get_node(id, NULL, NULL, CRM_GET_PEER_CLUSTER);
+     crm_update_peer_proc(__func__, peer, crm_proc_cpg, ONLINESTATUS);
+     return TRUE;
+ }
+diff --git a/lib/cluster/election.c b/lib/cluster/election.c
+index 31867f2..576c0aa 100644
+--- a/lib/cluster/election.c
++++ b/lib/cluster/election.c
+@@ -298,7 +298,7 @@ election_vote(election_t *e)
+         return;
+     }
+ 
+-    our_node = pcmk__get_peer(0, e->uname, NULL);
++    our_node = pcmk__get_node(0, e->uname, NULL, CRM_GET_PEER_CLUSTER);
+     if ((our_node == NULL) || (crm_is_peer_active(our_node) == FALSE)) {
+         crm_trace("Cannot vote in %s yet: local node not connected to cluster",
+                   e->name);
+@@ -547,8 +547,8 @@ election_count_vote(election_t *e, const xmlNode *message, bool can_win)
+         return election_error;
+     }
+ 
+-    your_node = pcmk__get_peer(0, vote.from, NULL);
+-    our_node = pcmk__get_peer(0, e->uname, NULL);
++    your_node = pcmk__get_node(0, vote.from, NULL, CRM_GET_PEER_CLUSTER);
++    our_node = pcmk__get_node(0, e->uname, NULL, CRM_GET_PEER_CLUSTER);
+     we_are_owner = (our_node != NULL)
+                    && pcmk__str_eq(our_node->uuid, vote.election_owner,
+                                    pcmk__str_none);
+diff --git a/lib/cluster/membership.c b/lib/cluster/membership.c
+index 41e0fa3..4c89a7c 100644
+--- a/lib/cluster/membership.c
++++ b/lib/cluster/membership.c
+@@ -562,37 +562,6 @@ pcmk__search_node_caches(unsigned int id, const char *uname, uint32_t flags)
+     return node;
+ }
+ 
+-/*!
+- * \brief Get a node cache entry (cluster or Pacemaker Remote)
+- *
+- * \param[in] id     If not 0, cluster node ID to search for
+- * \param[in] uname  If not NULL, node name to search for
+- * \param[in] uuid   If not NULL while id is 0, node UUID instead of cluster
+- *                   node ID to search for
+- * \param[in] flags  Bitmask of enum crm_get_peer_flags
+- *
+- * \return (Possibly newly created) node cache entry
+- */
+-crm_node_t *
+-pcmk__get_peer_full(unsigned int id, const char *uname, const char *uuid,
+-                    int flags)
+-{
+-    crm_node_t *node = NULL;
+-
+-    CRM_ASSERT(id > 0 || uname != NULL);
+-
+-    crm_peer_init();
+-
+-    if (pcmk_is_set(flags, CRM_GET_PEER_REMOTE)) {
+-        node = g_hash_table_lookup(crm_remote_peer_cache, uname);
+-    }
+-
+-    if ((node == NULL) && pcmk_is_set(flags, CRM_GET_PEER_CLUSTER)) {
+-        node = pcmk__get_peer(id, uname, uuid);
+-    }
+-    return node;
+-}
+-
+ /*!
+  * \internal
+  * \brief Purge a node from cache (both cluster and Pacemaker Remote)
+@@ -794,12 +763,14 @@ remove_conflicting_peer(crm_node_t *node)
+  * \param[in] uname  If not NULL, node name to search for
+  * \param[in] uuid   If not NULL while id is 0, node UUID instead of cluster
+  *                   node ID to search for
++ * \param[in] flags  Group of enum crm_get_peer_flags
+  *
+  * \return (Possibly newly created) cluster node cache entry
+  */
+ /* coverity[-alloc] Memory is referenced in one or both hashtables */
+ crm_node_t *
+-pcmk__get_peer(unsigned int id, const char *uname, const char *uuid)
++pcmk__get_node(unsigned int id, const char *uname, const char *uuid,
++               uint32_t flags)
+ {
+     crm_node_t *node = NULL;
+     char *uname_lookup = NULL;
+@@ -808,6 +779,18 @@ pcmk__get_peer(unsigned int id, const char *uname, const char *uuid)
+ 
+     crm_peer_init();
+ 
++    // Check the Pacemaker Remote node cache first
++    if (pcmk_is_set(flags, CRM_GET_PEER_REMOTE)) {
++        node = g_hash_table_lookup(crm_remote_peer_cache, uname);
++        if (node != NULL) {
++            return node;
++        }
++    }
++
++    if (!pcmk_is_set(flags, CRM_GET_PEER_CLUSTER)) {
++        return NULL;
++    }
++
+     node = pcmk__search_cluster_node_cache(id, uname, uuid);
+ 
+     /* if uname wasn't provided, and find_peer did not turn up a uname based on id.
+@@ -826,7 +809,6 @@ pcmk__get_peer(unsigned int id, const char *uname, const char *uuid)
+         }
+     }
+ 
+-
+     if (node == NULL) {
+         char *uniqueid = crm_generate_uuid();
+ 
+@@ -1417,13 +1399,13 @@ crm_terminate_member_no_mainloop(int nodeid, const char *uname, int *connection)
+ crm_node_t *
+ crm_get_peer(unsigned int id, const char *uname)
+ {
+-    return pcmk__get_peer(id, uname, NULL);
++    return pcmk__get_node(id, uname, NULL, CRM_GET_PEER_CLUSTER);
+ }
+ 
+ crm_node_t *
+ crm_get_peer_full(unsigned int id, const char *uname, int flags)
+ {
+-    return pcmk__get_peer_full(id, uname, NULL, flags);
++    return pcmk__get_node(id, uname, NULL, flags);
+ }
+ 
+ // LCOV_EXCL_STOP
+-- 
+2.31.1
+
+From 8a33a98c48475790a033f59aeb3e026f2bb68e4f Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Tue, 19 Dec 2023 16:18:45 -0600
+Subject: [PATCH 5/9] API: libcrmcluster: deprecate enum crm_get_peer_flags and
+ all its values
+
+Replace it internally with a new enum pcmk__node_search_flags
+---
+ daemons/attrd/attrd_cib.c               |  2 +-
+ daemons/attrd/attrd_corosync.c          |  6 +++---
+ daemons/attrd/attrd_messages.c          |  6 +++---
+ daemons/based/based_callbacks.c         |  4 ++--
+ daemons/based/based_messages.c          |  4 ++--
+ daemons/controld/controld_corosync.c    |  2 +-
+ daemons/controld/controld_election.c    |  2 +-
+ daemons/controld/controld_execd.c       |  4 ++--
+ daemons/controld/controld_fencing.c     |  6 +++---
+ daemons/controld/controld_join_client.c |  6 +++---
+ daemons/controld/controld_join_dc.c     | 10 +++++-----
+ daemons/controld/controld_messages.c    |  4 ++--
+ daemons/controld/controld_remote_ra.c   |  3 ++-
+ daemons/controld/controld_te_actions.c  |  6 +++---
+ daemons/controld/controld_te_events.c   |  2 +-
+ daemons/controld/controld_utils.c       |  2 +-
+ daemons/fenced/fenced_commands.c        |  9 +++++----
+ daemons/fenced/fenced_history.c         |  3 ++-
+ daemons/fenced/fenced_remote.c          |  9 +++++----
+ include/crm/cluster.h                   |  7 -------
+ include/crm/cluster/compat.h            |  7 +++++++
+ include/crm/cluster/internal.h          | 13 +++++++++++++
+ lib/cluster/corosync.c                  |  8 ++++----
+ lib/cluster/cpg.c                       |  8 ++++----
+ lib/cluster/election.c                  |  6 +++---
+ lib/cluster/membership.c                | 18 +++++++++---------
+ 26 files changed, 87 insertions(+), 70 deletions(-)
+
+diff --git a/daemons/attrd/attrd_cib.c b/daemons/attrd/attrd_cib.c
+index 7018a32..bdc0a10 100644
+--- a/daemons/attrd/attrd_cib.c
++++ b/daemons/attrd/attrd_cib.c
+@@ -568,7 +568,7 @@ write_attribute(attribute_t *a, bool ignore_delay)
+         } else {
+             // This will create a cluster node cache entry if none exists
+             crm_node_t *peer = pcmk__get_node(v->nodeid, v->nodename, NULL,
+-                                              CRM_GET_PEER_ANY);
++                                              pcmk__node_search_any);
+ 
+             uuid = peer->uuid;
+ 
+diff --git a/daemons/attrd/attrd_corosync.c b/daemons/attrd/attrd_corosync.c
+index c9e11e6..158d82f 100644
+--- a/daemons/attrd/attrd_corosync.c
++++ b/daemons/attrd/attrd_corosync.c
+@@ -120,7 +120,7 @@ attrd_cpg_dispatch(cpg_handle_t handle,
+         crm_err("Bad message of class %d received from %s[%u]: '%.120s'", kind, from, nodeid, data);
+     } else {
+         attrd_peer_message(pcmk__get_node(nodeid, from, NULL,
+-                                          CRM_GET_PEER_CLUSTER),
++                                          pcmk__node_search_cluster),
+                            xml);
+     }
+ 
+@@ -255,7 +255,7 @@ static void
+ record_peer_nodeid(attribute_value_t *v, const char *host)
+ {
+     crm_node_t *known_peer = pcmk__get_node(v->nodeid, host, NULL,
+-                                            CRM_GET_PEER_CLUSTER);
++                                            pcmk__node_search_cluster);
+ 
+     crm_trace("Learned %s has node id %s", known_peer->uname, known_peer->uuid);
+     if (attrd_election_won()) {
+@@ -441,7 +441,7 @@ attrd_peer_clear_failure(pcmk__request_t *request)
+     regex_t regex;
+ 
+     crm_node_t *peer = pcmk__get_node(0, request->peer, NULL,
+-                                      CRM_GET_PEER_CLUSTER);
++                                      pcmk__node_search_cluster);
+ 
+     if (attrd_failure_regex(&regex, rsc, op, interval_ms) != pcmk_ok) {
+         crm_info("Ignoring invalid request to clear failures for %s",
+diff --git a/daemons/attrd/attrd_messages.c b/daemons/attrd/attrd_messages.c
+index c6c1b9a..5525d4b 100644
+--- a/daemons/attrd/attrd_messages.c
++++ b/daemons/attrd/attrd_messages.c
+@@ -178,7 +178,7 @@ handle_sync_request(pcmk__request_t *request)
+ {
+     if (request->peer != NULL) {
+         crm_node_t *peer = pcmk__get_node(0, request->peer, NULL,
+-                                          CRM_GET_PEER_CLUSTER);
++                                          pcmk__node_search_cluster);
+ 
+         attrd_peer_sync(peer, request->xml);
+         pcmk__set_result(&request->result, CRM_EX_OK, PCMK_EXEC_DONE, NULL);
+@@ -196,7 +196,7 @@ handle_sync_response_request(pcmk__request_t *request)
+     } else {
+         if (request->peer != NULL) {
+             crm_node_t *peer = pcmk__get_node(0, request->peer, NULL,
+-                                              CRM_GET_PEER_CLUSTER);
++                                              pcmk__node_search_cluster);
+             bool peer_won = attrd_check_for_new_writer(peer, request->xml);
+ 
+             if (!pcmk__str_eq(peer->uname, attrd_cluster->uname, pcmk__str_casei)) {
+@@ -215,7 +215,7 @@ handle_update_request(pcmk__request_t *request)
+     if (request->peer != NULL) {
+         const char *host = crm_element_value(request->xml, PCMK__XA_ATTR_NODE_NAME);
+         crm_node_t *peer = pcmk__get_node(0, request->peer, NULL,
+-                                          CRM_GET_PEER_CLUSTER);
++                                          pcmk__node_search_cluster);
+ 
+         attrd_peer_update(peer, request->xml, host, false);
+         pcmk__set_result(&request->result, CRM_EX_OK, PCMK_EXEC_DONE, NULL);
+diff --git a/daemons/based/based_callbacks.c b/daemons/based/based_callbacks.c
+index b1f3b4b..5f3dc62 100644
+--- a/daemons/based/based_callbacks.c
++++ b/daemons/based/based_callbacks.c
+@@ -930,7 +930,7 @@ forward_request(xmlNode *request)
+     crm_xml_add(request, F_CIB_DELEGATED, OUR_NODENAME);
+ 
+     if (host != NULL) {
+-        peer = pcmk__get_node(0, host, NULL, CRM_GET_PEER_CLUSTER);
++        peer = pcmk__get_node(0, host, NULL, pcmk__node_search_cluster);
+     }
+     send_cluster_message(peer, crm_msg_cib, request, FALSE);
+ 
+@@ -990,7 +990,7 @@ send_peer_reply(xmlNode * msg, xmlNode * result_diff, const char *originator, gb
+         crm_trace("Sending request result to %s only", originator);
+         crm_xml_add(msg, F_CIB_ISREPLY, originator);
+         return send_cluster_message(pcmk__get_node(0, originator, NULL,
+-                                                   CRM_GET_PEER_CLUSTER),
++                                                   pcmk__node_search_cluster),
+                                     crm_msg_cib, msg, FALSE);
+     }
+ 
+diff --git a/daemons/based/based_messages.c b/daemons/based/based_messages.c
+index ff1a6aa..7f503b2 100644
+--- a/daemons/based/based_messages.c
++++ b/daemons/based/based_messages.c
+@@ -129,7 +129,7 @@ send_sync_request(const char *host)
+                 stand_alone? "localhost" : crm_cluster->uname);
+ 
+     if (host != NULL) {
+-        peer = pcmk__get_node(0, host, NULL, CRM_GET_PEER_CLUSTER);
++        peer = pcmk__get_node(0, host, NULL, pcmk__node_search_cluster);
+     }
+     send_cluster_message(peer, crm_msg_cib, sync_me, FALSE);
+     free_xml(sync_me);
+@@ -449,7 +449,7 @@ sync_our_cib(xmlNode * request, gboolean all)
+     add_message_xml(replace_request, F_CIB_CALLDATA, the_cib);
+ 
+     if (!all) {
+-        peer = pcmk__get_node(0, host, NULL, CRM_GET_PEER_CLUSTER);
++        peer = pcmk__get_node(0, host, NULL, pcmk__node_search_cluster);
+     }
+     if (!send_cluster_message(peer, crm_msg_cib, replace_request, FALSE)) {
+         result = -ENOTCONN;
+diff --git a/daemons/controld/controld_corosync.c b/daemons/controld/controld_corosync.c
+index fa1df6f..0f3ea32 100644
+--- a/daemons/controld/controld_corosync.c
++++ b/daemons/controld/controld_corosync.c
+@@ -49,7 +49,7 @@ crmd_cs_dispatch(cpg_handle_t handle, const struct cpg_name *groupName,
+         crm_xml_add(xml, F_ORIG, from);
+         /* crm_xml_add_int(xml, F_SEQ, wrapper->id); Fake? */
+ 
+-        peer = pcmk__get_node(0, from, NULL, CRM_GET_PEER_CLUSTER);
++        peer = pcmk__get_node(0, from, NULL, pcmk__node_search_cluster);
+         if (!pcmk_is_set(peer->processes, crm_proc_cpg)) {
+             /* If we can still talk to our peer process on that node,
+              * then it must be part of the corosync membership
+diff --git a/daemons/controld/controld_election.c b/daemons/controld/controld_election.c
+index 734064d..adad168 100644
+--- a/daemons/controld/controld_election.c
++++ b/daemons/controld/controld_election.c
+@@ -266,7 +266,7 @@ do_dc_release(long long action,
+         if (pcmk_is_set(controld_globals.fsa_input_register, R_SHUTDOWN)) {
+             xmlNode *update = NULL;
+             crm_node_t *node = pcmk__get_node(0, controld_globals.our_nodename,
+-                                              NULL, CRM_GET_PEER_CLUSTER);
++                                              NULL, pcmk__node_search_cluster);
+ 
+             pcmk__update_peer_expected(__func__, node, CRMD_JOINSTATE_DOWN);
+             update = create_node_state_update(node, node_update_expected, NULL,
+diff --git a/daemons/controld/controld_execd.c b/daemons/controld/controld_execd.c
+index df715aa..fe2313c 100644
+--- a/daemons/controld/controld_execd.c
++++ b/daemons/controld/controld_execd.c
+@@ -581,7 +581,7 @@ controld_query_executor_state(void)
+         return NULL;
+     }
+ 
+-    peer = pcmk__get_node(0, lrm_state->node_name, NULL, CRM_GET_PEER_ANY);
++    peer = pcmk__get_node(0, lrm_state->node_name, NULL, pcmk__node_search_any);
+     CRM_CHECK(peer != NULL, return NULL);
+ 
+     xml_state = create_node_state_update(peer,
+@@ -1753,7 +1753,7 @@ controld_ack_event_directly(const char *to_host, const char *to_sys,
+     }
+ 
+     peer = pcmk__get_node(0, controld_globals.our_nodename, NULL,
+-                          CRM_GET_PEER_CLUSTER);
++                          pcmk__node_search_cluster);
+     update = create_node_state_update(peer, node_update_none, NULL,
+                                       __func__);
+ 
+diff --git a/daemons/controld/controld_fencing.c b/daemons/controld/controld_fencing.c
+index 60a7f9f..79a52be 100644
+--- a/daemons/controld/controld_fencing.c
++++ b/daemons/controld/controld_fencing.c
+@@ -222,7 +222,7 @@ send_stonith_update(pcmk__graph_action_t *action, const char *target,
+      * Try getting any existing node cache entry also by node uuid in case it
+      * doesn't have an uname yet.
+      */
+-    peer = pcmk__get_node(0, target, uuid, CRM_GET_PEER_ANY);
++    peer = pcmk__get_node(0, target, uuid, pcmk__node_search_any);
+ 
+     CRM_CHECK(peer != NULL, return);
+ 
+@@ -375,7 +375,7 @@ execute_stonith_cleanup(void)
+     for (iter = stonith_cleanup_list; iter != NULL; iter = iter->next) {
+         char *target = iter->data;
+         crm_node_t *target_node = pcmk__get_node(0, target, NULL,
+-                                                 CRM_GET_PEER_CLUSTER);
++                                                 pcmk__node_search_cluster);
+         const char *uuid = crm_peer_uuid(target_node);
+ 
+         crm_notice("Marking %s, target of a previous stonith action, as clean", target);
+@@ -582,7 +582,7 @@ handle_fence_notification(stonith_t *st, stonith_event_t *event)
+ 
+     if (succeeded) {
+         crm_node_t *peer = pcmk__search_known_node_cache(0, event->target,
+-                                                         CRM_GET_PEER_ANY);
++                                                         pcmk__node_search_any);
+         const char *uuid = NULL;
+ 
+         if (peer == NULL) {
+diff --git a/daemons/controld/controld_join_client.c b/daemons/controld/controld_join_client.c
+index 6f20ef2..101c73d 100644
+--- a/daemons/controld/controld_join_client.c
++++ b/daemons/controld/controld_join_client.c
+@@ -36,7 +36,7 @@ update_dc_expected(const xmlNode *msg)
+     if ((controld_globals.dc_name != NULL)
+         && pcmk__xe_attr_is_true(msg, F_CRM_DC_LEAVING)) {
+         crm_node_t *dc_node = pcmk__get_node(0, controld_globals.dc_name, NULL,
+-                                             CRM_GET_PEER_CLUSTER);
++                                             pcmk__node_search_cluster);
+ 
+         pcmk__update_peer_expected(__func__, dc_node, CRMD_JOINSTATE_DOWN);
+     }
+@@ -179,7 +179,7 @@ join_query_callback(xmlNode * msg, int call_id, int rc, xmlNode * output, void *
+         crm_xml_add(reply, F_CRM_JOIN_ID, join_id);
+         crm_xml_add(reply, XML_ATTR_CRM_VERSION, CRM_FEATURE_SET);
+         send_cluster_message(pcmk__get_node(0, controld_globals.dc_name, NULL,
+-                                            CRM_GET_PEER_CLUSTER),
++                                            pcmk__node_search_cluster),
+                              crm_msg_crmd, reply, TRUE);
+         free_xml(reply);
+     }
+@@ -336,7 +336,7 @@ do_cl_join_finalize_respond(long long action,
+         }
+ 
+         send_cluster_message(pcmk__get_node(0, controld_globals.dc_name, NULL,
+-                                            CRM_GET_PEER_CLUSTER),
++                                            pcmk__node_search_cluster),
+                              crm_msg_crmd, reply, TRUE);
+         free_xml(reply);
+ 
+diff --git a/daemons/controld/controld_join_dc.c b/daemons/controld/controld_join_dc.c
+index 064649f..e9fc698 100644
+--- a/daemons/controld/controld_join_dc.c
++++ b/daemons/controld/controld_join_dc.c
+@@ -318,7 +318,7 @@ do_dc_join_offer_one(long long action,
+         crm_err("Can't make join-%d offer to unknown node", current_join_id);
+         return;
+     }
+-    member = pcmk__get_node(0, join_to, NULL, CRM_GET_PEER_CLUSTER);
++    member = pcmk__get_node(0, join_to, NULL, pcmk__node_search_cluster);
+ 
+     /* It is possible that a node will have been sick or starting up when the
+      * original offer was made. However, it will either re-announce itself in
+@@ -333,7 +333,7 @@ do_dc_join_offer_one(long long action,
+      */
+     if (strcasecmp(join_to, controld_globals.our_nodename) != 0) {
+         member = pcmk__get_node(0, controld_globals.our_nodename, NULL,
+-                                CRM_GET_PEER_CLUSTER);
++                                pcmk__node_search_cluster);
+         join_make_offer(NULL, member, NULL);
+     }
+ 
+@@ -397,7 +397,7 @@ do_dc_join_filter_offer(long long action,
+         crm_err("Ignoring invalid join request without node name");
+         return;
+     }
+-    join_node = pcmk__get_node(0, join_from, NULL, CRM_GET_PEER_CLUSTER);
++    join_node = pcmk__get_node(0, join_from, NULL, pcmk__node_search_cluster);
+ 
+     crm_element_value_int(join_ack->msg, F_CRM_JOIN_ID, &join_id);
+     if (join_id != current_join_id) {
+@@ -733,7 +733,7 @@ do_dc_join_ack(long long action,
+         goto done;
+     }
+ 
+-    peer = pcmk__get_node(0, join_from, NULL, CRM_GET_PEER_CLUSTER);
++    peer = pcmk__get_node(0, join_from, NULL, pcmk__node_search_cluster);
+     if (peer->join != crm_join_finalized) {
+         crm_info("Ignoring out-of-sequence join-%d confirmation from %s "
+                  "(currently %s not %s)",
+@@ -867,7 +867,7 @@ finalize_join_for(gpointer key, gpointer value, gpointer user_data)
+         return;
+     }
+ 
+-    join_node = pcmk__get_node(0, join_to, NULL, CRM_GET_PEER_CLUSTER);
++    join_node = pcmk__get_node(0, join_to, NULL, pcmk__node_search_cluster);
+     if (!crm_is_peer_active(join_node)) {
+         /*
+          * NACK'ing nodes that the membership layer doesn't know about yet
+diff --git a/daemons/controld/controld_messages.c b/daemons/controld/controld_messages.c
+index 71f5680..999dd13 100644
+--- a/daemons/controld/controld_messages.c
++++ b/daemons/controld/controld_messages.c
+@@ -459,7 +459,7 @@ relay_message(xmlNode * msg, gboolean originated_locally)
+             crm_log_xml_trace(msg, "relayed");
+             if (!broadcast) {
+                 node_to = pcmk__get_node(0, host_to, NULL,
+-                                         CRM_GET_PEER_CLUSTER);
++                                         pcmk__node_search_cluster);
+             }
+             send_cluster_message(node_to, dest, msg, TRUE);
+             return TRUE;
+@@ -904,7 +904,7 @@ handle_node_info_request(const xmlNode *msg)
+         value = controld_globals.our_nodename;
+     }
+ 
+-    node = pcmk__search_node_caches(node_id, value, CRM_GET_PEER_ANY);
++    node = pcmk__search_node_caches(node_id, value, pcmk__node_search_any);
+     if (node) {
+         crm_xml_add(reply_data, XML_ATTR_ID, node->uuid);
+         crm_xml_add(reply_data, XML_ATTR_UNAME, node->uname);
+diff --git a/daemons/controld/controld_remote_ra.c b/daemons/controld/controld_remote_ra.c
+index 9c4bb58..662643c 100644
+--- a/daemons/controld/controld_remote_ra.c
++++ b/daemons/controld/controld_remote_ra.c
+@@ -206,7 +206,8 @@ should_purge_attributes(crm_node_t *node)
+     /* Get the node that was hosting the remote connection resource from the
+      * peer cache.  That's the one we really care about here.
+      */
+-    conn_node = pcmk__get_node(0, node->conn_host, NULL, CRM_GET_PEER_CLUSTER);
++    conn_node = pcmk__get_node(0, node->conn_host, NULL,
++                               pcmk__node_search_cluster);
+     if (conn_node == NULL) {
+         return purge;
+     }
+diff --git a/daemons/controld/controld_te_actions.c b/daemons/controld/controld_te_actions.c
+index 01ba4a0..fbd9955 100644
+--- a/daemons/controld/controld_te_actions.c
++++ b/daemons/controld/controld_te_actions.c
+@@ -159,7 +159,7 @@ execute_cluster_action(pcmk__graph_t *graph, pcmk__graph_action_t *action)
+ 
+     } else if (pcmk__str_eq(task, PCMK_ACTION_DO_SHUTDOWN, pcmk__str_none)) {
+         crm_node_t *peer = pcmk__get_node(0, router_node, NULL,
+-                                          CRM_GET_PEER_CLUSTER);
++                                          pcmk__node_search_cluster);
+ 
+         pcmk__update_peer_expected(__func__, peer, CRMD_JOINSTATE_DOWN);
+     }
+@@ -172,7 +172,7 @@ execute_cluster_action(pcmk__graph_t *graph, pcmk__graph_action_t *action)
+     crm_xml_add(cmd, XML_ATTR_TRANSITION_KEY, counter);
+ 
+     rc = send_cluster_message(pcmk__get_node(0, router_node, NULL,
+-                                             CRM_GET_PEER_CLUSTER),
++                                             pcmk__node_search_cluster),
+                               crm_msg_crmd, cmd, TRUE);
+     free(counter);
+     free_xml(cmd);
+@@ -425,7 +425,7 @@ execute_rsc_action(pcmk__graph_t *graph, pcmk__graph_action_t *action)
+ 
+     } else {
+         rc = send_cluster_message(pcmk__get_node(0, router_node, NULL,
+-                                                 CRM_GET_PEER_CLUSTER),
++                                                 pcmk__node_search_cluster),
+                                   crm_msg_lrmd, cmd, TRUE);
+     }
+ 
+diff --git a/daemons/controld/controld_te_events.c b/daemons/controld/controld_te_events.c
+index 84bef5b..a54304b 100644
+--- a/daemons/controld/controld_te_events.c
++++ b/daemons/controld/controld_te_events.c
+@@ -120,7 +120,7 @@ fail_incompletable_actions(pcmk__graph_t *graph, const char *down_node)
+             router = crm_element_value(action->xml, XML_LRM_ATTR_ROUTER_NODE);
+             if (router) {
+                 crm_node_t *node = pcmk__get_node(0, router, NULL,
+-                                                  CRM_GET_PEER_CLUSTER);
++                                                  pcmk__node_search_cluster);
+ 
+                 if (node) {
+                     router_uuid = node->uuid;
+diff --git a/daemons/controld/controld_utils.c b/daemons/controld/controld_utils.c
+index 0e92416..1143e88 100644
+--- a/daemons/controld/controld_utils.c
++++ b/daemons/controld/controld_utils.c
+@@ -735,7 +735,7 @@ update_dc(xmlNode * msg)
+ 
+     } else if (controld_globals.dc_name != NULL) {
+         crm_node_t *dc_node = pcmk__get_node(0, controld_globals.dc_name, NULL,
+-                                             CRM_GET_PEER_CLUSTER);
++                                             pcmk__node_search_cluster);
+ 
+         crm_info("Set DC to %s (%s)",
+                  controld_globals.dc_name,
+diff --git a/daemons/fenced/fenced_commands.c b/daemons/fenced/fenced_commands.c
+index c519607..d2a556f 100644
+--- a/daemons/fenced/fenced_commands.c
++++ b/daemons/fenced/fenced_commands.c
+@@ -646,7 +646,7 @@ schedule_stonith_command(async_command_t * cmd, stonith_device_t * device)
+ 
+     if (device->include_nodeid && (cmd->target != NULL)) {
+         crm_node_t *node = pcmk__get_node(0, cmd->target, NULL,
+-                                          CRM_GET_PEER_CLUSTER);
++                                          pcmk__node_search_cluster);
+ 
+         cmd->target_nodeid = node->id;
+     }
+@@ -2404,7 +2404,7 @@ stonith_send_reply(const xmlNode *reply, int call_options,
+         do_local_reply(reply, client, call_options);
+     } else {
+         send_cluster_message(pcmk__get_node(0, remote_peer, NULL,
+-                                            CRM_GET_PEER_CLUSTER),
++                                            pcmk__node_search_cluster),
+                              crm_msg_stonith_ng, reply, FALSE);
+     }
+ }
+@@ -2920,7 +2920,8 @@ fence_locally(xmlNode *msg, pcmk__action_result_t *result)
+             crm_node_t *node = NULL;
+ 
+             pcmk__scan_min_int(host, &nodeid, 0);
+-            node = pcmk__search_known_node_cache(nodeid, NULL, CRM_GET_PEER_ANY);
++            node = pcmk__search_known_node_cache(nodeid, NULL,
++                                                 pcmk__node_search_any);
+             if (node != NULL) {
+                 host = node->uname;
+             }
+@@ -3374,7 +3375,7 @@ handle_fence_request(pcmk__request_t *request)
+                         request->ipc_client->id);
+             crm_xml_add(request->xml, F_STONITH_REMOTE_OP_ID, op->id);
+             send_cluster_message(pcmk__get_node(0, alternate_host, NULL,
+-                                                CRM_GET_PEER_CLUSTER),
++                                                pcmk__node_search_cluster),
+                                  crm_msg_stonith_ng, request->xml, FALSE);
+             pcmk__set_result(&request->result, CRM_EX_OK, PCMK_EXEC_PENDING,
+                              NULL);
+diff --git a/daemons/fenced/fenced_history.c b/daemons/fenced/fenced_history.c
+index a766477..4fa2215 100644
+--- a/daemons/fenced/fenced_history.c
++++ b/daemons/fenced/fenced_history.c
+@@ -469,7 +469,8 @@ stonith_fence_history(xmlNode *msg, xmlNode **output,
+             crm_node_t *node;
+ 
+             pcmk__scan_min_int(target, &nodeid, 0);
+-            node = pcmk__search_known_node_cache(nodeid, NULL, CRM_GET_PEER_ANY);
++            node = pcmk__search_known_node_cache(nodeid, NULL,
++                                                 pcmk__node_search_any);
+             if (node) {
+                 target = node->uname;
+             }
+diff --git a/daemons/fenced/fenced_remote.c b/daemons/fenced/fenced_remote.c
+index 96b518a..482efb9 100644
+--- a/daemons/fenced/fenced_remote.c
++++ b/daemons/fenced/fenced_remote.c
+@@ -1031,7 +1031,7 @@ merge_duplicates(remote_fencing_op_t *op)
+             continue;
+         }
+         if (!fencing_peer_active(pcmk__get_node(0, other->originator, NULL,
+-                                                CRM_GET_PEER_CLUSTER))) {
++                                                pcmk__node_search_cluster))) {
+             crm_notice("Failing action '%s' targeting %s originating from "
+                        "client %s@%s: Originator is dead " CRM_XS " id=%.8s",
+                        other->action, other->target, other->client_name,
+@@ -1221,7 +1221,8 @@ create_remote_stonith_op(const char *client, xmlNode *request, gboolean peer)
+         crm_node_t *node;
+ 
+         pcmk__scan_min_int(op->target, &nodeid, 0);
+-        node = pcmk__search_known_node_cache(nodeid, NULL, CRM_GET_PEER_ANY);
++        node = pcmk__search_known_node_cache(nodeid, NULL,
++                                             pcmk__node_search_any);
+ 
+         /* Ensure the conversion only happens once */
+         stonith__clear_call_options(op->call_options, op->id, st_opt_cs_nodeid);
+@@ -1665,7 +1666,7 @@ report_timeout_period(remote_fencing_op_t * op, int op_timeout)
+     crm_xml_add_int(update, F_STONITH_TIMEOUT, op_timeout);
+ 
+     send_cluster_message(pcmk__get_node(0, client_node, NULL,
+-                                        CRM_GET_PEER_CLUSTER),
++                                        pcmk__node_search_cluster),
+                          crm_msg_stonith_ng, update, FALSE);
+ 
+     free_xml(update);
+@@ -1920,7 +1921,7 @@ request_peer_fencing(remote_fencing_op_t *op, peer_device_info_t *peer)
+         }
+ 
+         send_cluster_message(pcmk__get_node(0, peer->host, NULL,
+-                                            CRM_GET_PEER_CLUSTER),
++                                            pcmk__node_search_cluster),
+                              crm_msg_stonith_ng, remote_op, FALSE);
+         peer->tried = TRUE;
+         free_xml(remote_op);
+diff --git a/include/crm/cluster.h b/include/crm/cluster.h
+index 302b807..decb8e8 100644
+--- a/include/crm/cluster.h
++++ b/include/crm/cluster.h
+@@ -128,13 +128,6 @@ enum crm_ais_msg_types {
+     crm_msg_stonith_ng = 9,
+ };
+ 
+-/* used with crm_get_peer_full */
+-enum crm_get_peer_flags {
+-    CRM_GET_PEER_CLUSTER   = 0x0001,
+-    CRM_GET_PEER_REMOTE    = 0x0002,
+-    CRM_GET_PEER_ANY       = CRM_GET_PEER_CLUSTER|CRM_GET_PEER_REMOTE,
+-};
+-
+ gboolean send_cluster_message(const crm_node_t *node,
+                               enum crm_ais_msg_types service,
+                               const xmlNode *data, gboolean ordered);
+diff --git a/include/crm/cluster/compat.h b/include/crm/cluster/compat.h
+index e853fd8..14c4504 100644
+--- a/include/crm/cluster/compat.h
++++ b/include/crm/cluster/compat.h
+@@ -26,6 +26,13 @@ extern "C" {
+  *             release.
+  */
+ 
++// \deprecated Do not use
++enum crm_get_peer_flags {
++    CRM_GET_PEER_CLUSTER   = 0x0001,
++    CRM_GET_PEER_REMOTE    = 0x0002,
++    CRM_GET_PEER_ANY       = CRM_GET_PEER_CLUSTER|CRM_GET_PEER_REMOTE,
++};
++
+ // \deprecated Do not use Pacemaker for cluster node cacheing
+ crm_node_t *crm_get_peer(unsigned int id, const char *uname);
+ 
+diff --git a/include/crm/cluster/internal.h b/include/crm/cluster/internal.h
+index bea4086..9513254 100644
+--- a/include/crm/cluster/internal.h
++++ b/include/crm/cluster/internal.h
+@@ -30,6 +30,19 @@ enum crm_proc_flag {
+ };
+ /* *INDENT-ON* */
+ 
++// Used with node cache search functions
++enum pcmk__node_search_flags {
++    pcmk__node_search_none      = 0,
++    pcmk__node_search_cluster   = (1 << 0), // Search for cluster nodes
++    pcmk__node_search_remote    = (1 << 1), // Search for remote nodes
++    pcmk__node_search_any       = pcmk__node_search_cluster
++                                  |pcmk__node_search_remote,
++
++    /* @COMPAT The values before this must stay the same until we can drop
++     * support for enum crm_get_peer_flags
++     */
++};
++
+ /*!
+  * \internal
+  * \brief Return the process bit corresponding to the current cluster stack
+diff --git a/lib/cluster/corosync.c b/lib/cluster/corosync.c
+index 47a3321..374250f 100644
+--- a/lib/cluster/corosync.c
++++ b/lib/cluster/corosync.c
+@@ -309,12 +309,12 @@ quorum_notification_cb(quorum_handle_t handle, uint32_t quorate,
+         crm_debug("Member[%d] %u ", i, id);
+ 
+         /* Get this node's peer cache entry (adding one if not already there) */
+-        node = pcmk__get_node(id, NULL, NULL, CRM_GET_PEER_CLUSTER);
++        node = pcmk__get_node(id, NULL, NULL, pcmk__node_search_cluster);
+         if (node->uname == NULL) {
+             char *name = pcmk__corosync_name(0, id);
+ 
+             crm_info("Obtaining name for new node %u", id);
+-            node = pcmk__get_node(id, name, NULL, CRM_GET_PEER_CLUSTER);
++            node = pcmk__get_node(id, name, NULL, pcmk__node_search_cluster);
+             free(name);
+         }
+ 
+@@ -481,7 +481,7 @@ pcmk__corosync_connect(crm_cluster_t *cluster)
+ 
+     // Ensure local node always exists in peer cache
+     peer = pcmk__get_node(cluster->nodeid, cluster->uname, NULL,
+-                          CRM_GET_PEER_CLUSTER);
++                          pcmk__node_search_cluster);
+     cluster->uuid = pcmk__corosync_uuid(peer);
+ 
+     return TRUE;
+@@ -641,7 +641,7 @@ pcmk__corosync_add_nodes(xmlNode *xml_parent)
+ 
+         if (nodeid > 0 || name != NULL) {
+             crm_trace("Initializing node[%d] %u = %s", lpc, nodeid, name);
+-            pcmk__get_node(nodeid, name, NULL, CRM_GET_PEER_CLUSTER);
++            pcmk__get_node(nodeid, name, NULL, pcmk__node_search_cluster);
+         }
+ 
+         if (nodeid > 0 && name != NULL) {
+diff --git a/lib/cluster/cpg.c b/lib/cluster/cpg.c
+index bc251da..b5f2884 100644
+--- a/lib/cluster/cpg.c
++++ b/lib/cluster/cpg.c
+@@ -466,7 +466,7 @@ pcmk_message_common_cs(cpg_handle_t handle, uint32_t nodeid, uint32_t pid, void
+         msg->sender.id = nodeid;
+         if (msg->sender.size == 0) {
+             crm_node_t *peer = pcmk__get_node(nodeid, NULL, NULL,
+-                                              CRM_GET_PEER_CLUSTER);
++                                              pcmk__node_search_cluster);
+ 
+             if (peer == NULL) {
+                 crm_err("Peer with nodeid=%u is unknown", nodeid);
+@@ -528,7 +528,7 @@ pcmk_message_common_cs(cpg_handle_t handle, uint32_t nodeid, uint32_t pid, void
+ 
+     // Is this necessary?
+     pcmk__get_node(msg->sender.id, msg->sender.uname, NULL,
+-                   CRM_GET_PEER_CLUSTER);
++                   pcmk__node_search_cluster);
+ 
+     crm_trace("Payload: %.200s", data);
+     return data;
+@@ -723,7 +723,7 @@ pcmk_cpg_membership(cpg_handle_t handle,
+ 
+     for (i = 0; i < member_list_entries; i++) {
+         crm_node_t *peer = pcmk__get_node(member_list[i].nodeid, NULL, NULL,
+-                                          CRM_GET_PEER_CLUSTER);
++                                          pcmk__node_search_cluster);
+ 
+         if (member_list[i].nodeid == local_nodeid
+                 && member_list[i].pid != getpid()) {
+@@ -876,7 +876,7 @@ cluster_connect_cpg(crm_cluster_t *cluster)
+         return FALSE;
+     }
+ 
+-    peer = pcmk__get_node(id, NULL, NULL, CRM_GET_PEER_CLUSTER);
++    peer = pcmk__get_node(id, NULL, NULL, pcmk__node_search_cluster);
+     crm_update_peer_proc(__func__, peer, crm_proc_cpg, ONLINESTATUS);
+     return TRUE;
+ }
+diff --git a/lib/cluster/election.c b/lib/cluster/election.c
+index 576c0aa..7276a2d 100644
+--- a/lib/cluster/election.c
++++ b/lib/cluster/election.c
+@@ -298,7 +298,7 @@ election_vote(election_t *e)
+         return;
+     }
+ 
+-    our_node = pcmk__get_node(0, e->uname, NULL, CRM_GET_PEER_CLUSTER);
++    our_node = pcmk__get_node(0, e->uname, NULL, pcmk__node_search_cluster);
+     if ((our_node == NULL) || (crm_is_peer_active(our_node) == FALSE)) {
+         crm_trace("Cannot vote in %s yet: local node not connected to cluster",
+                   e->name);
+@@ -547,8 +547,8 @@ election_count_vote(election_t *e, const xmlNode *message, bool can_win)
+         return election_error;
+     }
+ 
+-    your_node = pcmk__get_node(0, vote.from, NULL, CRM_GET_PEER_CLUSTER);
+-    our_node = pcmk__get_node(0, e->uname, NULL, CRM_GET_PEER_CLUSTER);
++    your_node = pcmk__get_node(0, vote.from, NULL, pcmk__node_search_cluster);
++    our_node = pcmk__get_node(0, e->uname, NULL, pcmk__node_search_cluster);
+     we_are_owner = (our_node != NULL)
+                    && pcmk__str_eq(our_node->uuid, vote.election_owner,
+                                    pcmk__str_none);
+diff --git a/lib/cluster/membership.c b/lib/cluster/membership.c
+index 4c89a7c..705b70c 100644
+--- a/lib/cluster/membership.c
++++ b/lib/cluster/membership.c
+@@ -539,7 +539,7 @@ hash_find_by_data(gpointer key, gpointer value, gpointer user_data)
+  *
+  * \param[in] id     If not 0, cluster node ID to search for
+  * \param[in] uname  If not NULL, node name to search for
+- * \param[in] flags  Bitmask of enum crm_get_peer_flags
++ * \param[in] flags  Group of enum pcmk__node_search_flags
+  *
+  * \return Node cache entry if found, otherwise NULL
+  */
+@@ -552,11 +552,11 @@ pcmk__search_node_caches(unsigned int id, const char *uname, uint32_t flags)
+ 
+     crm_peer_init();
+ 
+-    if ((uname != NULL) && pcmk_is_set(flags, CRM_GET_PEER_REMOTE)) {
++    if ((uname != NULL) && pcmk_is_set(flags, pcmk__node_search_remote)) {
+         node = g_hash_table_lookup(crm_remote_peer_cache, uname);
+     }
+ 
+-    if ((node == NULL) && pcmk_is_set(flags, CRM_GET_PEER_CLUSTER)) {
++    if ((node == NULL) && pcmk_is_set(flags, pcmk__node_search_cluster)) {
+         node = pcmk__search_cluster_node_cache(id, uname, NULL);
+     }
+     return node;
+@@ -763,7 +763,7 @@ remove_conflicting_peer(crm_node_t *node)
+  * \param[in] uname  If not NULL, node name to search for
+  * \param[in] uuid   If not NULL while id is 0, node UUID instead of cluster
+  *                   node ID to search for
+- * \param[in] flags  Group of enum crm_get_peer_flags
++ * \param[in] flags  Group of enum pcmk__node_search_flags
+  *
+  * \return (Possibly newly created) cluster node cache entry
+  */
+@@ -780,14 +780,14 @@ pcmk__get_node(unsigned int id, const char *uname, const char *uuid,
+     crm_peer_init();
+ 
+     // Check the Pacemaker Remote node cache first
+-    if (pcmk_is_set(flags, CRM_GET_PEER_REMOTE)) {
++    if (pcmk_is_set(flags, pcmk__node_search_remote)) {
+         node = g_hash_table_lookup(crm_remote_peer_cache, uname);
+         if (node != NULL) {
+             return node;
+         }
+     }
+ 
+-    if (!pcmk_is_set(flags, CRM_GET_PEER_CLUSTER)) {
++    if (!pcmk_is_set(flags, pcmk__node_search_cluster)) {
+         return NULL;
+     }
+ 
+@@ -1349,7 +1349,7 @@ pcmk__refresh_node_caches_from_cib(xmlNode *cib)
+  *
+  * \param[in] id     If not 0, cluster node ID to search for
+  * \param[in] uname  If not NULL, node name to search for
+- * \param[in] flags  Bitmask of enum crm_get_peer_flags
++ * \param[in] flags  Group of enum pcmk__node_search_flags
+  *
+  * \return Known node cache entry if found, otherwise NULL
+  */
+@@ -1364,7 +1364,7 @@ pcmk__search_known_node_cache(unsigned int id, const char *uname,
+ 
+     node = pcmk__search_node_caches(id, uname, flags);
+ 
+-    if (node || !(flags & CRM_GET_PEER_CLUSTER)) {
++    if (node || !(flags & pcmk__node_search_cluster)) {
+         return node;
+     }
+ 
+@@ -1399,7 +1399,7 @@ crm_terminate_member_no_mainloop(int nodeid, const char *uname, int *connection)
+ crm_node_t *
+ crm_get_peer(unsigned int id, const char *uname)
+ {
+-    return pcmk__get_node(id, uname, NULL, CRM_GET_PEER_CLUSTER);
++    return pcmk__get_node(id, uname, NULL, pcmk__node_search_cluster);
+ }
+ 
+ crm_node_t *
+-- 
+2.31.1
+
+From aef8f5016b2de67ab12f896b2bfa7a0f1954b5b1 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Tue, 19 Dec 2023 16:27:24 -0600
+Subject: [PATCH 6/9] Refactor: libcrmcluster: replace
+ pcmk__search_known_node_cache()
+
+... with new flag in enum pcmk__node_search_flags
+---
+ daemons/controld/controld_fencing.c |  5 ++--
+ daemons/fenced/fenced_commands.c    |  5 ++--
+ daemons/fenced/fenced_history.c     |  5 ++--
+ daemons/fenced/fenced_remote.c      |  5 ++--
+ include/crm/cluster/internal.h      |  4 +--
+ lib/cluster/membership.c            | 45 ++++++-----------------------
+ 6 files changed, 23 insertions(+), 46 deletions(-)
+
+diff --git a/daemons/controld/controld_fencing.c b/daemons/controld/controld_fencing.c
+index 79a52be..ede2c27 100644
+--- a/daemons/controld/controld_fencing.c
++++ b/daemons/controld/controld_fencing.c
+@@ -581,8 +581,9 @@ handle_fence_notification(stonith_t *st, stonith_event_t *event)
+                event->id);
+ 
+     if (succeeded) {
+-        crm_node_t *peer = pcmk__search_known_node_cache(0, event->target,
+-                                                         pcmk__node_search_any);
++        crm_node_t *peer = pcmk__search_node_caches(0, event->target,
++                                                    pcmk__node_search_any
++                                                    |pcmk__node_search_known);
+         const char *uuid = NULL;
+ 
+         if (peer == NULL) {
+diff --git a/daemons/fenced/fenced_commands.c b/daemons/fenced/fenced_commands.c
+index d2a556f..4f21858 100644
+--- a/daemons/fenced/fenced_commands.c
++++ b/daemons/fenced/fenced_commands.c
+@@ -2920,8 +2920,9 @@ fence_locally(xmlNode *msg, pcmk__action_result_t *result)
+             crm_node_t *node = NULL;
+ 
+             pcmk__scan_min_int(host, &nodeid, 0);
+-            node = pcmk__search_known_node_cache(nodeid, NULL,
+-                                                 pcmk__node_search_any);
++            node = pcmk__search_node_caches(nodeid, NULL,
++                                            pcmk__node_search_any
++                                            |pcmk__node_search_known);
+             if (node != NULL) {
+                 host = node->uname;
+             }
+diff --git a/daemons/fenced/fenced_history.c b/daemons/fenced/fenced_history.c
+index 4fa2215..fb709ff 100644
+--- a/daemons/fenced/fenced_history.c
++++ b/daemons/fenced/fenced_history.c
+@@ -469,8 +469,9 @@ stonith_fence_history(xmlNode *msg, xmlNode **output,
+             crm_node_t *node;
+ 
+             pcmk__scan_min_int(target, &nodeid, 0);
+-            node = pcmk__search_known_node_cache(nodeid, NULL,
+-                                                 pcmk__node_search_any);
++            node = pcmk__search_node_caches(nodeid, NULL,
++                                            pcmk__node_search_any
++                                            |pcmk__node_search_known);
+             if (node) {
+                 target = node->uname;
+             }
+diff --git a/daemons/fenced/fenced_remote.c b/daemons/fenced/fenced_remote.c
+index 482efb9..ba70c57 100644
+--- a/daemons/fenced/fenced_remote.c
++++ b/daemons/fenced/fenced_remote.c
+@@ -1221,8 +1221,9 @@ create_remote_stonith_op(const char *client, xmlNode *request, gboolean peer)
+         crm_node_t *node;
+ 
+         pcmk__scan_min_int(op->target, &nodeid, 0);
+-        node = pcmk__search_known_node_cache(nodeid, NULL,
+-                                             pcmk__node_search_any);
++        node = pcmk__search_node_caches(nodeid, NULL,
++                                        pcmk__node_search_any
++                                        |pcmk__node_search_known);
+ 
+         /* Ensure the conversion only happens once */
+         stonith__clear_call_options(op->call_options, op->id, st_opt_cs_nodeid);
+diff --git a/include/crm/cluster/internal.h b/include/crm/cluster/internal.h
+index 9513254..b75784c 100644
+--- a/include/crm/cluster/internal.h
++++ b/include/crm/cluster/internal.h
+@@ -41,6 +41,8 @@ enum pcmk__node_search_flags {
+     /* @COMPAT The values before this must stay the same until we can drop
+      * support for enum crm_get_peer_flags
+      */
++
++    pcmk__node_search_known     = (1 << 2), // Search previously known nodes
+ };
+ 
+ /*!
+@@ -142,8 +144,6 @@ crm_node_t *pcmk__search_cluster_node_cache(unsigned int id, const char *uname,
+ void pcmk__purge_node_from_cache(const char *node_name, uint32_t node_id);
+ 
+ void pcmk__refresh_node_caches_from_cib(xmlNode *cib);
+-crm_node_t *pcmk__search_known_node_cache(unsigned int id, const char *uname,
+-                                          uint32_t flags);
+ 
+ crm_node_t *pcmk__get_node(unsigned int id, const char *uname,
+                            const char *uuid, uint32_t flags);
+diff --git a/lib/cluster/membership.c b/lib/cluster/membership.c
+index 705b70c..ef4aaac 100644
+--- a/lib/cluster/membership.c
++++ b/lib/cluster/membership.c
+@@ -82,6 +82,7 @@ static gboolean crm_autoreap  = TRUE;
+     } while (0)
+ 
+ static void update_peer_uname(crm_node_t *node, const char *uname);
++static crm_node_t *find_known_node(const char *id, const char *uname);
+ 
+ int
+ crm_remote_peer_cache_size(void)
+@@ -559,6 +560,14 @@ pcmk__search_node_caches(unsigned int id, const char *uname, uint32_t flags)
+     if ((node == NULL) && pcmk_is_set(flags, pcmk__node_search_cluster)) {
+         node = pcmk__search_cluster_node_cache(id, uname, NULL);
+     }
++
++    if ((node == NULL) && pcmk_is_set(flags, pcmk__node_search_known)) {
++        char *id_str = (id == 0)? NULL : crm_strdup_printf("%u", id);
++
++        node = find_known_node(id_str, uname);
++        free(id_str);
++    }
++
+     return node;
+ }
+ 
+@@ -1343,42 +1352,6 @@ pcmk__refresh_node_caches_from_cib(xmlNode *cib)
+     refresh_known_node_cache(cib);
+ }
+ 
+-/*!
+- * \internal
+- * \brief Search known node cache
+- *
+- * \param[in] id     If not 0, cluster node ID to search for
+- * \param[in] uname  If not NULL, node name to search for
+- * \param[in] flags  Group of enum pcmk__node_search_flags
+- *
+- * \return Known node cache entry if found, otherwise NULL
+- */
+-crm_node_t *
+-pcmk__search_known_node_cache(unsigned int id, const char *uname,
+-                              uint32_t flags)
+-{
+-    crm_node_t *node = NULL;
+-    char *id_str = NULL;
+-
+-    CRM_ASSERT(id > 0 || uname != NULL);
+-
+-    node = pcmk__search_node_caches(id, uname, flags);
+-
+-    if (node || !(flags & pcmk__node_search_cluster)) {
+-        return node;
+-    }
+-
+-    if (id > 0) {
+-        id_str = crm_strdup_printf("%u", id);
+-    }
+-
+-    node = find_known_node(id_str, uname);
+-
+-    free(id_str);
+-    return node;
+-}
+-
+-
+ // Deprecated functions kept only for backward API compatibility
+ // LCOV_EXCL_START
+ 
+-- 
+2.31.1
+
+From 5b64c943bd8ba82b06e803fa97737fb7b574ec04 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Tue, 19 Dec 2023 16:38:10 -0600
+Subject: [PATCH 7/9] Refactor: libcrmcluster: replace
+ pcmk__search_cluster_node_cache()
+
+... with calls to pcmk__search_node_caches() using pcmk__node_search_cluster
+where possible
+---
+ daemons/attrd/attrd_ipc.c            | 5 +++--
+ daemons/based/based_messages.c       | 5 ++++-
+ daemons/controld/controld_corosync.c | 4 ++--
+ daemons/controld/controld_messages.c | 6 ++++--
+ lib/cluster/cluster.c                | 3 ++-
+ lib/cluster/cpg.c                    | 4 ++--
+ lib/cluster/membership.c             | 2 +-
+ 7 files changed, 18 insertions(+), 11 deletions(-)
+
+diff --git a/daemons/attrd/attrd_ipc.c b/daemons/attrd/attrd_ipc.c
+index 05c4a69..b08963d 100644
+--- a/daemons/attrd/attrd_ipc.c
++++ b/daemons/attrd/attrd_ipc.c
+@@ -162,10 +162,11 @@ attrd_client_peer_remove(pcmk__request_t *request)
+ 
+         crm_element_value_int(xml, PCMK__XA_ATTR_NODE_ID, &nodeid);
+         if (nodeid > 0) {
+-            crm_node_t *node = pcmk__search_cluster_node_cache(nodeid, NULL,
+-                                                               NULL);
++            crm_node_t *node = NULL;
+             char *host_alloc = NULL;
+ 
++            node = pcmk__search_node_caches(nodeid, NULL,
++                                            pcmk__node_search_cluster);
+             if (node && node->uname) {
+                 // Use cached name if available
+                 host = node->uname;
+diff --git a/daemons/based/based_messages.c b/daemons/based/based_messages.c
+index 7f503b2..efad9a7 100644
+--- a/daemons/based/based_messages.c
++++ b/daemons/based/based_messages.c
+@@ -247,7 +247,10 @@ cib_process_upgrade_server(const char *op, int options, const char *section, xml
+ 
+         if (rc != pcmk_ok) {
+             // Notify originating peer so it can notify its local clients
+-            crm_node_t *origin = pcmk__search_cluster_node_cache(0, host, NULL);
++            crm_node_t *origin = NULL;
++
++            origin = pcmk__search_node_caches(0, host,
++                                              pcmk__node_search_cluster);
+ 
+             crm_info("Rejecting upgrade request from %s: %s "
+                      CRM_XS " rc=%d peer=%s", host, pcmk_strerror(rc), rc,
+diff --git a/daemons/controld/controld_corosync.c b/daemons/controld/controld_corosync.c
+index 0f3ea32..63184d2 100644
+--- a/daemons/controld/controld_corosync.c
++++ b/daemons/controld/controld_corosync.c
+@@ -119,8 +119,8 @@ cpg_membership_callback(cpg_handle_t handle, const struct cpg_name *cpg_name,
+     if (controld_globals.dc_name != NULL) {
+         crm_node_t *peer = NULL;
+ 
+-        peer = pcmk__search_cluster_node_cache(0, controld_globals.dc_name,
+-                                               NULL);
++        peer = pcmk__search_node_caches(0, controld_globals.dc_name,
++                                        pcmk__node_search_cluster);
+         if (peer != NULL) {
+             for (int i = 0; i < left_list_entries; ++i) {
+                 if (left_list[i].nodeid == peer->id) {
+diff --git a/daemons/controld/controld_messages.c b/daemons/controld/controld_messages.c
+index 999dd13..bd5237e 100644
+--- a/daemons/controld/controld_messages.c
++++ b/daemons/controld/controld_messages.c
+@@ -485,7 +485,8 @@ relay_message(xmlNode * msg, gboolean originated_locally)
+     }
+ 
+     if (!broadcast) {
+-        node_to = pcmk__search_cluster_node_cache(0, host_to, NULL);
++        node_to = pcmk__search_node_caches(0, host_to,
++                                           pcmk__node_search_cluster);
+         if (node_to == NULL) {
+             crm_warn("Ignoring message %s because node %s is unknown",
+                      ref, host_to);
+@@ -1029,7 +1030,8 @@ handle_request(xmlNode *stored_msg, enum crmd_fsa_cause cause)
+ 
+     if (strcmp(op, CRM_OP_SHUTDOWN_REQ) == 0) {
+         const char *from = crm_element_value(stored_msg, F_CRM_HOST_FROM);
+-        crm_node_t *node = pcmk__search_cluster_node_cache(0, from, NULL);
++        crm_node_t *node = pcmk__search_node_caches(0, from,
++                                                    pcmk__node_search_cluster);
+ 
+         pcmk__update_peer_expected(__func__, node, CRMD_JOINSTATE_DOWN);
+         if(AM_I_DC == FALSE) {
+diff --git a/lib/cluster/cluster.c b/lib/cluster/cluster.c
+index f2cd428..1cdc204 100644
+--- a/lib/cluster/cluster.c
++++ b/lib/cluster/cluster.c
+@@ -280,7 +280,8 @@ crm_peer_uname(const char *uuid)
+             return NULL;
+         }
+ 
+-        node = pcmk__search_cluster_node_cache((uint32_t) id, NULL, NULL);
++        node = pcmk__search_node_caches((uint32_t) id, NULL,
++                                        pcmk__node_search_cluster);
+         if (node != NULL) {
+             crm_info("Setting uuid for node %s[%u] to %s",
+                      node->uname, node->id, uuid);
+diff --git a/lib/cluster/cpg.c b/lib/cluster/cpg.c
+index b5f2884..4f3e81c 100644
+--- a/lib/cluster/cpg.c
++++ b/lib/cluster/cpg.c
+@@ -629,8 +629,8 @@ node_left(const char *cpg_group_name, int event_counter,
+           const struct cpg_address **sorted_member_list,
+           size_t member_list_entries)
+ {
+-    crm_node_t *peer = pcmk__search_cluster_node_cache(cpg_peer->nodeid,
+-                                                       NULL, NULL);
++    crm_node_t *peer = pcmk__search_node_caches(cpg_peer->nodeid, NULL,
++                                                pcmk__node_search_cluster);
+     const struct cpg_address **rival = NULL;
+ 
+     /* Most CPG-related Pacemaker code assumes that only one process on a node
+diff --git a/lib/cluster/membership.c b/lib/cluster/membership.c
+index ef4aaac..73ea1e3 100644
+--- a/lib/cluster/membership.c
++++ b/lib/cluster/membership.c
+@@ -122,7 +122,7 @@ crm_remote_peer_get(const char *node_name)
+      * entry unless it has a node ID, which means the name actually is
+      * associated with a cluster node. (@TODO return an error in that case?)
+      */
+-    node = pcmk__search_cluster_node_cache(0, node_name, NULL);
++    node = pcmk__search_node_caches(0, node_name, pcmk__node_search_cluster);
+     if ((node != NULL) && (node->uuid == NULL)) {
+         /* node_name could be a pointer into the cache entry being removed, so
+          * reassign it to a copy before the original gets freed
+-- 
+2.31.1
+
+From cbeb9eb516d3bf29df7850dcf2a8515f6a0dfb2c Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Mon, 18 Dec 2023 17:09:12 -0600
+Subject: [PATCH 8/9] Test: cts-cli: strip feature set out of reference output
+
+---
+ cts/cli/regression.tools.exp | 4 ++--
+ cts/cts-cli.in               | 2 ++
+ 2 files changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/cts/cli/regression.tools.exp b/cts/cli/regression.tools.exp
+index accf781..417b5cd 100644
+--- a/cts/cli/regression.tools.exp
++++ b/cts/cli/regression.tools.exp
+@@ -7667,7 +7667,7 @@ Diff: +++ 0.1.0 (null)
+ -- /cib/status/node_state[@id='1']
+ -- /cib/status/node_state[@id='httpd-bundle-0']
+ -- /cib/status/node_state[@id='httpd-bundle-1']
+-+  /cib:  @crm_feature_set=3.19.0, @num_updates=0, @admin_epoch=0
+++  /cib:  @num_updates=0, @admin_epoch=0
+ -- /cib:  @cib-last-written, @update-origin, @update-client, @update-user, @have-quorum, @dc-uuid
+ =#=#=#= End test: Get active shadow instance's diff (empty CIB) - Error occurred (1) =#=#=#=
+ * Passed: crm_shadow     - Get active shadow instance's diff (empty CIB)
+@@ -7701,7 +7701,7 @@ Diff: +++ 0.1.0 (null)
+   <change operation="delete" path="/cib/status/node_state[@id=&apos;httpd-bundle-1&apos;]"/>
+   <change operation="modify" path="/cib">
+     <change-list>
+-      <change-attr name="crm_feature_set" operation="set" value="3.19.0"/>
++      <change-attr name="crm_feature_set" operation="set" value=""/>
+       <change-attr name="num_updates" operation="set" value="0"/>
+       <change-attr name="admin_epoch" operation="set" value="0"/>
+       <change-attr name="cib-last-written" operation="unset"/>
+diff --git a/cts/cts-cli.in b/cts/cts-cli.in
+index f4cb7c3..40ada49 100755
+--- a/cts/cts-cli.in
++++ b/cts/cts-cli.in
+@@ -3357,7 +3357,9 @@ for t in $tests; do
+         -e 's/ version="[^"]*"/ version=""/' \
+         -e 's/request=\".*\(crm_[a-zA-Z0-9]*\)/request=\"\1/' \
+         -e 's/crm_feature_set="[^"]*" //'\
++        -e 's/@crm_feature_set=[0-9.]*, //'\
+         -e 's/validate-with="[^"]*" //'\
++        -e 's/\(<change-attr name="crm_feature_set" .* value="\)[0-9.]*"/\1"/' \
+         -e 's/Created new pacemaker-.* configuration/Created new pacemaker configuration/'\
+         -e 's/.*\(crm_time_parse_duration\)@.*\.c:[0-9][0-9]*)/\1/g' \
+         -e 's/.*\(crm_time_parse_period\)@.*\.c:[0-9][0-9]*)/\1/g' \
+-- 
+2.31.1
+
+From dffedc5972c10b189bdfa3b0320ae3109a5e964e Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Tue, 2 Jan 2024 14:48:14 -0600
+Subject: [PATCH 9/9] Test: cts-lab: ignore all transition calculation log
+ messages
+
+9e28f3b6d means these are now possible for more ignorable errors
+---
+ python/pacemaker/_cts/patterns.py | 26 +++++++-------------------
+ 1 file changed, 7 insertions(+), 19 deletions(-)
+
+diff --git a/python/pacemaker/_cts/patterns.py b/python/pacemaker/_cts/patterns.py
+index 0fb1c2b..d05ff5f 100644
+--- a/python/pacemaker/_cts/patterns.py
++++ b/python/pacemaker/_cts/patterns.py
+@@ -1,7 +1,7 @@
+ """ Pattern-holding classes for Pacemaker's Cluster Test Suite (CTS) """
+ 
+ __all__ = ["PatternSelector"]
+-__copyright__ = "Copyright 2008-2023 the Pacemaker project contributors"
++__copyright__ = "Copyright 2008-2024 the Pacemaker project contributors"
+ __license__ = "GNU General Public License version 2 or later (GPLv2+)"
+ 
+ import argparse
+@@ -32,6 +32,12 @@ class BasePatterns:
+             # pcs can log this when node is fenced, but fencing is OK in some
+             # tests (and we will catch it in pacemaker logs when not OK)
+             r"pcs.daemon:No response from: .* request: get_configs, error:",
++
++            # This is overbroad, but there's no way to say that only certain
++            # transition errors are acceptable. We have to rely on causes of a
++            # transition error logging their own error message, which should
++            # always be the case.
++            r"pacemaker-schedulerd.* Calculated transition .*/pe-error",
+         ]
+ 
+         self._commands = {
+@@ -239,12 +245,6 @@ class Corosync2Patterns(BasePatterns):
+             r"error:.*cib_(shm|rw) IPC provider disconnected while waiting",
+             r"error:.*Connection to (fencer|stonith-ng).* (closed|failed|lost)",
+             r"error: Lost fencer connection",
+-            # This is overbroad, but we don't have a way to say that only
+-            # certain transition errors are acceptable (if the fencer respawns,
+-            # fence devices may appear multiply active). We have to rely on
+-            # other causes of a transition error logging their own error
+-            # message, which is the usual practice.
+-            r"pacemaker-schedulerd.* Calculated transition .*/pe-error",
+             ]
+ 
+         self._components["corosync"] = [
+@@ -281,12 +281,6 @@ class Corosync2Patterns(BasePatterns):
+             r"pacemaker-execd.*Connection to (fencer|stonith-ng).* (closed|failed|lost)",
+             r"pacemaker-controld.*:\s+Result of .* operation for Fencing.*Error \(Lost connection to fencer\)",
+             r"pacemaker-controld.*:Could not connect to attrd: Connection refused",
+-            # This is overbroad, but we don't have a way to say that only
+-            # certain transition errors are acceptable (if the fencer respawns,
+-            # fence devices may appear multiply active). We have to rely on
+-            # other causes of a transition error logging their own error
+-            # message, which is the usual practice.
+-            r"pacemaker-schedulerd.* Calculated transition .*/pe-error",
+         ]
+ 
+         self._components["pacemaker-execd"] = [
+@@ -338,12 +332,6 @@ class Corosync2Patterns(BasePatterns):
+             r"error:.*Lost fencer connection",
+             r"error:.*Fencer connection failed \(will retry\)",
+             r"pacemaker-controld.*:\s+Result of .* operation for Fencing.*Error \(Lost connection to fencer\)",
+-            # This is overbroad, but we don't have a way to say that only
+-            # certain transition errors are acceptable (if the fencer respawns,
+-            # fence devices may appear multiply active). We have to rely on
+-            # other causes of a transition error logging their own error
+-            # message, which is the usual practice.
+-            r"pacemaker-schedulerd.* Calculated transition .*/pe-error",
+         ]
+ 
+         self._components["pacemaker-fenced-ignore"].extend(self._components["common-ignore"])
+-- 
+2.31.1
+

@@ -35,12 +35,14 @@
 ## Upstream pacemaker version, and its package version (specversion
 ## can be incremented to build packages reliably considered "newer"
 ## than previously built packages with the same pcmkversion)
-%global pcmkversion 2.1.6
-%global specversion 9
+%global pcmkversion 2.1.7
+%global specversion 5
 
 ## Upstream commit (full commit ID, abbreviated commit ID, or tag) to build
-%global commit 6fdc9deea294bbad629b003c6ae036aaed8e3ee0
+%global commit 0f7f88312f7a1ccedee60bf768aba79ee13d41e0
 
+## Since git v2.11, the extent of abbreviation is autoscaled by default
+## (used to be constant of 7), so we need to convey it for non-tags, too.
 %global commit_abbrev 9
 
 ## Nagios source control identifiers
@@ -242,7 +244,7 @@
 Name:          pacemaker
 Summary:       Scalable High-Availability cluster resource manager
 Version:       %{pcmkversion}
-Release:       %{pcmk_release}.1%{?dist}
+Release:       %{pcmk_release}%{?dist}
 %if %{defined _unitdir}
 License:       GPL-2.0-or-later AND LGPL-2.1-or-later
 %else
@@ -263,25 +265,24 @@ Source0:       https://codeload.github.com/%{github_owner}/%{name}/tar.gz/%{arch
 Source1:       nagios-agents-metadata-%{nagios_hash}.tar.gz
 
 # upstream commits
-Patch001:      001-remote-start-state.patch
-Patch002:      002-group-colocation-constraint.patch
-Patch003:      003-clone-shuffle.patch
-Patch004:      004-clone-rsc-display.patch
-Patch005:      005-attrd-dampen.patch
-Patch006:      006-controller-reply.patch
-Patch007:      007-glib-assertions.patch
-Patch008:      008-attrd-shutdown.patch
-Patch009:      009-attrd-shutdown-2.patch
-Patch010:      010-revert-58400e27.patch
-Patch011:      011-revert-f5263c94.patch
-
-# downstream-only commits
-#Patch1xx:      1xx-xxxx.patch
+Patch001:      001-schema-glib.patch
+Patch002:      002-schema-transfer.patch
+Patch003:      003-schema-doc.patch
+Patch004:      004-attrd-cache-1.patch
+Patch005:      005-attrd-cache-2.patch
+Patch006:      006-cib-file-feature-set.patch
+Patch007:      007-option-metadata.patch
+Patch008:      008-attrd-prep.patch
+Patch009:      009-attrd-cache-3.patch
+Patch010:      010-crm_attribute-free.patch
 
 Requires:      resource-agents
 Requires:      %{pkgname_pcmk_libs}%{?_isa} = %{version}-%{release}
 Requires:      %{name}-cluster-libs%{?_isa} = %{version}-%{release}
 Requires:      %{name}-cli = %{version}-%{release}
+%if %{with stonithd}
+Requires:      %{python_name}-%{name} = %{version}-%{release}
+%endif
 %if !%{defined _unitdir}
 Requires:      %{pkgname_procps}
 Requires:      psmisc
@@ -321,7 +322,7 @@ BuildRequires: sed
 
 # Required for core functionality
 BuildRequires: pkgconfig(glib-2.0) >= 2.42
-BuildRequires: libxml2-devel
+BuildRequires: libxml2-devel >= 2.6.0
 BuildRequires: libxslt-devel
 BuildRequires: libuuid-devel
 BuildRequires: %{pkgname_bzip2_devel}
@@ -336,7 +337,7 @@ BuildRequires: pam-devel
 BuildRequires: %{pkgname_gettext} >= 0.18
 
 # Required for "make check"
-BuildRequires: libcmocka-devel
+BuildRequires: libcmocka-devel >= 1.1.0
 
 %if %{systemd_native}
 BuildRequires: pkgconfig(systemd)
@@ -415,8 +416,8 @@ Requires(pre): %{pkgname_shadow_utils}
 Requires:      %{name}-schemas = %{version}-%{release}
 # sbd 1.4.0+ supports the libpe_status API for pe_working_set_t
 # sbd 1.4.2+ supports startup/shutdown handshake via pacemakerd-api
-#            and handshake defaults to enabled in this spec
-Conflicts:     sbd < 1.4.2
+# sbd 1.5.0+ supports handshake defaults to enabled in this spec
+Conflicts:     sbd < 1.5.0
 
 %description -n %{pkgname_pcmk_libs}
 Pacemaker is an advanced, scalable High-Availability cluster resource
@@ -491,7 +492,7 @@ Requires:      libqb-devel%{?_isa}
 Requires:      %{?pkgname_libtool_devel_arch}
 %endif
 Requires:      libuuid-devel%{?_isa}
-Requires:      libxml2-devel%{?_isa}
+Requires:      libxml2-devel%{?_isa} >= 2.6.0
 Requires:      libxslt-devel%{?_isa}
 
 %description -n %{pkgname_pcmk_libs}-devel
@@ -561,7 +562,7 @@ Summary:       Pacemaker Nagios Metadata
 Requires:      pcmk-cluster-manager
 BuildArch:     noarch
 
-%description   nagios-plugins-metadata
+%description  nagios-plugins-metadata
 The metadata files required for Pacemaker to execute the nagios plugin
 monitor resources.
 
@@ -583,6 +584,12 @@ export CFLAGS_HARDENED_LIB="%{?_hardening_cflags}"
 export LDFLAGS_HARDENED_EXE="%{?_hardening_ldflags}"
 export LDFLAGS_HARDENED_LIB="%{?_hardening_ldflags}"
 %endif
+
+# DO NOT REMOVE THE FOLLOWING LINE!
+# This is necessary to ensure we use the git commit ID from the
+# pacemaker-abcd1234 directory name as the latest commit ID when
+# generating crm_config.h.
+rm -rf .git
 
 ./autogen.sh
 
@@ -666,10 +673,9 @@ mkdir -p ${RPM_BUILD_ROOT}%{_localstatedir}/lib/rpm-state/%{name}
 # Don't package libtool archives
 find %{buildroot} -name '*.la' -type f -print0 | xargs -0 rm -f
 
-# Do not package these either on RHEL
+# Do not package these either on CentOS Stream
 rm -f %{buildroot}/%{_sbindir}/fence_legacy
 rm -f %{buildroot}/%{_mandir}/man8/fence_legacy.*
-find %{buildroot} -name '*o2cb*' -type f -print0 | xargs -0 rm -f
 
 # For now, don't package the servicelog-related binaries built only for
 # ppc64le when certain dependencies are installed. If they get more exercise by
@@ -817,15 +823,20 @@ exit 0
 %exclude %{_datadir}/pacemaker/nagios
 %{_libexecdir}/pacemaker/*
 
-%{_sbindir}/crm_master
+%if %{with stonithd}
+%{_sbindir}/fence_legacy
+%endif
 %{_sbindir}/fence_watchdog
 
 %doc %{_mandir}/man7/pacemaker-controld.*
 %doc %{_mandir}/man7/pacemaker-schedulerd.*
 %doc %{_mandir}/man7/pacemaker-fenced.*
 %doc %{_mandir}/man7/ocf_pacemaker_controld.*
+%doc %{_mandir}/man7/ocf_pacemaker_o2cb.*
 %doc %{_mandir}/man7/ocf_pacemaker_remote.*
-%doc %{_mandir}/man8/crm_master.*
+%if %{with stonithd}
+%doc %{_mandir}/man8/fence_legacy.*
+%endif
 %doc %{_mandir}/man8/fence_watchdog.*
 %doc %{_mandir}/man8/pacemakerd.*
 
@@ -838,6 +849,7 @@ exit 0
 %dir %attr (750, %{uname}, %{gname}) %{_var}/lib/pacemaker/cib
 %dir %attr (750, %{uname}, %{gname}) %{_var}/lib/pacemaker/pengine
 %{ocf_root}/resource.d/pacemaker/controld
+%{ocf_root}/resource.d/pacemaker/o2cb
 %{ocf_root}/resource.d/pacemaker/remote
 
 %if %{with upstart_job}
@@ -867,6 +879,7 @@ exit 0
 %{_sbindir}/crm_diff
 %{_sbindir}/crm_error
 %{_sbindir}/crm_failcount
+%{_sbindir}/crm_master
 %{_sbindir}/crm_mon
 %{_sbindir}/crm_node
 %{_sbindir}/crm_resource
@@ -887,6 +900,7 @@ exit 0
 %{_datadir}/snmp/mibs/PCMK-MIB.txt
 
 %exclude %{ocf_root}/resource.d/pacemaker/controld
+%exclude %{ocf_root}/resource.d/pacemaker/o2cb
 %exclude %{ocf_root}/resource.d/pacemaker/remote
 
 %dir %{ocf_root}
@@ -898,9 +912,9 @@ exit 0
 %exclude %{_mandir}/man7/pacemaker-schedulerd.*
 %exclude %{_mandir}/man7/pacemaker-fenced.*
 %exclude %{_mandir}/man7/ocf_pacemaker_controld.*
+%exclude %{_mandir}/man7/ocf_pacemaker_o2cb.*
 %exclude %{_mandir}/man7/ocf_pacemaker_remote.*
 %doc %{_mandir}/man8/crm*.8.gz
-%exclude %{_mandir}/man8/crm_master.*
 %doc %{_mandir}/man8/attrd_updater.*
 %doc %{_mandir}/man8/cibadmin.*
 %if %{with cibsecrets}
@@ -970,7 +984,6 @@ exit 0
 %license licenses/CC-BY-SA-4.0
 
 %files cts
-%{python_site}/cts
 %{python3_sitelib}/pacemaker/_cts/
 %{_datadir}/pacemaker/tests
 
@@ -1007,11 +1020,43 @@ exit 0
 %{_datadir}/pkgconfig/pacemaker-schemas.pc
 
 %files nagios-plugins-metadata
+%dir %{_datadir}/pacemaker/nagios
 %dir %{_datadir}/pacemaker/nagios/plugins-metadata
 %attr(0644,root,root) %{_datadir}/pacemaker/nagios/plugins-metadata/*
 %license %{nagios_name}-%{nagios_hash}/COPYING
 
 %changelog
+* Thu Mar 21 2024 Chris Lumens <clumens@redhat.com> - 2.1.7-5
+- Fix upgrading to this package on multilib systems
+- Resolves: RHEL-29007
+
+* Thu Feb 1 2024 Chris Lumens <clumens@redhat.com> - 2.1.7-4
+- Properly validate attribute set type in pacemaker-attrd
+- Fix `crm_attribute -t nodes --node localhost`
+- Resolves: RHEL-14045
+- Resolves: RHEL-17224
+- Resolves: RHEL-23065
+
+* Wed Jan 17 2024 Chris Lumens <clumens@redhat.com> - 2.1.7-3
+- Rebase on upstream 2.1.7 final release
+- Fix documentation for Pacemaker Remote schema transfers
+- Do not check CIB feature set version when CIB_file is set
+- Consolidate attrd cache handling
+- Avoid duplicating option metadata across daemons
+- Related: RHEL-7597
+- Related: RHEL-14045
+
+* Thu Dec 14 2023 Chris Lumens <clumens@redhat.com> - 2.1.7-2
+- Rebase on upstream 2.1.7-rc4 release
+- Pacemaker Remote nodes can validate against later schema versions
+- Resolves: RHEL-7597
+- Related: RHEL-17224
+
+* Mon Nov 27 2023 Chris Lumens <clumens@redhat.com> - 2.1.7-1
+- Rebase on upstream 2.1.7-rc2 release
+- Resolves: RHEL-7646
+- Related: RHEL-17224
+
 * Tue Oct 31 2023 Chris Lumens <clumens@redhat.com> - 2.1.6-9.1
 - Revert the rest of the attrd shutdown race condition fix
 - Related: RHEL-14052

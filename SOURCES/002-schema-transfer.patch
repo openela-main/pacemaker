@@ -1,0 +1,1986 @@
+From 9e0c58dc3b949e4eadfa43364e60677478b7aa0f Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Thu, 7 Sep 2023 16:48:52 -0400
+Subject: [PATCH 01/15] Refactor: libcrmcommon: Break schema version comparison
+ out...
+
+...into its own function.  Then, wrap this function with
+schema_sort_directory so existing code doesn't need to be changed.  This
+allows us to use the version comparison elsewhere.
+---
+ lib/common/schemas.c | 26 ++++++++++++++++----------
+ 1 file changed, 16 insertions(+), 10 deletions(-)
+
+diff --git a/lib/common/schemas.c b/lib/common/schemas.c
+index 372e87223..b3ff05917 100644
+--- a/lib/common/schemas.c
++++ b/lib/common/schemas.c
+@@ -195,7 +195,20 @@ schema_filter(const struct dirent *a)
+ }
+ 
+ static int
+-schema_sort(const struct dirent **a, const struct dirent **b)
++schema_cmp(pcmk__schema_version_t a_version, pcmk__schema_version_t b_version)
++{
++    for (int i = 0; i < 2; ++i) {
++        if (a_version.v[i] < b_version.v[i]) {
++            return -1;
++        } else if (a_version.v[i] > b_version.v[i]) {
++            return 1;
++        }
++    }
++    return 0;
++}
++
++static int
++schema_cmp_directory(const struct dirent **a, const struct dirent **b)
+ {
+     pcmk__schema_version_t a_version = SCHEMA_ZERO;
+     pcmk__schema_version_t b_version = SCHEMA_ZERO;
+@@ -206,14 +219,7 @@ schema_sort(const struct dirent **a, const struct dirent **b)
+         return 0;
+     }
+ 
+-    for (int i = 0; i < 2; ++i) {
+-        if (a_version.v[i] < b_version.v[i]) {
+-            return -1;
+-        } else if (a_version.v[i] > b_version.v[i]) {
+-            return 1;
+-        }
+-    }
+-    return 0;
++    return schema_cmp(a_version, b_version);
+ }
+ 
+ /*!
+@@ -413,7 +419,7 @@ crm_schema_init(void)
+ 
+     wrap_libxslt(false);
+ 
+-    max = scandir(base, &namelist, schema_filter, schema_sort);
++    max = scandir(base, &namelist, schema_filter, schema_cmp_directory);
+     if (max < 0) {
+         crm_notice("scandir(%s) failed: %s (%d)", base, strerror(errno), errno);
+         free(base);
+-- 
+2.41.0
+
+From e7d7c33eb8329c3c50fe648133cbb7651c1ecb9d Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Wed, 29 Nov 2023 09:37:31 -0500
+Subject: [PATCH 02/15] Feature: libcrmcommon: Add
+ pcmk__schema_files_later_than.
+
+This function takes in a schema version and returns a list of all RNG
+and XSLT files from all schema versions more recent than that one.
+
+Also, add unit tests for the new function.
+---
+ include/crm/common/internal.h                 |   1 +
+ lib/common/schemas.c                          |  62 ++++++++++-
+ lib/common/tests/schemas/Makefile.am          |  42 ++++++-
+ .../pcmk__schema_files_later_than_test.c      | 104 ++++++++++++++++++
+ 4 files changed, 207 insertions(+), 2 deletions(-)
+ create mode 100644 lib/common/tests/schemas/pcmk__schema_files_later_than_test.c
+
+diff --git a/include/crm/common/internal.h b/include/crm/common/internal.h
+index 307860636..a3cd455dc 100644
+--- a/include/crm/common/internal.h
++++ b/include/crm/common/internal.h
+@@ -134,6 +134,7 @@ bool pcmk__procfs_has_pids(void);
+ void crm_schema_init(void);
+ void crm_schema_cleanup(void);
+ 
++GList *pcmk__schema_files_later_than(const char *name);
+ 
+ /* internal functions related to process IDs (from pid.c) */
+ 
+diff --git a/lib/common/schemas.c b/lib/common/schemas.c
+index b3ff05917..1c60738ec 100644
+--- a/lib/common/schemas.c
++++ b/lib/common/schemas.c
+@@ -168,7 +168,11 @@ xml_latest_schema(void)
+ static inline bool
+ version_from_filename(const char *filename, pcmk__schema_version_t *version)
+ {
+-    return sscanf(filename, "pacemaker-%hhu.%hhu.rng", &(version->v[0]), &(version->v[1])) == 2;
++    if (pcmk__ends_with(filename, ".rng")) {
++        return sscanf(filename, "pacemaker-%hhu.%hhu.rng", &(version->v[0]), &(version->v[1])) == 2;
++    } else {
++        return sscanf(filename, "pacemaker-%hhu.%hhu", &(version->v[0]), &(version->v[1])) == 2;
++    }
+ }
+ 
+ static int
+@@ -1291,6 +1295,62 @@ cli_config_update(xmlNode **xml, int *best_version, gboolean to_logs)
+     return rc;
+ }
+ 
++/*!
++ * \internal
++ * \brief Return a list of all schema files and any associated XSLT files
++ *        later than the given one
++ * \brief Return a list of all schema versions later than the given one
++ *
++ * \param[in] schema The schema to compare against (for example,
++ *                   "pacemaker-3.1.rng" or "pacemaker-3.1")
++ *
++ * \note The caller is responsible for freeing both the returned list and
++ *       the elements of the list
++ */
++GList *
++pcmk__schema_files_later_than(const char *name)
++{
++    GList *lst = NULL;
++    pcmk__schema_version_t ver;
++
++    if (!version_from_filename(name, &ver)) {
++        return lst;
++    }
++
++    for (GList *iter = g_list_nth(known_schemas, xml_latest_schema_index(known_schemas));
++         iter != NULL; iter = iter->prev) {
++        pcmk__schema_t *schema = iter->data;
++        char *s = NULL;
++
++        if (schema_cmp(ver, schema->version) != -1) {
++            continue;
++        }
++
++        s = crm_strdup_printf("%s.rng", schema->name);
++        lst = g_list_prepend(lst, s);
++
++        if (schema->transform != NULL) {
++            char *xform = crm_strdup_printf("%s.xsl", schema->transform);
++            lst = g_list_prepend(lst, xform);
++        }
++
++        if (schema->transform_enter != NULL) {
++            char *enter = crm_strdup_printf("%s.xsl", schema->transform_enter);
++
++            lst = g_list_prepend(lst, enter);
++
++            if (schema->transform_onleave) {
++                int last_dash = strrchr(enter, '-') - enter;
++                char *leave = crm_strdup_printf("%.*s-leave.xsl", last_dash, enter);
++
++                lst = g_list_prepend(lst, leave);
++            }
++        }
++    }
++
++    return lst;
++}
++
+ void
+ pcmk__log_known_schemas(void)
+ {
+diff --git a/lib/common/tests/schemas/Makefile.am b/lib/common/tests/schemas/Makefile.am
+index 5f485b3e9..b5c5e7f3c 100644
+--- a/lib/common/tests/schemas/Makefile.am
++++ b/lib/common/tests/schemas/Makefile.am
+@@ -10,7 +10,47 @@
+ include $(top_srcdir)/mk/tap.mk
+ include $(top_srcdir)/mk/unittest.mk
+ 
++CFLAGS += -DPCMK__TEST_SCHEMA_DIR='"$(abs_builddir)/schemas"'
++
+ # Add "_test" to the end of all test program names to simplify .gitignore.
+-check_PROGRAMS = pcmk__xml_find_x_0_schema_index_test
++check_PROGRAMS = pcmk__schema_files_later_than_test \
++		 pcmk__xml_find_x_0_schema_index_test
+ 
+ TESTS = $(check_PROGRAMS)
++
++$(TESTS): setup-schema-dir
++
++# Set up a temporary schemas/ directory containing only some of the full set of
++# pacemaker schema files.  This lets us know exactly how many schemas are present,
++# allowing us to write tests without having to make changes when new schemas are
++# added.
++#
++# This directory contains the following:
++#
++# * pacemaker-next.rng   - Used to verify that this sorts before all versions
++# * upgrade-*.xsl        - Required by various schema versions
++# * pacemaker-[0-9]*.rng - We're only pulling in 15 schemas, which is enough
++#                          to get everything through pacemaker-3.0.rng.  This
++#                          includes 2.10, needed so we can check that versions
++#                          are compared as numbers instead of strings.
++# * other RNG files      - This catches everything except the pacemaker-*rng
++#                          files.  These files are included by the top-level
++#                          pacemaker-*rng files, so we need them for tests.
++#                          This will glob more than we need, but the extra ones
++#                          won't get in the way.
++.PHONY: setup-schema-dir
++setup-schema-dir:
++	$(MKDIR_P) schemas
++	( cd schemas ; \
++	  ln -sf $(abs_top_builddir)/xml/pacemaker-next.rng . ; \
++	  ln -sf $(abs_top_builddir)/xml/upgrade-*.xsl . ; \
++	  for f in $(shell ls -1v $(abs_top_builddir)/xml/pacemaker-[0-9]*.rng | head -15); do \
++		ln -sf $$f $$(basename $$f); \
++	  done ; \
++	  for f in $(shell ls -1 $(top_srcdir)/xml/*.rng | grep -v pacemaker); do \
++		ln -sf ../$$f $$(basename $$f); \
++	  done )
++
++.PHONY: clean-local
++clean-local:
++	-rm -rf schemas
+diff --git a/lib/common/tests/schemas/pcmk__schema_files_later_than_test.c b/lib/common/tests/schemas/pcmk__schema_files_later_than_test.c
+new file mode 100644
+index 000000000..50b5f4334
+--- /dev/null
++++ b/lib/common/tests/schemas/pcmk__schema_files_later_than_test.c
+@@ -0,0 +1,104 @@
++/*
++ * Copyright 2023 the Pacemaker project contributors
++ *
++ * The version control history for this file may have further details.
++ *
++ * This source code is licensed under the GNU General Public License version 2
++ * or later (GPLv2+) WITHOUT ANY WARRANTY.
++ */
++
++#include <crm_internal.h>
++
++#include <crm/common/unittest_internal.h>
++#include <crm/common/lists_internal.h>
++
++#include <glib.h>
++
++static int
++setup(void **state) {
++    setenv("PCMK_schema_directory", PCMK__TEST_SCHEMA_DIR, 1);
++    crm_schema_init();
++    return 0;
++}
++
++static int
++teardown(void **state) {
++    crm_schema_cleanup();
++    unsetenv("PCMK_schema_directory");
++    return 0;
++}
++
++static void
++invalid_name(void **state)
++{
++    assert_null(pcmk__schema_files_later_than("xyz"));
++    assert_null(pcmk__schema_files_later_than("pacemaker-"));
++}
++
++static void
++valid_name(void **state)
++{
++    GList *schemas = NULL;
++
++    schemas = pcmk__schema_files_later_than("pacemaker-1.0");
++    assert_int_equal(g_list_length(schemas), 18);
++    /* There is no "pacemaker-1.1". */
++    assert_string_equal("pacemaker-1.2.rng", g_list_nth_data(schemas, 0));
++    assert_string_equal("upgrade-1.3.xsl", g_list_nth_data(schemas, 1));
++    assert_string_equal("pacemaker-1.3.rng", g_list_nth_data(schemas, 2));
++    assert_string_equal("pacemaker-2.0.rng", g_list_nth_data(schemas, 3));
++    assert_string_equal("pacemaker-2.1.rng", g_list_nth_data(schemas, 4));
++    assert_string_equal("pacemaker-2.2.rng", g_list_nth_data(schemas, 5));
++    assert_string_equal("pacemaker-2.3.rng", g_list_nth_data(schemas, 6));
++    assert_string_equal("pacemaker-2.4.rng", g_list_nth_data(schemas, 7));
++    assert_string_equal("pacemaker-2.5.rng", g_list_nth_data(schemas, 8));
++    assert_string_equal("pacemaker-2.6.rng", g_list_nth_data(schemas, 9));
++    assert_string_equal("pacemaker-2.7.rng", g_list_nth_data(schemas, 10));
++    assert_string_equal("pacemaker-2.8.rng", g_list_nth_data(schemas, 11));
++    assert_string_equal("pacemaker-2.9.rng", g_list_nth_data(schemas, 12));
++    assert_string_equal("upgrade-2.10-leave.xsl", g_list_nth_data(schemas, 13));
++    assert_string_equal("upgrade-2.10-enter.xsl", g_list_nth_data(schemas, 14));
++    assert_string_equal("upgrade-2.10.xsl", g_list_nth_data(schemas, 15));
++    assert_string_equal("pacemaker-2.10.rng", g_list_nth_data(schemas, 16));
++    assert_string_equal("pacemaker-3.0.rng", g_list_nth_data(schemas, 17));
++    g_list_free_full(schemas, free);
++
++    /* Adding .rng to the end of the schema we're requesting is also valid. */
++    schemas = pcmk__schema_files_later_than("pacemaker-2.0.rng");
++    assert_int_equal(g_list_length(schemas), 14);
++    assert_string_equal("pacemaker-2.1.rng", g_list_nth_data(schemas, 0));
++    assert_string_equal("pacemaker-2.2.rng", g_list_nth_data(schemas, 1));
++    assert_string_equal("pacemaker-2.3.rng", g_list_nth_data(schemas, 2));
++    assert_string_equal("pacemaker-2.4.rng", g_list_nth_data(schemas, 3));
++    assert_string_equal("pacemaker-2.5.rng", g_list_nth_data(schemas, 4));
++    assert_string_equal("pacemaker-2.6.rng", g_list_nth_data(schemas, 5));
++    assert_string_equal("pacemaker-2.7.rng", g_list_nth_data(schemas, 6));
++    assert_string_equal("pacemaker-2.8.rng", g_list_nth_data(schemas, 7));
++    assert_string_equal("pacemaker-2.9.rng", g_list_nth_data(schemas, 8));
++    assert_string_equal("upgrade-2.10-leave.xsl", g_list_nth_data(schemas, 9));
++    assert_string_equal("upgrade-2.10-enter.xsl", g_list_nth_data(schemas, 10));
++    assert_string_equal("upgrade-2.10.xsl", g_list_nth_data(schemas, 11));
++    assert_string_equal("pacemaker-2.10.rng", g_list_nth_data(schemas, 12));
++    assert_string_equal("pacemaker-3.0.rng", g_list_nth_data(schemas, 13));
++    g_list_free_full(schemas, free);
++
++    /* Check that "pacemaker-2.10" counts as later than "pacemaker-2.9". */
++    schemas = pcmk__schema_files_later_than("pacemaker-2.9");
++    assert_int_equal(g_list_length(schemas), 5);
++    assert_string_equal("upgrade-2.10-leave.xsl", g_list_nth_data(schemas, 0));
++    assert_string_equal("upgrade-2.10-enter.xsl", g_list_nth_data(schemas, 1));
++    assert_string_equal("upgrade-2.10.xsl", g_list_nth_data(schemas, 2));
++    assert_string_equal("pacemaker-2.10.rng", g_list_nth_data(schemas, 3));
++    assert_string_equal("pacemaker-3.0.rng", g_list_nth_data(schemas, 4));
++    g_list_free_full(schemas, free);
++
++    /* And then something way in the future that will never apply due to our
++     * special schema directory.
++     */
++    schemas = pcmk__schema_files_later_than("pacemaker-9.0");
++    assert_null(schemas);
++}
++
++PCMK__UNIT_TEST(setup, teardown,
++                cmocka_unit_test(invalid_name),
++                cmocka_unit_test(valid_name))
+-- 
+2.41.0
+
+From 76859d61f4d35e1f8b7c35d8766d3d0c123d4552 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Mon, 11 Sep 2023 08:56:22 -0400
+Subject: [PATCH 03/15] Refactor: libcrmcommon: Allow more specs in
+ pcmk__xml_artefact_path.
+
+If the given filespec already has a .rng or .xsl extension, don't add an
+additional one.  This allows reusing this function to grab files given
+in another schema file's externalRef links without modification.
+---
+ lib/common/xml.c | 12 ++++++++++--
+ 1 file changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/lib/common/xml.c b/lib/common/xml.c
+index 53ebff770..142b501df 100644
+--- a/lib/common/xml.c
++++ b/lib/common/xml.c
+@@ -2618,11 +2618,19 @@ pcmk__xml_artefact_path(enum pcmk__xml_artefact_ns ns, const char *filespec)
+     switch (ns) {
+         case pcmk__xml_artefact_ns_legacy_rng:
+         case pcmk__xml_artefact_ns_base_rng:
+-            ret = crm_strdup_printf("%s/%s.rng", base, filespec);
++            if (pcmk__ends_with(filespec, ".rng")) {
++                ret = crm_strdup_printf("%s/%s", base, filespec);
++            } else {
++                ret = crm_strdup_printf("%s/%s.rng", base, filespec);
++            }
+             break;
+         case pcmk__xml_artefact_ns_legacy_xslt:
+         case pcmk__xml_artefact_ns_base_xslt:
+-            ret = crm_strdup_printf("%s/%s.xsl", base, filespec);
++            if (pcmk__ends_with(filespec, ".xsl")) {
++                ret = crm_strdup_printf("%s/%s", base, filespec);
++            } else {
++                ret = crm_strdup_printf("%s/%s.xsl", base, filespec);
++            }
+             break;
+         default:
+             crm_err("XML artefact family specified as %u not recognized", ns);
+-- 
+2.41.0
+
+From 0d702bba5b50e1eede201853c7680a2517fade9f Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Mon, 18 Sep 2023 12:37:46 -0400
+Subject: [PATCH 04/15] Feature: build: Add PCMK__REMOTE_SCHEMA_DIR to
+ configure.ac.
+
+This is a new subdirectory where schema files downloaded to a remote
+executor can be stored.
+
+Also, add support for an environment variable that can override this
+compile-time setting and explain it in the documentation.
+---
+ configure.ac                                     |  5 +++++
+ doc/sphinx/Pacemaker_Explained/local-options.rst | 12 ++++++++++++
+ etc/sysconfig/pacemaker.in                       |  7 +++++++
+ include/crm/common/options_internal.h            |  1 +
+ 4 files changed, 25 insertions(+)
+
+diff --git a/configure.ac b/configure.ac
+index 17cee41e9..bd548200c 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -838,6 +838,11 @@ AC_DEFINE_UNQUOTED([CRM_SCHEMA_DIRECTORY], ["$CRM_SCHEMA_DIRECTORY"],
+                    [Location for the Pacemaker Relax-NG Schema])
+ AC_SUBST(CRM_SCHEMA_DIRECTORY)
+ 
++PCMK__REMOTE_SCHEMA_DIR="${localstatedir}/lib/pacemaker/schemas"
++AC_DEFINE_UNQUOTED([PCMK__REMOTE_SCHEMA_DIR], ["$PCMK__REMOTE_SCHEMA_DIR"],
++                   [Location to store Relax-NG Schema files on remote nodes])
++AC_SUBST(PCMK__REMOTE_SCHEMA_DIR)
++
+ CRM_CORE_DIR="${localstatedir}/lib/pacemaker/cores"
+ AC_DEFINE_UNQUOTED([CRM_CORE_DIR], ["$CRM_CORE_DIR"],
+                    [Directory Pacemaker daemons should change to (without systemd, core files will go here)])
+diff --git a/doc/sphinx/Pacemaker_Explained/local-options.rst b/doc/sphinx/Pacemaker_Explained/local-options.rst
+index 91eda6632..118256247 100644
+--- a/doc/sphinx/Pacemaker_Explained/local-options.rst
++++ b/doc/sphinx/Pacemaker_Explained/local-options.rst
+@@ -478,6 +478,18 @@ environment variables when Pacemaker daemons start up.
+      - *Advanced Use Only:* Specify an alternate location for RNG schemas and
+        XSL transforms.
+ 
++   * - .. _pcmk_remote_schema_directory:
++
++       .. index::
++          pair:: node option; PCMK_remote_schema_directory
++
++       PCMK_remote_schema_directory
++     - :ref:`text <text>`
++     - |PCMK__REMOTE_SCHEMA_DIR|
++     - *Advanced Use Only:* Specify an alternate location on Pacemaker Remote
++       nodes for storing newer RNG schemas and XSL transforms fetched from
++       the cluster.
++
+    * - .. _pcmk_valgrind_enabled:
+ 
+        .. index::
+diff --git a/etc/sysconfig/pacemaker.in b/etc/sysconfig/pacemaker.in
+index 0c3609d8e..487a104a7 100644
+--- a/etc/sysconfig/pacemaker.in
++++ b/etc/sysconfig/pacemaker.in
+@@ -339,6 +339,13 @@
+ #
+ # Default: PCMK_schema_directory="@CRM_SCHEMA_DIRECTORY@"
+ 
++# PCMK_remote_schema_directory (Advanced Use Only)
++#
++# Specify an alternate location on Pacemaker Remote nodes for storing newer
++# RNG schemas and XSL transforms fetched from the cluster.
++#
++# Default: PCMK_remote_schema_directory="@PCMK__REMOTE_SCHEMA_DIR@"
++
+ # G_SLICE (Advanced Use Only)
+ #
+ # Affect the behavior of glib's memory allocator. Setting to "always-malloc"
+diff --git a/include/crm/common/options_internal.h b/include/crm/common/options_internal.h
+index 5c561fd1f..a9316ca33 100644
+--- a/include/crm/common/options_internal.h
++++ b/include/crm/common/options_internal.h
+@@ -95,6 +95,7 @@ bool pcmk__valid_sbd_timeout(const char *value);
+ #define PCMK__ENV_PANIC_ACTION              "panic_action"
+ #define PCMK__ENV_PHYSICAL_HOST             "physical_host"
+ #define PCMK__ENV_REMOTE_ADDRESS            "remote_address"
++#define PCMK__ENV_REMOTE_SCHEMA_DIR         "remote_schema_directory"
+ #define PCMK__ENV_REMOTE_PID1               "remote_pid1"
+ #define PCMK__ENV_REMOTE_PORT               "remote_port"
+ #define PCMK__ENV_RESPAWNED                 "respawned"
+-- 
+2.41.0
+
+From 16d46de389f33a8b29cbd74ee2c9077f28029446 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Wed, 6 Dec 2023 12:38:12 -0500
+Subject: [PATCH 05/15] Feature: libcrmcommon: Add pcmk__remote_schema_dir.
+
+This function checks both the environment (thus,
+/etc/sysconfig/pacemaker as well) and ./configure options for the
+location where any additional schema files should be stored.
+---
+ include/crm/common/xml_internal.h |  1 +
+ lib/common/schemas.c              | 17 +++++++++++++++++
+ 2 files changed, 18 insertions(+)
+
+diff --git a/include/crm/common/xml_internal.h b/include/crm/common/xml_internal.h
+index f319856c8..cb27ec6b2 100644
+--- a/include/crm/common/xml_internal.h
++++ b/include/crm/common/xml_internal.h
+@@ -447,5 +447,6 @@ gboolean pcmk__validate_xml(xmlNode *xml_blob, const char *validation,
+                             void *error_handler_context);
+ 
+ void pcmk__log_known_schemas(void);
++const char *pcmk__remote_schema_dir(void);
+ 
+ #endif // PCMK__XML_INTERNAL__H
+diff --git a/lib/common/schemas.c b/lib/common/schemas.c
+index 1c60738ec..c03d80036 100644
+--- a/lib/common/schemas.c
++++ b/lib/common/schemas.c
+@@ -1351,6 +1351,23 @@ pcmk__schema_files_later_than(const char *name)
+     return lst;
+ }
+ 
++/*!
++ * \internal
++ * \brief Return the directory containing any extra schema files that a
++ *        Pacemaker Remote node fetched from the cluster
++ */
++const char *
++pcmk__remote_schema_dir(void)
++{
++    const char *dir = pcmk__env_option(PCMK__ENV_REMOTE_SCHEMA_DIR);
++
++    if (pcmk__str_empty(dir)) {
++        return PCMK__REMOTE_SCHEMA_DIR;
++    }
++
++    return dir;
++}
++
+ void
+ pcmk__log_known_schemas(void)
+ {
+-- 
+2.41.0
+
+From d2ed95651ea7c44153a34ba009494c70928319d7 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Tue, 19 Sep 2023 11:40:59 -0400
+Subject: [PATCH 06/15] Refactor: libcrmcommon: Look in more dirs in
+ pcmk__xml_artefact_path.
+
+If the directory returned by pcmk__xml_artefact_root doesn't contain the
+file we were looking for, fall back on PCMK__REMOTE_SCHEMA_DIR.  If that
+still doesn't contain the file, return NULL.
+---
+ lib/common/xml.c | 32 +++++++++++++++++++++++++-------
+ 1 file changed, 25 insertions(+), 7 deletions(-)
+
+diff --git a/lib/common/xml.c b/lib/common/xml.c
+index 142b501df..a1b1291f9 100644
+--- a/lib/common/xml.c
++++ b/lib/common/xml.c
+@@ -10,6 +10,7 @@
+ #include <crm_internal.h>
+ 
+ #include <stdio.h>
++#include <sys/stat.h>
+ #include <sys/types.h>
+ #include <unistd.h>
+ #include <time.h>
+@@ -2610,33 +2611,50 @@ pcmk__xml_artefact_root(enum pcmk__xml_artefact_ns ns)
+     return ret;
+ }
+ 
+-char *
+-pcmk__xml_artefact_path(enum pcmk__xml_artefact_ns ns, const char *filespec)
++static char *
++find_artefact(enum pcmk__xml_artefact_ns ns, const char *path, const char *filespec)
+ {
+-    char *base = pcmk__xml_artefact_root(ns), *ret = NULL;
++    char *ret = NULL;
+ 
+     switch (ns) {
+         case pcmk__xml_artefact_ns_legacy_rng:
+         case pcmk__xml_artefact_ns_base_rng:
+             if (pcmk__ends_with(filespec, ".rng")) {
+-                ret = crm_strdup_printf("%s/%s", base, filespec);
++                ret = crm_strdup_printf("%s/%s", path, filespec);
+             } else {
+-                ret = crm_strdup_printf("%s/%s.rng", base, filespec);
++                ret = crm_strdup_printf("%s/%s.rng", path, filespec);
+             }
+             break;
+         case pcmk__xml_artefact_ns_legacy_xslt:
+         case pcmk__xml_artefact_ns_base_xslt:
+             if (pcmk__ends_with(filespec, ".xsl")) {
+-                ret = crm_strdup_printf("%s/%s", base, filespec);
++                ret = crm_strdup_printf("%s/%s", path, filespec);
+             } else {
+-                ret = crm_strdup_printf("%s/%s.xsl", base, filespec);
++                ret = crm_strdup_printf("%s/%s.xsl", path, filespec);
+             }
+             break;
+         default:
+             crm_err("XML artefact family specified as %u not recognized", ns);
+     }
++
++    return ret;
++}
++
++char *
++pcmk__xml_artefact_path(enum pcmk__xml_artefact_ns ns, const char *filespec)
++{
++    struct stat sb;
++    char *base = pcmk__xml_artefact_root(ns);
++    char *ret = NULL;
++
++    ret = find_artefact(ns, base, filespec);
+     free(base);
+ 
++    if (stat(ret, &sb) != 0 || !S_ISREG(sb.st_mode)) {
++        const char *remote_schema_dir = pcmk__remote_schema_dir();
++        ret = find_artefact(ns, remote_schema_dir, filespec);
++    }
++
+     return ret;
+ }
+ 
+-- 
+2.41.0
+
+From 9f4da4102a40f7dbfe0d78c7735c2801ba852f4b Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Mon, 11 Sep 2023 09:17:18 -0400
+Subject: [PATCH 07/15] Feature: libcrmcommon: Add XML attrs needed for schema
+ file transfer.
+
+Also, move PCMK__XA_CONN_HOST to be alphabetized.
+---
+ include/crm_internal.h | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/include/crm_internal.h b/include/crm_internal.h
+index 71a0f7efa..3bc8d096a 100644
+--- a/include/crm_internal.h
++++ b/include/crm_internal.h
+@@ -81,17 +81,21 @@
+ #define PCMK__XA_CONFIG_ERRORS          "config-errors"
+ #define PCMK__XA_CONFIG_WARNINGS        "config-warnings"
+ #define PCMK__XA_CONFIRM                "confirm"
++#define PCMK__XA_CONN_HOST              "connection_host"
+ #define PCMK__XA_CRMD                   "crmd"
+ #define PCMK__XA_EXPECTED               "expected"
++#define PCMK__XA_FILE                   "file"
+ #define PCMK__XA_GRAPH_ERRORS           "graph-errors"
+ #define PCMK__XA_GRAPH_WARNINGS         "graph-warnings"
+ #define PCMK__XA_IN_CCM                 "in_ccm"
+ #define PCMK__XA_JOIN                   "join"
+ #define PCMK__XA_MODE                   "mode"
+ #define PCMK__XA_NODE_START_STATE       "node_start_state"
++#define PCMK__XA_PATH                   "path"
++#define PCMK__XA_SCHEMA                 "schema"
++#define PCMK__XA_SCHEMAS                "schemas"
+ #define PCMK__XA_TASK                   "task"
+ #define PCMK__XA_UPTIME                 "uptime"
+-#define PCMK__XA_CONN_HOST              "connection_host"
+ 
+ 
+ /*
+-- 
+2.41.0
+
+From 3384643bd4572ad03e183b16d5cc84fe69599380 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Mon, 11 Sep 2023 10:46:26 -0400
+Subject: [PATCH 08/15] Feature: libcrmcommon: Add pcmk__build_schema_xml_node.
+
+This function adds a given RNG or XSLT file and all of the files they
+refer to as children of a given XML node.
+
+Also, add unit tests for the new function.
+---
+ include/crm/common/internal.h                 |   3 +
+ lib/common/schemas.c                          | 144 +++++++++++++++++
+ lib/common/tests/schemas/Makefile.am          |   3 +-
+ .../pcmk__build_schema_xml_node_test.c        | 149 ++++++++++++++++++
+ 4 files changed, 298 insertions(+), 1 deletion(-)
+ create mode 100644 lib/common/tests/schemas/pcmk__build_schema_xml_node_test.c
+
+diff --git a/include/crm/common/internal.h b/include/crm/common/internal.h
+index a3cd455dc..318003efe 100644
+--- a/include/crm/common/internal.h
++++ b/include/crm/common/internal.h
+@@ -135,6 +135,9 @@ void crm_schema_init(void);
+ void crm_schema_cleanup(void);
+ 
+ GList *pcmk__schema_files_later_than(const char *name);
++void pcmk__build_schema_xml_node(xmlNode *parent, const char *name,
++                                 GList **already_included);
++
+ 
+ /* internal functions related to process IDs (from pid.c) */
+ 
+diff --git a/lib/common/schemas.c b/lib/common/schemas.c
+index c03d80036..1bcdff031 100644
+--- a/lib/common/schemas.c
++++ b/lib/common/schemas.c
+@@ -1351,6 +1351,150 @@ pcmk__schema_files_later_than(const char *name)
+     return lst;
+ }
+ 
++static void
++append_href(xmlNode *xml, void *user_data)
++{
++    GList **list = user_data;
++    const char *href = crm_element_value(xml, "href");
++    char *s = NULL;
++
++    if (href == NULL) {
++        return;
++    }
++
++    s = strdup(href);
++    CRM_ASSERT(s != NULL);
++    *list = g_list_prepend(*list, s);
++}
++
++static void
++external_refs_in_schema(GList **list, const char *contents)
++{
++    /* local-name()= is needed to ignore the xmlns= setting at the top of
++     * the XML file.  Otherwise, the xpath query will always return nothing.
++     */
++    const char *search = "//*[local-name()='externalRef'] | //*[local-name()='include']";
++    xmlNode *xml = string2xml(contents);
++
++    crm_foreach_xpath_result(xml, search, append_href, list);
++    free_xml(xml);
++}
++
++static int
++read_file_contents(const char *file, char **contents)
++{
++    int rc = pcmk_rc_ok;
++    char *path = NULL;
++
++    if (pcmk__ends_with(file, ".rng")) {
++        path = pcmk__xml_artefact_path(pcmk__xml_artefact_ns_legacy_rng, file);
++    } else {
++        path = pcmk__xml_artefact_path(pcmk__xml_artefact_ns_legacy_xslt, file);
++    }
++
++    rc = pcmk__file_contents(path, contents);
++
++    free(path);
++    return rc;
++}
++
++static void
++add_schema_file_to_xml(xmlNode *parent, const char *file, GList **already_included)
++{
++    char *contents = NULL;
++    char *path = NULL;
++    xmlNode *file_node = NULL;
++    GList *includes = NULL;
++    int rc = pcmk_rc_ok;
++
++    /* If we already included this file, don't do so again. */
++    if (g_list_find_custom(*already_included, file, (GCompareFunc) strcmp) != NULL) {
++        return;
++    }
++
++    /* Ensure whatever file we were given has a suffix we know about.  If not,
++     * just assume it's an RNG file.
++     */
++    if (!pcmk__ends_with(file, ".rng") && !pcmk__ends_with(file, ".xsl")) {
++        path = crm_strdup_printf("%s.rng", file);
++    } else {
++        path = strdup(file);
++        CRM_ASSERT(path != NULL);
++    }
++
++    rc = read_file_contents(path, &contents);
++    if (rc != pcmk_rc_ok || contents == NULL) {
++        crm_warn("Could not read schema file %s: %s", file, pcmk_rc_str(rc));
++        free(path);
++        return;
++    }
++
++    /* Create a new <file path="..."> node with the contents of the file
++     * as a CDATA block underneath it.
++     */
++    file_node = create_xml_node(parent, PCMK__XA_FILE);
++    if (file_node == NULL) {
++        free(contents);
++        free(path);
++        return;
++    }
++
++    crm_xml_add(file_node, PCMK__XA_PATH, path);
++    *already_included = g_list_prepend(*already_included, path);
++
++    xmlAddChild(file_node, xmlNewCDataBlock(parent->doc, (pcmkXmlStr) contents,
++                                            strlen(contents)));
++
++    /* Scan the file for any <externalRef> or <include> nodes and build up
++     * a list of the files they reference.
++     */
++    external_refs_in_schema(&includes, contents);
++
++    /* For each referenced file, recurse to add it (and potentially anything it
++     * references, ...) to the XML.
++     */
++    for (GList *iter = includes; iter != NULL; iter = iter->next) {
++        add_schema_file_to_xml(parent, iter->data, already_included);
++    }
++
++    free(contents);
++    g_list_free_full(includes, free);
++}
++
++/*!
++ * \internal
++ * \brief Add an XML schema file and all the files it references as children
++ *        of a given XML node
++ *
++ * \param[in,out] parent            The parent XML node
++ * \param[in] name                  The schema version to compare against
++ *                                  (for example, "pacemaker-3.1" or "pacemaker-3.1.rng")
++ * \param[in,out] already_included  A list of names that have already been added
++ *                                  to the parent node.
++ *
++ * \note The caller is responsible for freeing both the returned list and
++ *       the elements of the list
++ */
++void
++pcmk__build_schema_xml_node(xmlNode *parent, const char *name, GList **already_included)
++{
++    /* First, create an unattached node to add all the schema files to as children. */
++    xmlNode *schema_node = create_xml_node(NULL, PCMK__XA_SCHEMA);
++
++    crm_xml_add(schema_node, XML_ATTR_VERSION, name);
++    add_schema_file_to_xml(schema_node, name, already_included);
++
++    /* Then, if we actually added any children, attach the node to parent.  If
++     * we did not add any children (for instance, name was invalid), this prevents
++     * us from returning a document with additional empty children.
++     */
++    if (schema_node->children != NULL) {
++        xmlAddChild(parent, schema_node);
++    } else {
++        free_xml(schema_node);
++    }
++}
++
+ /*!
+  * \internal
+  * \brief Return the directory containing any extra schema files that a
+diff --git a/lib/common/tests/schemas/Makefile.am b/lib/common/tests/schemas/Makefile.am
+index b5c5e7f3c..8854eb264 100644
+--- a/lib/common/tests/schemas/Makefile.am
++++ b/lib/common/tests/schemas/Makefile.am
+@@ -13,7 +13,8 @@ include $(top_srcdir)/mk/unittest.mk
+ CFLAGS += -DPCMK__TEST_SCHEMA_DIR='"$(abs_builddir)/schemas"'
+ 
+ # Add "_test" to the end of all test program names to simplify .gitignore.
+-check_PROGRAMS = pcmk__schema_files_later_than_test \
++check_PROGRAMS = pcmk__build_schema_xml_node_test 	\
++		 pcmk__schema_files_later_than_test 	\
+ 		 pcmk__xml_find_x_0_schema_index_test
+ 
+ TESTS = $(check_PROGRAMS)
+diff --git a/lib/common/tests/schemas/pcmk__build_schema_xml_node_test.c b/lib/common/tests/schemas/pcmk__build_schema_xml_node_test.c
+new file mode 100644
+index 000000000..1f5cb6ce1
+--- /dev/null
++++ b/lib/common/tests/schemas/pcmk__build_schema_xml_node_test.c
+@@ -0,0 +1,149 @@
++/*
++ * Copyright 2023 the Pacemaker project contributors
++ *
++ * The version control history for this file may have further details.
++ *
++ * This source code is licensed under the GNU General Public License version 2
++ * or later (GPLv2+) WITHOUT ANY WARRANTY.
++ */
++
++#include <crm_internal.h>
++
++#include <crm/msg_xml.h>
++#include <crm/common/unittest_internal.h>
++#include <crm/common/lists_internal.h>
++
++#include <glib.h>
++
++const char *rngs1[] = { "pacemaker-3.0.rng", "status-1.0.rng", "alerts-2.10.rng",
++                        "nvset-2.9.rng", "score.rng", "rule-2.9.rng",
++                        "tags-1.3.rng", "acls-2.0.rng", "fencing-2.4.rng",
++                        "constraints-3.0.rng", "resources-3.0.rng", "nvset-3.0.rng",
++                        "nodes-3.0.rng", "options-3.0.rng", NULL };
++
++const char *rngs2[] = { "pacemaker-2.0.rng", "status-1.0.rng", "tags-1.3.rng",
++                        "acls-2.0.rng", "fencing-1.2.rng", "constraints-1.2.rng",
++                        "rule.rng", "score.rng", "resources-1.3.rng",
++                        "nvset-1.3.rng", "nodes-1.3.rng", "options-1.0.rng",
++                        "nvset.rng", "cib-1.2.rng", NULL };
++
++const char *rngs3[] = { "pacemaker-2.1.rng", "constraints-2.1.rng", NULL };
++
++static int
++setup(void **state) {
++    setenv("PCMK_schema_directory", PCMK__TEST_SCHEMA_DIR, 1);
++    crm_schema_init();
++    return 0;
++}
++
++static int
++teardown(void **state) {
++    crm_schema_cleanup();
++    unsetenv("PCMK_schema_directory");
++    return 0;
++}
++
++static void
++invalid_name(void **state)
++{
++    GList *already_included = NULL;
++    xmlNode *parent = create_xml_node(NULL, PCMK__XA_SCHEMAS);
++
++    pcmk__build_schema_xml_node(parent, "pacemaker-9.0", &already_included);
++    assert_null(parent->children);
++    assert_null(already_included);
++    free_xml(parent);
++}
++
++static void
++single_schema(void **state)
++{
++    GList *already_included = NULL;
++    xmlNode *parent = create_xml_node(NULL, PCMK__XA_SCHEMAS);
++    xmlNode *schema_node = NULL;
++    xmlNode *file_node = NULL;
++    int i = 0;
++
++    pcmk__build_schema_xml_node(parent, "pacemaker-3.0", &already_included);
++
++    assert_non_null(already_included);
++    assert_non_null(parent->children);
++
++    /* Test that the result looks like this:
++     *
++     * <schemas>
++     *   <schema version="pacemaker-3.0">
++     *     <file path="pacemaker-3.0.rng">CDATA</file>
++     *     <file path="status-1.0.rng">CDATA</file>
++     *     ...
++     *   </schema>
++     * </schemas>
++     */
++    schema_node = pcmk__xml_first_child(parent);
++    assert_string_equal("pacemaker-3.0", crm_element_value(schema_node, XML_ATTR_VERSION));
++
++    file_node = pcmk__xml_first_child(schema_node);
++    while (file_node != NULL && rngs1[i] != NULL) {
++        assert_string_equal(rngs1[i], crm_element_value(file_node, PCMK__XA_PATH));
++        assert_int_equal(pcmk__xml_first_child(file_node)->type, XML_CDATA_SECTION_NODE);
++
++        file_node = pcmk__xml_next(file_node);
++        i++;
++    }
++
++    g_list_free_full(already_included, free);
++    free_xml(parent);
++}
++
++static void
++multiple_schemas(void **state)
++{
++    GList *already_included = NULL;
++    xmlNode *parent = create_xml_node(NULL, PCMK__XA_SCHEMAS);
++    xmlNode *schema_node = NULL;
++    xmlNode *file_node = NULL;
++    int i = 0;
++
++    pcmk__build_schema_xml_node(parent, "pacemaker-2.0", &already_included);
++    pcmk__build_schema_xml_node(parent, "pacemaker-2.1", &already_included);
++
++    assert_non_null(already_included);
++    assert_non_null(parent->children);
++
++    /* Like single_schema, but make sure files aren't included multiple times
++     * when the function is called repeatedly.
++     */
++    schema_node = pcmk__xml_first_child(parent);
++    assert_string_equal("pacemaker-2.0", crm_element_value(schema_node, XML_ATTR_VERSION));
++
++    file_node = pcmk__xml_first_child(schema_node);
++    while (file_node != NULL && rngs2[i] != NULL) {
++        assert_string_equal(rngs2[i], crm_element_value(file_node, PCMK__XA_PATH));
++        assert_int_equal(pcmk__xml_first_child(file_node)->type, XML_CDATA_SECTION_NODE);
++
++        file_node = pcmk__xml_next(file_node);
++        i++;
++    }
++
++    schema_node = pcmk__xml_next(schema_node);
++    assert_string_equal("pacemaker-2.1", crm_element_value(schema_node, XML_ATTR_VERSION));
++
++    file_node = pcmk__xml_first_child(schema_node);
++    i = 0;
++
++    while (file_node != NULL && rngs3[i] != NULL) {
++        assert_string_equal(rngs3[i], crm_element_value(file_node, PCMK__XA_PATH));
++        assert_int_equal(pcmk__xml_first_child(file_node)->type, XML_CDATA_SECTION_NODE);
++
++        file_node = pcmk__xml_next(file_node);
++        i++;
++    }
++
++    g_list_free_full(already_included, free);
++    free_xml(parent);
++}
++
++PCMK__UNIT_TEST(setup, teardown,
++                cmocka_unit_test(invalid_name),
++                cmocka_unit_test(single_schema),
++                cmocka_unit_test(multiple_schemas))
+-- 
+2.41.0
+
+From 036eb9f59326962ed2d1f2f4af88b20755a046d5 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Thu, 14 Sep 2023 10:02:16 -0400
+Subject: [PATCH 09/15] Feature: daemons: Add a new fetch_schemas CIB command.
+
+This command wraps pcmk__schema_files_later_than and
+pcmk__build_schema_xml_node to produce a new CIB command that takes in a
+minimum schema version and returns a big XML message containing all the
+schema files after that version.
+---
+ daemons/based/based_messages.c  | 43 +++++++++++++++++++++++++++++++++
+ daemons/based/based_operation.c |  1 +
+ daemons/based/pacemaker-based.h |  4 +++
+ include/crm/cib/cib_types.h     |  3 +++
+ include/crm/cib/internal.h      |  2 ++
+ lib/cib/cib_client.c            | 15 ++++++++++++
+ lib/cib/cib_ops.c               |  3 +++
+ 7 files changed, 71 insertions(+)
+
+diff --git a/daemons/based/based_messages.c b/daemons/based/based_messages.c
+index 35d639a89..a87d9ac2e 100644
+--- a/daemons/based/based_messages.c
++++ b/daemons/based/based_messages.c
+@@ -478,3 +478,46 @@ cib_process_commit_transaction(const char *op, int options, const char *section,
+     }
+     return pcmk_rc2legacy(rc);
+ }
++
++int
++cib_process_schemas(const char *op, int options, const char *section, xmlNode *req,
++                    xmlNode *input, xmlNode *existing_cib, xmlNode **result_cib,
++                    xmlNode **answer)
++{
++    xmlNode *data = NULL;
++    const char *after_ver = NULL;
++    GList *schemas = NULL;
++    GList *already_included = NULL;
++
++    *answer = create_xml_node(NULL, PCMK__XA_SCHEMAS);
++
++    data = get_message_xml(req, F_CIB_CALLDATA);
++    if (data == NULL) {
++        crm_warn("No data specified in request");
++        return -EPROTO;
++    }
++
++    after_ver = crm_element_value(data, XML_ATTR_VERSION);
++    if (after_ver == NULL) {
++        crm_warn("No version specified in request");
++        return -EPROTO;
++    }
++
++    /* The client requested all schemas after the latest one we know about, which
++     * means the client is fully up-to-date.  Return a properly formatted reply
++     * with no schemas.
++     */
++    if (pcmk__str_eq(after_ver, xml_latest_schema(), pcmk__str_none)) {
++        return pcmk_ok;
++    }
++
++    schemas = pcmk__schema_files_later_than(after_ver);
++
++    for (GList *iter = schemas; iter != NULL; iter = iter->next) {
++        pcmk__build_schema_xml_node(*answer, iter->data, &already_included);
++    }
++
++    g_list_free_full(schemas, free);
++    g_list_free_full(already_included, free);
++    return pcmk_ok;
++}
+diff --git a/daemons/based/based_operation.c b/daemons/based/based_operation.c
+index 736d425e3..8dd07af93 100644
+--- a/daemons/based/based_operation.c
++++ b/daemons/based/based_operation.c
+@@ -35,6 +35,7 @@ static const cib__op_fn_t cib_op_functions[] = {
+     [cib__op_sync_all]         = cib_process_sync,
+     [cib__op_sync_one]         = cib_process_sync_one,
+     [cib__op_upgrade]          = cib_process_upgrade_server,
++    [cib__op_schemas]          = cib_process_schemas,
+ };
+ 
+ /*!
+diff --git a/daemons/based/pacemaker-based.h b/daemons/based/pacemaker-based.h
+index 33c7642c5..de24779ac 100644
+--- a/daemons/based/pacemaker-based.h
++++ b/daemons/based/pacemaker-based.h
+@@ -122,6 +122,10 @@ int cib_process_commit_transaction(const char *op, int options,
+                                    const char *section, xmlNode *req,
+                                    xmlNode *input, xmlNode *existing_cib,
+                                    xmlNode **result_cib, xmlNode **answer);
++int cib_process_schemas(const char *op, int options, const char *section,
++                        xmlNode *req, xmlNode *input, xmlNode *existing_cib,
++                        xmlNode **result_cib, xmlNode **answer);
++
+ void send_sync_request(const char *host);
+ int sync_our_cib(xmlNode *request, gboolean all);
+ 
+diff --git a/include/crm/cib/cib_types.h b/include/crm/cib/cib_types.h
+index a803311c2..bebe770ed 100644
+--- a/include/crm/cib/cib_types.h
++++ b/include/crm/cib/cib_types.h
+@@ -324,6 +324,9 @@ typedef struct cib_api_operations_s {
+      *                      processing requests
+      */
+     void (*set_user)(cib_t *cib, const char *user);
++
++    int (*fetch_schemas)(cib_t *cib, xmlNode **output_data, const char *after_ver,
++                         int call_options);
+ } cib_api_operations_t;
+ 
+ struct cib_s {
+diff --git a/include/crm/cib/internal.h b/include/crm/cib/internal.h
+index 20059ec7e..9d54d52b7 100644
+--- a/include/crm/cib/internal.h
++++ b/include/crm/cib/internal.h
+@@ -32,6 +32,7 @@
+ #define PCMK__CIB_REQUEST_NOOP          "noop"
+ #define PCMK__CIB_REQUEST_SHUTDOWN      "cib_shutdown_req"
+ #define PCMK__CIB_REQUEST_COMMIT_TRANSACT   "cib_commit_transact"
++#define PCMK__CIB_REQUEST_SCHEMAS       "cib_schemas"
+ 
+ #  define F_CIB_CLIENTID  "cib_clientid"
+ #  define F_CIB_CALLOPTS  "cib_callopt"
+@@ -110,6 +111,7 @@ enum cib__op_type {
+     cib__op_sync_all,
+     cib__op_sync_one,
+     cib__op_upgrade,
++    cib__op_schemas,
+ };
+ 
+ gboolean cib_diff_version_details(xmlNode * diff, int *admin_epoch, int *epoch, int *updates,
+diff --git a/lib/cib/cib_client.c b/lib/cib/cib_client.c
+index 32e1f83c5..a2fcabbca 100644
+--- a/lib/cib/cib_client.c
++++ b/lib/cib/cib_client.c
+@@ -451,6 +451,19 @@ cib_client_end_transaction(cib_t *cib, bool commit, int call_options)
+     return rc;
+ }
+ 
++static int
++cib_client_fetch_schemas(cib_t *cib, xmlNode **output_data, const char *after_ver,
++                         int call_options)
++{
++    xmlNode *data = create_xml_node(NULL, PCMK__XA_SCHEMA);
++
++    crm_xml_add(data, XML_ATTR_VERSION, after_ver);
++
++    return cib_internal_op(cib, PCMK__CIB_REQUEST_SCHEMAS, NULL, NULL, data,
++                           output_data, call_options, NULL);
++
++}
++
+ static void
+ cib_client_set_user(cib_t *cib, const char *user)
+ {
+@@ -736,6 +749,8 @@ cib_new_variant(void)
+ 
+     new_cib->cmds->set_user = cib_client_set_user;
+ 
++    new_cib->cmds->fetch_schemas = cib_client_fetch_schemas;
++
+     return new_cib;
+ }
+ 
+diff --git a/lib/cib/cib_ops.c b/lib/cib/cib_ops.c
+index c324304b9..2165d8af3 100644
+--- a/lib/cib/cib_ops.c
++++ b/lib/cib/cib_ops.c
+@@ -127,6 +127,9 @@ static const cib__operation_t cib_ops[] = {
+         |cib__op_attr_writes_through
+         |cib__op_attr_transaction
+     },
++    {
++        PCMK__CIB_REQUEST_SCHEMAS, cib__op_schemas, cib__op_attr_local
++    }
+ };
+ 
+ /*!
+-- 
+2.41.0
+
+From e8076b4a387ee758508f0683739b3e880f79db47 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Thu, 14 Sep 2023 15:48:31 -0400
+Subject: [PATCH 10/15] Refactor: libcrmcommon: Add
+ pcmk__load_schemas_from_dir.
+
+This just moves the bulk of crm_schema_init out into its own function,
+allowing us to call it multiple times as other schema directories
+appear.
+
+There is no similar function for unloading schemas from a directory.  If
+you want to do that, you'll have to use crm_schema_cleanup to unload
+everything and start over.
+
+This function has not been tested for the possibility that the same
+schema files exist in multiple directories.  It is assumed that it won't
+be used like that.
+---
+ include/crm/common/internal.h |  1 +
+ lib/common/schemas.c          | 83 +++++++++++++++++++----------------
+ 2 files changed, 45 insertions(+), 39 deletions(-)
+
+diff --git a/include/crm/common/internal.h b/include/crm/common/internal.h
+index 318003efe..542d0a67c 100644
+--- a/include/crm/common/internal.h
++++ b/include/crm/common/internal.h
+@@ -134,6 +134,7 @@ bool pcmk__procfs_has_pids(void);
+ void crm_schema_init(void);
+ void crm_schema_cleanup(void);
+ 
++void pcmk__load_schemas_from_dir(const char *dir);
+ GList *pcmk__schema_files_later_than(const char *name);
+ void pcmk__build_schema_xml_node(xmlNode *parent, const char *name,
+                                  GList **already_included);
+diff --git a/lib/common/schemas.c b/lib/common/schemas.c
+index 1bcdff031..a0c844131 100644
+--- a/lib/common/schemas.c
++++ b/lib/common/schemas.c
+@@ -406,6 +406,49 @@ wrap_libxslt(bool finalize)
+     }
+ }
+ 
++void
++pcmk__load_schemas_from_dir(const char *dir)
++{
++    int lpc, max;
++    struct dirent **namelist = NULL;
++
++    max = scandir(dir, &namelist, schema_filter, schema_cmp_directory);
++    if (max < 0) {
++        crm_warn("Could not load schemas from %s: %s", dir, strerror(errno));
++        return;
++    }
++
++    for (lpc = 0; lpc < max; lpc++) {
++        bool transform_expected = false;
++        pcmk__schema_version_t version = SCHEMA_ZERO;
++
++        if (!version_from_filename(namelist[lpc]->d_name, &version)) {
++            // Shouldn't be possible, but makes static analysis happy
++            crm_warn("Skipping schema '%s': could not parse version",
++                     namelist[lpc]->d_name);
++            continue;
++        }
++        if ((lpc + 1) < max) {
++            pcmk__schema_version_t next_version = SCHEMA_ZERO;
++
++            if (version_from_filename(namelist[lpc+1]->d_name, &next_version)
++                    && (version.v[0] < next_version.v[0])) {
++                transform_expected = true;
++            }
++        }
++
++        if (add_schema_by_version(&version, transform_expected) != pcmk_rc_ok) {
++            break;
++        }
++    }
++
++    for (lpc = 0; lpc < max; lpc++) {
++        free(namelist[lpc]);
++    }
++
++    free(namelist);
++}
++
+ /*!
+  * \internal
+  * \brief Load pacemaker schemas into cache
+@@ -416,50 +459,12 @@ wrap_libxslt(bool finalize)
+ void
+ crm_schema_init(void)
+ {
+-    int lpc, max;
+     char *base = pcmk__xml_artefact_root(pcmk__xml_artefact_ns_legacy_rng);
+-    struct dirent **namelist = NULL;
+     const pcmk__schema_version_t zero = SCHEMA_ZERO;
+ 
+     wrap_libxslt(false);
+ 
+-    max = scandir(base, &namelist, schema_filter, schema_cmp_directory);
+-    if (max < 0) {
+-        crm_notice("scandir(%s) failed: %s (%d)", base, strerror(errno), errno);
+-        free(base);
+-
+-    } else {
+-        free(base);
+-        for (lpc = 0; lpc < max; lpc++) {
+-            bool transform_expected = FALSE;
+-            pcmk__schema_version_t version = SCHEMA_ZERO;
+-
+-            if (!version_from_filename(namelist[lpc]->d_name, &version)) {
+-                // Shouldn't be possible, but makes static analysis happy
+-                crm_err("Skipping schema '%s': could not parse version",
+-                        namelist[lpc]->d_name);
+-                continue;
+-            }
+-            if ((lpc + 1) < max) {
+-                pcmk__schema_version_t next_version = SCHEMA_ZERO;
+-
+-                if (version_from_filename(namelist[lpc+1]->d_name, &next_version)
+-                        && (version.v[0] < next_version.v[0])) {
+-                    transform_expected = TRUE;
+-                }
+-            }
+-
+-            if (add_schema_by_version(&version, transform_expected)
+-                    == ENOENT) {
+-                break;
+-            }
+-        }
+-
+-        for (lpc = 0; lpc < max; lpc++) {
+-            free(namelist[lpc]);
+-        }
+-        free(namelist);
+-    }
++    pcmk__load_schemas_from_dir(base);
+ 
+     // @COMPAT: Deprecated since 2.1.5
+     add_schema(pcmk__schema_validator_rng, &zero, "pacemaker-next",
+-- 
+2.41.0
+
+From 5b40f0227b33edd6be65515dcc1af4eb656b78e7 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Thu, 14 Sep 2023 11:24:36 -0400
+Subject: [PATCH 11/15] Feature: daemons: Download newer schema files to a
+ remote executor.
+
+If the remote executor supports an older version of the CIB schema than
+the rest of the cluster, various operations could fail due to the schema
+not validating on the remote node.
+
+Instead, ask the CIB manager for the updated schema files, store them in
+a separate directory on the remote node, and add them to the list of
+known schema files.  These can then be used just like the packaged
+schema files.
+
+Note that while this is a fairly large patch, it's really just a lot of
+boring IO and file management code, which requires a lot of error
+handling.
+
+Fixes T182
+---
+ daemons/execd/Makefile.am       |   4 +-
+ daemons/execd/execd_commands.c  |   6 +
+ daemons/execd/pacemaker-execd.h |   1 +
+ daemons/execd/remoted_schemas.c | 282 ++++++++++++++++++++++++++++++++
+ 4 files changed, 292 insertions(+), 1 deletion(-)
+ create mode 100644 daemons/execd/remoted_schemas.c
+
+diff --git a/daemons/execd/Makefile.am b/daemons/execd/Makefile.am
+index ab8544f9d..ce0e16126 100644
+--- a/daemons/execd/Makefile.am
++++ b/daemons/execd/Makefile.am
+@@ -44,12 +44,14 @@ pacemaker_remoted_LDFLAGS	= $(LDFLAGS_HARDENED_EXE)
+ 
+ pacemaker_remoted_LDADD = $(top_builddir)/lib/fencing/libstonithd.la
+ pacemaker_remoted_LDADD	+= $(top_builddir)/lib/services/libcrmservice.la
++pacemaker_remoted_LDADD += $(top_builddir)/lib/cib/libcib.la
+ pacemaker_remoted_LDADD += $(top_builddir)/lib/lrmd/liblrmd.la
+ pacemaker_remoted_LDADD += $(top_builddir)/lib/common/libcrmcommon.la
+ pacemaker_remoted_SOURCES	= $(pacemaker_execd_SOURCES) 	\
+ 				  remoted_tls.c 		\
+ 				  remoted_pidone.c 		\
+-				  remoted_proxy.c
++				  remoted_proxy.c 		\
++				  remoted_schemas.c
+ endif
+ 
+ cts_exec_helper_LDADD = $(top_builddir)/lib/pengine/libpe_status.la
+diff --git a/daemons/execd/execd_commands.c b/daemons/execd/execd_commands.c
+index cf4503a25..1601efb0b 100644
+--- a/daemons/execd/execd_commands.c
++++ b/daemons/execd/execd_commands.c
+@@ -1493,9 +1493,15 @@ process_lrmd_signon(pcmk__client_t *client, xmlNode *request, int call_id,
+         if ((client->remote != NULL)
+             && pcmk_is_set(client->flags,
+                            pcmk__client_tls_handshake_complete)) {
++            const char *op = crm_element_value(request, F_LRMD_OPERATION);
+ 
+             // This is a remote connection from a cluster node's controller
+             ipc_proxy_add_provider(client);
++
++            /* If this was a register operation, also ask for new schema files. */
++            if (pcmk__str_eq(op, CRM_OP_REGISTER, pcmk__str_none)) {
++                remoted_request_cib_schema_files();
++            }
+         } else {
+             rc = -EACCES;
+         }
+diff --git a/daemons/execd/pacemaker-execd.h b/daemons/execd/pacemaker-execd.h
+index 9c1d173f5..6fb8ef440 100644
+--- a/daemons/execd/pacemaker-execd.h
++++ b/daemons/execd/pacemaker-execd.h
+@@ -101,6 +101,7 @@ void ipc_proxy_forward_client(pcmk__client_t *client, xmlNode *xml);
+ pcmk__client_t *ipc_proxy_get_provider(void);
+ int ipc_proxy_shutdown_req(pcmk__client_t *ipc_proxy);
+ void remoted_spawn_pidone(int argc, char **argv, char **envp);
++void remoted_request_cib_schema_files(void);
+ #endif
+ 
+ int process_lrmd_alert_exec(pcmk__client_t *client, uint32_t id,
+diff --git a/daemons/execd/remoted_schemas.c b/daemons/execd/remoted_schemas.c
+new file mode 100644
+index 000000000..d501fa495
+--- /dev/null
++++ b/daemons/execd/remoted_schemas.c
+@@ -0,0 +1,282 @@
++/*
++ * Copyright 2023 the Pacemaker project contributors
++ *
++ * The version control history for this file may have further details.
++ *
++ * This source code is licensed under the GNU Lesser General Public License
++ * version 2.1 or later (LGPLv2.1+) WITHOUT ANY WARRANTY.
++ */
++
++#include <crm_internal.h>
++
++#include <ftw.h>
++#include <unistd.h>
++#include <sys/stat.h>
++
++#include <crm/cib.h>
++#include <crm/cib/cib_types.h>
++#include <crm/cib/internal.h>
++#include <crm/crm.h>
++#include <crm/msg_xml.h>
++#include <crm/common/mainloop.h>
++
++#include "pacemaker-execd.h"
++
++static pid_t schema_fetch_pid = 0;
++
++static int
++rm_files(const char *pathname, const struct stat *sbuf, int type, struct FTW *ftwb)
++{
++    /* Don't delete PCMK__REMOTE_SCHEMA_DIR . */
++    if (ftwb->level == 0) {
++        return 0;
++    }
++
++    if (remove(pathname) != 0) {
++        int rc = errno;
++        crm_err("Could not remove %s: %s", pathname, pcmk_rc_str(rc));
++        return -1;
++    }
++
++    return 0;
++}
++
++static void
++clean_up_extra_schema_files(void)
++{
++    const char *remote_schema_dir = pcmk__remote_schema_dir();
++    struct stat sb;
++    int rc;
++
++    rc = stat(remote_schema_dir, &sb);
++
++    if (rc == -1) {
++        if (errno == ENOENT) {
++            /* If the directory doesn't exist, try to make it first. */
++            if (mkdir(remote_schema_dir, 0755) != 0) {
++                rc = errno;
++                crm_err("Could not create directory for schemas: %s",
++                        pcmk_rc_str(rc));
++            }
++
++        } else {
++            rc = errno;
++            crm_err("Could not create directory for schemas: %s",
++                    pcmk_rc_str(rc));
++        }
++
++    } else if (!S_ISDIR(sb.st_mode)) {
++        /* If something exists with the same name that's not a directory, that's
++         * an error.
++         */
++        crm_err("%s already exists but is not a directory", remote_schema_dir);
++
++    } else {
++        /* It's a directory - clear it out so we can download potentially new
++         * schema files.
++         */
++        rc = nftw(remote_schema_dir, rm_files, 10, FTW_DEPTH|FTW_MOUNT|FTW_PHYS);
++
++        if (rc != 0) {
++            crm_err("Could not remove %s: %s", remote_schema_dir, pcmk_rc_str(rc));
++        }
++    }
++}
++
++static void
++write_extra_schema_file(xmlNode *xml, void *user_data)
++{
++    const char *remote_schema_dir = pcmk__remote_schema_dir();
++    const char *file = NULL;
++    char *path = NULL;
++    int rc;
++
++    file = crm_element_value(xml, PCMK__XA_PATH);
++    if (file == NULL) {
++        crm_warn("No destination path given in schema request");
++        return;
++    }
++
++    path = crm_strdup_printf("%s/%s", remote_schema_dir, file);
++
++    /* The schema is a CDATA node, which is a child of the <file> node.  Traverse
++     * all children and look for the first CDATA child.  There can't be more than
++     * one because we only have one file attribute on the parent.
++     */
++    for (xmlNode *child = xml->children; child != NULL; child = child->next) {
++        FILE *stream = NULL;
++
++        if (child->type != XML_CDATA_SECTION_NODE) {
++            continue;
++        }
++
++        stream = fopen(path, "w+");
++        if (stream == NULL) {
++            crm_warn("Could not write schema file %s: %s", path, strerror(errno));
++        } else {
++            rc = fprintf(stream, "%s", child->content);
++
++            if (rc < 0) {
++                crm_warn("Could not write schema file %s: %s", path, strerror(errno));
++            }
++
++            fclose(stream);
++        }
++
++        break;
++    }
++
++    free(path);
++}
++
++static void
++get_schema_files(void)
++{
++    int rc = pcmk_rc_ok;
++    cib_t *cib = NULL;
++    xmlNode *reply;
++
++    cib = cib_new();
++    if (cib == NULL) {
++        _exit(ENOTCONN);
++    }
++
++    rc = cib->cmds->signon(cib, crm_system_name, cib_query);
++    if (rc != pcmk_ok) {
++        crm_err("Could not connect to the CIB manager: %s", pcmk_strerror(rc));
++        _exit(pcmk_rc2exitc(rc));
++    }
++
++    rc = cib->cmds->fetch_schemas(cib, &reply, xml_latest_schema(), cib_sync_call);
++    if (rc != pcmk_ok) {
++        crm_err("Could not get schema files: %s", pcmk_strerror(rc));
++        rc = pcmk_legacy2rc(rc);
++
++    } else if (reply->children != NULL) {
++        /* The returned document looks something like this:
++         * <cib_command>
++         *   <cib_calldata>
++         *     <schemas>
++         *       <schema version="pacemaker-1.1">
++         *         <file path="foo-1.1">
++         *         </file>
++         *         <file path="bar-1.1">
++         *         </file>
++         *         ...
++         *       </schema>
++         *       <schema version="pacemaker-1.2">
++         *       </schema>
++         *       ...
++         *     </schemas>
++         *   </cib_calldata>
++         * </cib_command>
++         *
++         * All the <schemas> and <schema> tags are really just there for organizing
++         * the XML a little better.  What we really care about are the <file> nodes,
++         * and specifically the path attributes and the CDATA children (not shown)
++         * of each.  We can use an xpath query to reach down and get all the <file>
++         * nodes at once.
++         *
++         * If we already have the latest schema version, or we asked for one later
++         * than what the cluster supports, we'll get back an empty <schemas> node,
++         * so all this will continue to work.  It just won't do anything.
++         */
++        crm_foreach_xpath_result(reply, "//" PCMK__XA_FILE, write_extra_schema_file, NULL);
++    }
++
++    cib__clean_up_connection(&cib);
++    _exit(pcmk_rc2exitc(rc));
++}
++
++/* Load any additional schema files when the child is finished fetching and
++ * saving them to disk.
++ */
++static void
++get_schema_files_complete(mainloop_child_t *p, pid_t pid, int core, int signo, int exitcode)
++{
++    const char *errmsg = "Could not load additional schema files";
++
++    if ((signo == 0) && (exitcode == 0)) {
++        const char *remote_schema_dir = pcmk__remote_schema_dir();
++
++        /* Don't just crm_schema_init here because that will load the base
++         * schemas again too.  Instead just load the things we fetched.
++         */
++        pcmk__load_schemas_from_dir(remote_schema_dir);
++        crm_info("Fetching extra schema files completed successfully");
++
++    } else {
++        if (signo == 0) {
++            crm_err("%s: process %d exited %d", errmsg, (int) pid, exitcode);
++
++        } else {
++            crm_err("%s: process %d terminated with signal %d (%s)%s",
++                    errmsg, (int) pid, signo, strsignal(signo),
++                    (core? " and dumped core" : ""));
++        }
++
++        /* Clean up any incomplete schema data we might have been downloading when
++         * the process timed out or crashed.  We don't need to do any extra cleanup
++         * because we never loaded the extra schemas, and we don't need to call
++         * crm_schema_init because that was called in remoted_request_cib_schema_files
++         * before this function.
++         */
++        clean_up_extra_schema_files();
++    }
++}
++
++void
++remoted_request_cib_schema_files(void)
++{
++    pid_t pid;
++    int rc;
++
++    /* If a previous schema-fetch process is still running when we're called
++     * again, it's hung.  Attempt to kill it before cleaning up the extra
++     * directory.
++     */
++    if (schema_fetch_pid != 0) {
++        if (mainloop_child_kill(schema_fetch_pid) == FALSE) {
++            crm_warn("Unable to kill pre-existing schema-fetch process");
++            return;
++        }
++
++        schema_fetch_pid = 0;
++    }
++
++    /* Clean up any extra schema files we downloaded from a previous cluster
++     * connection.  After the files are gone, we need to wipe them from
++     * known_schemas, but there's no opposite operation for add_schema().
++     *
++     * Instead, unload all the schemas.  This means we'll also forget about all
++     * the installed schemas as well, which means that xml_latest_schema() will
++     * fail.  So we need to load the base schemas right now.
++     */
++    clean_up_extra_schema_files();
++    crm_schema_cleanup();
++    crm_schema_init();
++
++    crm_info("Fetching extra schema files from cluster");
++    pid = fork();
++
++    switch (pid) {
++        case -1: {
++            rc = errno;
++            crm_warn("Could not spawn process to get schema files: %s", pcmk_rc_str(rc));
++            break;
++        }
++
++        case 0:
++            /* child */
++            get_schema_files();
++            break;
++
++        default:
++            /* parent */
++            schema_fetch_pid = pid;
++            mainloop_child_add_with_flags(pid, 5 * 60 * 1000, "schema-fetch", NULL,
++                                          mainloop_leave_pid_group,
++                                          get_schema_files_complete);
++            break;
++    }
++}
+-- 
+2.41.0
+
+From b05fef32cf1f9063e01db5108f95386be329d778 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Wed, 29 Nov 2023 10:04:57 -0500
+Subject: [PATCH 12/15] Feature: libcrmcommon: Load additional schema files in
+ crm_schema_init.
+
+If the /var/lib/pacemaker/schemas directory exists, load any extra
+schemas from it when we init.  This makes them available for command
+line programs to use.
+---
+ lib/common/schemas.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/lib/common/schemas.c b/lib/common/schemas.c
+index a0c844131..68d79cfc7 100644
+--- a/lib/common/schemas.c
++++ b/lib/common/schemas.c
+@@ -459,12 +459,14 @@ pcmk__load_schemas_from_dir(const char *dir)
+ void
+ crm_schema_init(void)
+ {
++    const char *remote_schema_dir = pcmk__remote_schema_dir();
+     char *base = pcmk__xml_artefact_root(pcmk__xml_artefact_ns_legacy_rng);
+     const pcmk__schema_version_t zero = SCHEMA_ZERO;
+ 
+     wrap_libxslt(false);
+ 
+     pcmk__load_schemas_from_dir(base);
++    pcmk__load_schemas_from_dir(remote_schema_dir);
+ 
+     // @COMPAT: Deprecated since 2.1.5
+     add_schema(pcmk__schema_validator_rng, &zero, "pacemaker-next",
+-- 
+2.41.0
+
+From 7454a8400238301848cc6694f5413fdb19d5834e Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Fri, 29 Sep 2023 10:41:51 -0400
+Subject: [PATCH 13/15] Refactor: daemons: Remove redundant includes from
+ remoted_tls.c.
+
+---
+ daemons/execd/remoted_tls.c | 2 --
+ 1 file changed, 2 deletions(-)
+
+diff --git a/daemons/execd/remoted_tls.c b/daemons/execd/remoted_tls.c
+index 23a2dcf45..978edfdd3 100644
+--- a/daemons/execd/remoted_tls.c
++++ b/daemons/execd/remoted_tls.c
+@@ -12,8 +12,6 @@
+ #include <glib.h>
+ #include <unistd.h>
+ 
+-#include <crm/crm.h>
+-#include <crm/msg_xml.h>
+ #include <crm/crm.h>
+ #include <crm/msg_xml.h>
+ #include <crm/common/mainloop.h>
+-- 
+2.41.0
+
+From c6b5f73a013515d6acd818d348d011e38f3d8e0e Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Fri, 27 Oct 2023 15:23:41 -0400
+Subject: [PATCH 14/15] Refactor: daemons: Keep XML schemas sorted.
+
+Now that we can add schemas multiple times (including after next/none
+have been added in the initial set), we've broken the assumption that
+schemas are always sorted by scandir.
+
+This introduces a function that can be called wherever to keep them
+sorted.  It should be called pretty much whenever
+pcmk__load_schemas_from_dir is called.
+---
+ daemons/execd/remoted_schemas.c   |  1 +
+ include/crm/common/xml_internal.h |  1 +
+ lib/common/schemas.c              | 40 +++++++++++++++++++++++++++++++
+ 3 files changed, 42 insertions(+)
+
+diff --git a/daemons/execd/remoted_schemas.c b/daemons/execd/remoted_schemas.c
+index d501fa495..eed43dfa9 100644
+--- a/daemons/execd/remoted_schemas.c
++++ b/daemons/execd/remoted_schemas.c
+@@ -203,6 +203,7 @@ get_schema_files_complete(mainloop_child_t *p, pid_t pid, int core, int signo, i
+          * schemas again too.  Instead just load the things we fetched.
+          */
+         pcmk__load_schemas_from_dir(remote_schema_dir);
++        pcmk__sort_schemas();
+         crm_info("Fetching extra schema files completed successfully");
+ 
+     } else {
+diff --git a/include/crm/common/xml_internal.h b/include/crm/common/xml_internal.h
+index cb27ec6b2..9b50f4e72 100644
+--- a/include/crm/common/xml_internal.h
++++ b/include/crm/common/xml_internal.h
+@@ -448,5 +448,6 @@ gboolean pcmk__validate_xml(xmlNode *xml_blob, const char *validation,
+ 
+ void pcmk__log_known_schemas(void);
+ const char *pcmk__remote_schema_dir(void);
++void pcmk__sort_schemas(void);
+ 
+ #endif // PCMK__XML_INTERNAL__H
+diff --git a/lib/common/schemas.c b/lib/common/schemas.c
+index 68d79cfc7..fd6202f62 100644
+--- a/lib/common/schemas.c
++++ b/lib/common/schemas.c
+@@ -449,6 +449,41 @@ pcmk__load_schemas_from_dir(const char *dir)
+     free(namelist);
+ }
+ 
++static gint
++schema_sort_GCompareFunc(gconstpointer a, gconstpointer b)
++{
++    const pcmk__schema_t *schema_a = a;
++    const pcmk__schema_t *schema_b = b;
++
++    if (pcmk__str_eq(schema_a->name, "pacemaker-next", pcmk__str_none)) {
++        if (pcmk__str_eq(schema_b->name, "none", pcmk__str_none)) {
++            return -1;
++        } else {
++            return 1;
++        }
++    } else if (pcmk__str_eq(schema_a->name, "none", pcmk__str_none)) {
++        return 1;
++    } else if (pcmk__str_eq(schema_b->name, "pacemaker-next", pcmk__str_none)) {
++        return -1;
++    } else {
++        return schema_cmp(schema_a->version, schema_b->version);
++    }
++}
++
++/*!
++ * \internal
++ * \brief Sort the list of known schemas such that all pacemaker-X.Y are in
++ *        version order, then pacemaker-next, then none
++ *
++ * This function should be called whenever additional schemas are loaded using
++ * pcmk__load_schemas_from_dir(), after the initial sets in crm_schema_init().
++ */
++void
++pcmk__sort_schemas(void)
++{
++    known_schemas = g_list_sort(known_schemas, schema_sort_GCompareFunc);
++}
++
+ /*!
+  * \internal
+  * \brief Load pacemaker schemas into cache
+@@ -474,6 +509,11 @@ crm_schema_init(void)
+ 
+     add_schema(pcmk__schema_validator_none, &zero, PCMK__VALUE_NONE,
+                NULL, NULL, FALSE);
++
++    /* This shouldn't be strictly necessary, but we'll do it here just in case
++     * there's anything in PCMK__REMOTE_SCHEMA_DIR that messes up the order.
++     */
++    pcmk__sort_schemas();
+ }
+ 
+ static gboolean
+-- 
+2.41.0
+
+From d6a535ca43db202bd01a2e085b58722ed1abcdb0 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Mon, 30 Oct 2023 12:59:13 -0400
+Subject: [PATCH 15/15] Feature: daemons: Only ask for schemas if supported by
+ the server
+
+We can use LRMD_PROTOCOL_VERSION in the handshake to determine what the
+server supports, similar to what is being done in attrd.  Add a macro to
+compare the version we were given with the known minimum version that
+supports the schema transfer command.
+
+Additionally, introduce LRMD_COMPATIBLE_PROTOCOL which is just the major
+version number required for the connection to succeed.  This gets rid of
+the need for LRMD_MIN_PROTOCOL_VERSION, which can now be deprecated.
+
+And then since I wasn't sure compare_version would work if you give it a
+full version number and just a major version, add a unit test for that.
+---
+ daemons/execd/execd_commands.c                | 11 +++++----
+ include/crm/lrmd.h                            | 23 +++++++++++++++----
+ lib/common/tests/utils/compare_version_test.c |  5 +++-
+ 3 files changed, 30 insertions(+), 9 deletions(-)
+
+diff --git a/daemons/execd/execd_commands.c b/daemons/execd/execd_commands.c
+index 1601efb0b..4ec4d03d6 100644
+--- a/daemons/execd/execd_commands.c
++++ b/daemons/execd/execd_commands.c
+@@ -1482,9 +1482,9 @@ process_lrmd_signon(pcmk__client_t *client, xmlNode *request, int call_id,
+     const char *protocol_version = crm_element_value(request, F_LRMD_PROTOCOL_VERSION);
+     const char *start_state = pcmk__env_option(PCMK__ENV_NODE_START_STATE);
+ 
+-    if (compare_version(protocol_version, LRMD_MIN_PROTOCOL_VERSION) < 0) {
++    if (compare_version(protocol_version, LRMD_COMPATIBLE_PROTOCOL) < 0) {
+         crm_err("Cluster API version must be greater than or equal to %s, not %s",
+-                LRMD_MIN_PROTOCOL_VERSION, protocol_version);
++                LRMD_COMPATIBLE_PROTOCOL, protocol_version);
+         rc = -EPROTO;
+     }
+ 
+@@ -1498,8 +1498,11 @@ process_lrmd_signon(pcmk__client_t *client, xmlNode *request, int call_id,
+             // This is a remote connection from a cluster node's controller
+             ipc_proxy_add_provider(client);
+ 
+-            /* If this was a register operation, also ask for new schema files. */
+-            if (pcmk__str_eq(op, CRM_OP_REGISTER, pcmk__str_none)) {
++            /* If this was a register operation, also ask for new schema files but
++             * only if it's supported by the protocol version.
++             */
++            if (pcmk__str_eq(op, CRM_OP_REGISTER, pcmk__str_none) &&
++                LRMD_SUPPORTS_SCHEMA_XFER(protocol_version)) {
+                 remoted_request_cib_schema_files();
+             }
+         } else {
+diff --git a/include/crm/lrmd.h b/include/crm/lrmd.h
+index 0c5a40b62..948a3b1fc 100644
+--- a/include/crm/lrmd.h
++++ b/include/crm/lrmd.h
+@@ -33,12 +33,27 @@ typedef struct lrmd_key_value_s {
+     struct lrmd_key_value_s *next;
+ } lrmd_key_value_t;
+ 
+-/* This should be bumped every time there is an incompatible change that
+- * prevents older clients from connecting to this version of the server.
++/* The major version should be bumped every time there is an incompatible
++ * change that prevents older clients from connecting to this version of
++ * the server.  The minor version indicates feature support.
++ *
++ * Protocol  Pacemaker  Significant changes
++ * --------  ---------  -------------------
++ *   1.2       2.1.7    PCMK__CIB_REQUEST_SCHEMAS
+  */
+-#define LRMD_PROTOCOL_VERSION "1.1"
++#define LRMD_PROTOCOL_VERSION "1.2"
++
++#define LRMD_SUPPORTS_SCHEMA_XFER(x) (compare_version((x), "1.2") >= 0)
+ 
+-/* This is the version that the client version will actually be compared
++/* The major protocol version the client and server both need to support for
++ * the connection to be successful.  This should only ever be the major
++ * version - not a complete version number.
++ */
++#define LRMD_COMPATIBLE_PROTOCOL "1"
++
++/* \deprecated Do not use (will be removed in a future release)
++ *
++ * This is the version that the client version will actually be compared
+  * against. This should be identical to LRMD_PROTOCOL_VERSION. However, we
+  * accidentally bumped LRMD_PROTOCOL_VERSION in 6424a647 (1.1.15) when we didn't
+  * need to, so for now it's different. If we ever have a truly incompatible
+diff --git a/lib/common/tests/utils/compare_version_test.c b/lib/common/tests/utils/compare_version_test.c
+index 35ebb63c6..d191f4abb 100644
+--- a/lib/common/tests/utils/compare_version_test.c
++++ b/lib/common/tests/utils/compare_version_test.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2022 the Pacemaker project contributors
++ * Copyright 2022-2023 the Pacemaker project contributors
+  *
+  * The version control history for this file may have further details.
+  *
+@@ -46,6 +46,9 @@ shorter_versions(void **state)
+ {
+     assert_int_equal(compare_version("1.0", "1.0.1"), -1);
+     assert_int_equal(compare_version("1.0.1", "1.0"), 1);
++    assert_int_equal(compare_version("1.0", "1"), 0);
++    assert_int_equal(compare_version("1", "1.2"), -1);
++    assert_int_equal(compare_version("1.2", "1"), 1);
+ }
+ 
+ PCMK__UNIT_TEST(NULL, NULL,
+-- 
+2.41.0
+
