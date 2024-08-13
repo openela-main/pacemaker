@@ -1,0 +1,31 @@
+From 8dc0d9b43343919edf4f4011ceecfd6b6765b4a4 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Wed, 8 May 2024 11:18:50 -0500
+Subject: [PATCH] Low: libcib: avoid memory leak in async calls
+
+Never in a release
+---
+ lib/cib/cib_native.c | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/lib/cib/cib_native.c b/lib/cib/cib_native.c
+index 0e502155bc..b014223112 100644
+--- a/lib/cib/cib_native.c
++++ b/lib/cib/cib_native.c
+@@ -94,9 +94,10 @@ cib_native_perform_op_delegate(cib_t *cib, const char *op, const char *host,
+ 
+     if (!(call_options & cib_sync_call)) {
+         crm_trace("Async call, returning %d", cib->call_id);
+-        CRM_CHECK(cib->call_id != 0, return -ENOMSG);
+-        free_xml(op_reply);
+-        return cib->call_id;
++        CRM_CHECK(cib->call_id != 0,
++                  rc = -ENOMSG; goto done);
++        rc = cib->call_id;
++        goto done;
+     }
+ 
+     rc = pcmk_ok;
+-- 
+2.41.0
+
