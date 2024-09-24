@@ -1,0 +1,121 @@
+From d7c233090057d4f660fa458a2ff97896b15ea951 Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Thu, 11 Jul 2024 12:43:49 -0700
+Subject: [PATCH] Refactor: various: Don't set cluster-layer node ID as XML ID
+
+Currently, we call the pcmk__xe_set_id() function using a stringified
+version of the numeric cluster-layer node ID. However, pcmk__xe_set_id()
+tries to sanitize its input to a valid XML ID. An XML ID cannot begin
+with a digit.
+
+crm_xml_set_id() does not sanitize comprehensively, and in particular,
+it does not care whether its argument begins with a digit. So the
+current code doesn't cause a problem.
+
+Still, as a best practice, set the PCMK_XA_ID attribute using
+crm_xml_add_ll() instead.
+
+Ref T848
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ daemons/controld/controld_messages.c | 6 +++++-
+ lib/cluster/corosync.c               | 2 +-
+ lib/common/ipc_client.c              | 2 +-
+ lib/common/ipc_controld.c            | 9 ++++++---
+ tools/crm_node.c                     | 4 ++--
+ 5 files changed, 15 insertions(+), 8 deletions(-)
+
+diff --git a/daemons/controld/controld_messages.c b/daemons/controld/controld_messages.c
+index bd5237e..0b0f25b 100644
+--- a/daemons/controld/controld_messages.c
++++ b/daemons/controld/controld_messages.c
+@@ -893,7 +893,11 @@ handle_node_info_request(const xmlNode *msg)
+                            pcmk_is_set(controld_globals.flags,
+                                        controld_has_quorum));
+ 
+-    // Check whether client requested node info by ID and/or name
++    /* Check whether client requested node info by ID and/or name
++     *
++     * @TODO A Corosync-layer node ID is of type uint32_t. We should be able to
++     * handle legitimate node IDs greater than INT_MAX, but currently we do not.
++     */
+     crm_element_value_int(msg, XML_ATTR_ID, &node_id);
+     if (node_id < 0) {
+         node_id = 0;
+diff --git a/lib/cluster/corosync.c b/lib/cluster/corosync.c
+index 374250f..fc33cce 100644
+--- a/lib/cluster/corosync.c
++++ b/lib/cluster/corosync.c
+@@ -650,7 +650,7 @@ pcmk__corosync_add_nodes(xmlNode *xml_parent)
+             if (xml_parent) {
+                 xmlNode *node = create_xml_node(xml_parent, XML_CIB_TAG_NODE);
+ 
+-                crm_xml_set_id(node, "%u", nodeid);
++                crm_xml_add_ll(node, XML_ATTR_ID, (long long) nodeid);
+                 crm_xml_add(node, XML_ATTR_UNAME, name);
+             }
+         }
+diff --git a/lib/common/ipc_client.c b/lib/common/ipc_client.c
+index 5e64e23..7696a69 100644
+--- a/lib/common/ipc_client.c
++++ b/lib/common/ipc_client.c
+@@ -769,7 +769,7 @@ create_purge_node_request(const pcmk_ipc_api_t *api, const char *node_name,
+             request = create_request(CRM_OP_RM_NODE_CACHE, NULL, NULL,
+                                      pcmk_ipc_name(api, false), client, NULL);
+             if (nodeid > 0) {
+-                crm_xml_set_id(request, "%lu", (unsigned long) nodeid);
++                crm_xml_add_ll(request, XML_ATTR_ID, (unsigned long) nodeid);
+             }
+             crm_xml_add(request, XML_ATTR_UNAME, node_name);
+             break;
+diff --git a/lib/common/ipc_controld.c b/lib/common/ipc_controld.c
+index 8e2016e..e4284f5 100644
+--- a/lib/common/ipc_controld.c
++++ b/lib/common/ipc_controld.c
+@@ -9,9 +9,12 @@
+ 
+ #include <crm_internal.h>
+ 
+-#include <stdio.h>
+-#include <stdbool.h>
+ #include <errno.h>
++#include <inttypes.h>                   // PRIu32
++#include <stdbool.h>
++#include <stdint.h>                     // uint32_t
++#include <stdio.h>
++
+ #include <libxml/tree.h>
+ 
+ #include <crm/crm.h>
+@@ -412,7 +415,7 @@ pcmk_controld_api_node_info(pcmk_ipc_api_t *api, uint32_t nodeid)
+         return EINVAL;
+     }
+     if (nodeid > 0) {
+-        crm_xml_set_id(request, "%lu", (unsigned long) nodeid);
++        crm_xml_add_ll(request, XML_ATTR_ID, (unsigned long) nodeid);
+     }
+ 
+     rc = send_controller_request(api, request, true);
+diff --git a/tools/crm_node.c b/tools/crm_node.c
+index 1e7ce6c..ad8c459 100644
+--- a/tools/crm_node.c
++++ b/tools/crm_node.c
+@@ -552,7 +552,7 @@ remove_from_section(cib_t *cib, const char *element, const char *section,
+     }
+     crm_xml_add(xml, XML_ATTR_UNAME, node_name);
+     if (node_id > 0) {
+-        crm_xml_set_id(xml, "%ld", node_id);
++        crm_xml_add_ll(xml, XML_ATTR_ID, node_id);
+     }
+     rc = cib->cmds->remove(cib, section, xml, cib_transaction);
+     free_xml(xml);
+@@ -691,7 +691,7 @@ purge_node_from_fencer(const char *node_name, long node_id)
+     cmd = create_request(CRM_OP_RM_NODE_CACHE, NULL, NULL, "stonith-ng",
+                          crm_system_name, NULL);
+     if (node_id > 0) {
+-        crm_xml_set_id(cmd, "%ld", node_id);
++        crm_xml_add_ll(cmd, XML_ATTR_ID, node_id);
+     }
+     crm_xml_add(cmd, XML_ATTR_UNAME, node_name);
+ 

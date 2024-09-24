@@ -244,7 +244,7 @@
 Name:          pacemaker
 Summary:       Scalable High-Availability cluster resource manager
 Version:       %{pcmkversion}
-Release:       %{pcmk_release}.1%{?dist}
+Release:       %{pcmk_release}.2%{?dist}
 %if %{defined _unitdir}
 License:       GPL-2.0-or-later AND LGPL-2.1-or-later
 %else
@@ -276,6 +276,8 @@ Patch008:      008-attrd-prep.patch
 Patch009:      009-attrd-cache-3.patch
 Patch010:      010-crm_attribute-free.patch
 Patch011:      011-attrd-memory-leak.patch
+Patch012:      012-dont-set-as-xml-id.patch
+Patch013:      013-crm_node-i-initialize.patch
 
 Requires:      resource-agents
 Requires:      %{pkgname_pcmk_libs}%{?_isa} = %{version}-%{release}
@@ -1027,6 +1029,10 @@ exit 0
 %license %{nagios_name}-%{nagios_hash}/COPYING
 
 %changelog
+* Wed Jul 24 2024 Chris Lumens <clumens@redhat.com> - 2.1.7-5.2
+- Fix an error in node ID handling in `crm_node -i`
+- Resolves: RHEL-49928
+
 * Fri Jun 7 2024 Chris Lumens <clumens@redhat.com> - 2.1.7-5.1
 - Fix a memory leak in the attribute daemon
 - Resolves: RHEL-40145
