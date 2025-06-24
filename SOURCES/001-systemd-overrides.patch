@@ -1,0 +1,1136 @@
+From 28f614c5e4e9b9c33dc0950ff4a2d76b1fb54baf Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Thu, 27 Feb 2025 02:12:14 -0800
+Subject: [PATCH 01/14] Refactor: libcrmservice: Improve error checks in
+ systemd_service_name()
+
+Use crm_strdup_printf() and pcmk__str_copy() to assert on error. Also
+rename to systemd_unit_name(), since we handle other unit types.
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ lib/services/systemd.c | 33 +++++++++++++--------------------
+ 1 file changed, 13 insertions(+), 20 deletions(-)
+
+diff --git a/lib/services/systemd.c b/lib/services/systemd.c
+index a2cdb2fd484..8981fc4c8b7 100644
+--- a/lib/services/systemd.c
++++ b/lib/services/systemd.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2012-2024 the Pacemaker project contributors
++ * Copyright 2012-2025 the Pacemaker project contributors
+  *
+  * The version control history for this file may have further details.
+  *
+@@ -207,7 +207,7 @@ systemd_unit_extension(const char *name)
+ }
+ 
+ static char *
+-systemd_service_name(const char *name, bool add_instance_name)
++systemd_unit_name(const char *name, bool add_instance_name)
+ {
+     const char *dot = NULL;
+ 
+@@ -228,16 +228,10 @@ systemd_service_name(const char *name, bool add_instance_name)
+ 
+     if (dot) {
+         if (dot != name && *(dot-1) == '@') {
+-            char *s = NULL;
+-
+-            if (asprintf(&s, "%.*spacemaker%s", (int) (dot-name), name, dot) == -1) {
+-                /* If asprintf fails, just return name. */
+-                return strdup(name);
+-            }
+-
+-            return s;
++            return crm_strdup_printf("%.*spacemaker%s",
++                                     (int) (dot - name), name, dot);
+         } else {
+-            return strdup(name);
++            return pcmk__str_copy(name);
+         }
+ 
+     } else if (add_instance_name && *(name+strlen(name)-1) == '@') {
+@@ -460,11 +454,10 @@ invoke_unit_by_name(const char *arg_name, svc_action_t *op, char **path)
+     pcmk__assert(msg != NULL);
+ 
+     // Add the (expanded) unit name as the argument
+-    name = systemd_service_name(arg_name,
+-                                (op == NULL)
+-                                || pcmk__str_eq(op->action,
+-                                                PCMK_ACTION_META_DATA,
+-                                                pcmk__str_none));
++    name = systemd_unit_name(arg_name,
++                             (op == NULL)
++                             || pcmk__str_eq(op->action, PCMK_ACTION_META_DATA,
++                                             pcmk__str_none));
+     CRM_LOG_ASSERT(dbus_message_append_args(msg, DBUS_TYPE_STRING, &name,
+                                             DBUS_TYPE_INVALID));
+     free(name);
+@@ -1010,10 +1003,10 @@ invoke_unit_by_path(svc_action_t *op, const char *unit)
+     /* (ss) */
+     {
+         const char *replace_s = "replace";
+-        char *name = systemd_service_name(op->agent,
+-                                          pcmk__str_eq(op->action,
+-                                                       PCMK_ACTION_META_DATA,
+-                                                       pcmk__str_none));
++        char *name = systemd_unit_name(op->agent,
++                                       pcmk__str_eq(op->action,
++                                                    PCMK_ACTION_META_DATA,
++                                                    pcmk__str_none));
+ 
+         CRM_LOG_ASSERT(dbus_message_append_args(msg, DBUS_TYPE_STRING, &name, DBUS_TYPE_INVALID));
+         CRM_LOG_ASSERT(dbus_message_append_args(msg, DBUS_TYPE_STRING, &replace_s, DBUS_TYPE_INVALID));
+
+From 7cf68fd3a83898204b057e0166b45d544c655e73 Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Sat, 1 Mar 2025 18:27:09 -0800
+Subject: [PATCH 02/14] Refactor: libcrmservice: Fail systemd rsc start if
+ create override fails
+
+This really shouldn't fail.
+
+Previously, we warned in this case. However, we ought to make sure the
+service is cluster-controlled, and a future commit will implement action
+timeouts via systemd overrides. So we'll actually need to make sure the
+override succeeds.
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ lib/services/systemd.c | 116 ++++++++++++++++++++++++++++++-----------
+ 1 file changed, 86 insertions(+), 30 deletions(-)
+
+diff --git a/lib/services/systemd.c b/lib/services/systemd.c
+index 8981fc4c8b7..8cd6665cb69 100644
+--- a/lib/services/systemd.c
++++ b/lib/services/systemd.c
+@@ -820,7 +820,20 @@ create_world_readable(const char *filename)
+     return fp;
+ }
+ 
+-static void
++/*!
++ * \internal
++ * \brief Create a runtime drop-in directory for a systemd unit
++ *
++ * This directory does not survive a reboot.
++ *
++ * \param[in] agent  Systemd resource agent
++ *
++ * \return Standard Pacemaker return code
++ *
++ * \note Any configuration in \c /etc takes precedence over our drop-in.
++ * \todo Document this in Pacemaker Explained or Administration?
++ */
++static int
+ create_override_dir(const char *agent)
+ {
+     char *override_dir = crm_strdup_printf(SYSTEMD_OVERRIDE_ROOT
+@@ -828,10 +841,11 @@ create_override_dir(const char *agent)
+     int rc = pcmk__build_path(override_dir, 0755);
+ 
+     if (rc != pcmk_rc_ok) {
+-        crm_warn("Could not create systemd override directory %s: %s",
+-                 override_dir, pcmk_rc_str(rc));
++        crm_err("Could not create systemd override directory %s: %s",
++                override_dir, pcmk_rc_str(rc));
+     }
+     free(override_dir);
++    return rc;
+ }
+ 
+ static char *
+@@ -841,53 +855,83 @@ get_override_filename(const char *agent)
+                              "/%s.service.d/50-pacemaker.conf", agent);
+ }
+ 
+-static void
++/*!
++ * \internal
++ * \brief Create a runtime override file for a systemd unit
++ *
++ * The systemd daemon is then reloaded. This file does not survive a reboot.
++ *
++ * \param[in] agent    Systemd resource agent
++ * \param[in] timeout  Timeout for systemd daemon reload
++ *
++ * \return Standard Pacemaker return code
++ *
++ * \note Any configuration in \c /etc takes precedence over our drop-in.
++ * \todo Document this in Pacemaker Explained or Administration?
++ */
++static int
+ systemd_create_override(const char *agent, int timeout)
+ {
+     FILE *file_strm = NULL;
+-    char *override_file = get_override_filename(agent);
++    char *filename = get_override_filename(agent);
++    char *override = NULL;
++    int rc = create_override_dir(agent);
+ 
+-    create_override_dir(agent);
++    if (rc != pcmk_rc_ok) {
++        goto done;
++    }
+ 
+     /* Ensure the override file is world-readable. This is not strictly
+      * necessary, but it avoids a systemd warning in the logs.
+      */
+-    file_strm = create_world_readable(override_file);
++    file_strm = create_world_readable(filename);
+     if (file_strm == NULL) {
+-        crm_err("Cannot open systemd override file %s for writing",
+-                override_file);
+-    } else {
+-        char *override = crm_strdup_printf(SYSTEMD_OVERRIDE_TEMPLATE, agent);
+-
+-        int rc = fprintf(file_strm, "%s\n", override);
++        // @TODO Use errno
++        rc = EIO;
++        crm_err("Cannot open systemd override file %s for writing", filename);
++        goto done;
++    }
+ 
+-        free(override);
+-        if (rc < 0) {
+-            crm_perror(LOG_WARNING, "Cannot write to systemd override file %s",
+-                       override_file);
+-        }
+-        fflush(file_strm);
+-        fclose(file_strm);
+-        systemd_daemon_reload(timeout);
++    override = crm_strdup_printf(SYSTEMD_OVERRIDE_TEMPLATE, agent);
++    rc = fprintf(file_strm, "%s\n", override);
++    if (rc < 0) {
++        rc = errno;
++        crm_err("Cannot write to systemd override file %s: %d",
++                filename, pcmk_rc_str(rc));
++        goto done;
+     }
+ 
+-    free(override_file);
++    rc = pcmk_rc_ok;
++    fflush(file_strm);
++
++    // @TODO Make sure the reload succeeds
++    systemd_daemon_reload(timeout);
++
++done:
++    fclose(file_strm);
++    free(filename);
++    free(override);
++    return rc;
+ }
+ 
+ static void
+ systemd_remove_override(const char *agent, int timeout)
+ {
+-    char *override_file = get_override_filename(agent);
+-    int rc = unlink(override_file);
++    char *filename = get_override_filename(agent);
++
++    if (unlink(filename) < 0) {
++        int rc = errno;
++
++        if (rc != ENOENT) {
++            // Stop may be called when already stopped, which is fine
++            crm_warn("Cannot remove systemd override file %s: %s",
++                     filename, pcmk_rc_str(rc));
++        }
+ 
+-    if (rc < 0) {
+-        // Stop may be called when already stopped, which is fine
+-        crm_perror(LOG_DEBUG, "Cannot remove systemd override file %s",
+-                   override_file);
+     } else {
+         systemd_daemon_reload(timeout);
+     }
+-    free(override_file);
++    free(filename);
+ }
+ 
+ /*!
+@@ -971,8 +1015,20 @@ invoke_unit_by_path(svc_action_t *op, const char *unit)
+         return;
+ 
+     } else if (pcmk__str_eq(op->action, PCMK_ACTION_START, pcmk__str_none)) {
++        int rc = pcmk_rc_ok;
++
+         method = "StartUnit";
+-        systemd_create_override(op->agent, op->timeout);
++        rc = systemd_create_override(op->agent, op->timeout);
++        if (rc != pcmk_rc_ok) {
++            services__format_result(op, pcmk_rc2ocf(rc), PCMK_EXEC_ERROR,
++                                    "Failed to create systemd override file "
++                                    "for %s",
++                                    pcmk__s(op->agent, "(unspecified)"));
++            if (!(op->synchronous)) {
++                services__finalize_async_op(op);
++            }
++            return;
++        }
+ 
+     } else if (pcmk__str_eq(op->action, PCMK_ACTION_STOP, pcmk__str_none)) {
+         method = "StopUnit";
+
+From dbd823befed469c9a1683a331dac0f55f10c7f8d Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Sun, 2 Mar 2025 00:20:53 -0800
+Subject: [PATCH 03/14] Refactor: libcrmservice: Defunctionize
+ create_world_readable()
+
+I think this is clearer. The glibc doc also recommends fchmod() over
+umask():
+https://www.gnu.org/software/libc/manual/html_node/Setting-Permissions.html
+
+It shouldn't matter in our case. umask() isn't thread-safe, but
+Pacemaker is single-threaded. Still, setting the permissions explicitly
+seems clearer.
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ lib/services/systemd.c | 63 ++++++++++++++++++++++--------------------
+ 1 file changed, 33 insertions(+), 30 deletions(-)
+
+diff --git a/lib/services/systemd.c b/lib/services/systemd.c
+index 8cd6665cb69..7d6e69b7f8f 100644
+--- a/lib/services/systemd.c
++++ b/lib/services/systemd.c
+@@ -14,6 +14,7 @@
+ #include <crm/services_internal.h>
+ #include <crm/common/mainloop.h>
+ 
++#include <stdio.h>                  // fopen(), NULL, etc.
+ #include <sys/stat.h>
+ #include <gio/gio.h>
+ #include <services_private.h>
+@@ -809,17 +810,6 @@ unit_method_complete(DBusPendingCall *pending, void *user_data)
+     "[Service]\n"                                           \
+     "Restart=no\n"
+ 
+-// Temporarily use rwxr-xr-x umask when opening a file for writing
+-static FILE *
+-create_world_readable(const char *filename)
+-{
+-    mode_t orig_umask = umask(S_IWGRP | S_IWOTH);
+-    FILE *fp = fopen(filename, "w");
+-
+-    umask(orig_umask);
+-    return fp;
+-}
+-
+ /*!
+  * \internal
+  * \brief Create a runtime drop-in directory for a systemd unit
+@@ -872,8 +862,9 @@ get_override_filename(const char *agent)
+ static int
+ systemd_create_override(const char *agent, int timeout)
+ {
+-    FILE *file_strm = NULL;
+-    char *filename = get_override_filename(agent);
++    char *filename = NULL;
++    FILE *fp = NULL;
++    int fd = 0;
+     char *override = NULL;
+     int rc = create_override_dir(agent);
+ 
+@@ -881,34 +872,46 @@ systemd_create_override(const char *agent, int timeout)
+         goto done;
+     }
+ 
++    filename = get_override_filename(agent);
++    fp = fopen(filename, "w");
++    if (fp == NULL) {
++        rc = errno;
++        crm_err("Cannot open systemd override file %s for writing: %s",
++                filename, pcmk_rc_str(rc));
++        goto done;
++    }
++
+     /* Ensure the override file is world-readable. This is not strictly
+      * necessary, but it avoids a systemd warning in the logs.
+      */
+-    file_strm = create_world_readable(filename);
+-    if (file_strm == NULL) {
+-        // @TODO Use errno
+-        rc = EIO;
+-        crm_err("Cannot open systemd override file %s for writing", filename);
++    fd = fileno(fp);
++    if ((fd < 0) || (fchmod(fd, S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH) < 0)) {
++        rc = errno;
++        crm_err("Failed to set permissions on systemd override file %s: %s",
++                filename, pcmk_rc_str(rc));
+         goto done;
+     }
+ 
+     override = crm_strdup_printf(SYSTEMD_OVERRIDE_TEMPLATE, agent);
+-    rc = fprintf(file_strm, "%s\n", override);
+-    if (rc < 0) {
+-        rc = errno;
+-        crm_err("Cannot write to systemd override file %s: %d",
+-                filename, pcmk_rc_str(rc));
+-        goto done;
++    if (fputs(override, fp) == EOF) {
++        rc = EIO;
++        crm_err("Cannot write to systemd override file %s", filename);
+     }
+ 
+-    rc = pcmk_rc_ok;
+-    fflush(file_strm);
++done:
++    if (fp != NULL) {
++        fclose(fp);
++    }
+ 
+-    // @TODO Make sure the reload succeeds
+-    systemd_daemon_reload(timeout);
++    if (rc == pcmk_rc_ok) {
++        // @TODO Make sure the reload succeeds
++        systemd_daemon_reload(timeout);
++
++    } else if (fp != NULL) {
++        // File was created, so remove it
++        unlink(filename);
++    }
+ 
+-done:
+-    fclose(file_strm);
+     free(filename);
+     free(override);
+     return rc;
+
+From 23f38b324654b560a5224eb1ae5a53e9e17d33e6 Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Sun, 2 Mar 2025 03:02:01 -0800
+Subject: [PATCH 04/14] Refactor: libcrmservice: Avoid gboolean/gchar in
+ systemd_unit_exists()
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ lib/services/systemd.c | 14 +++++++-------
+ lib/services/systemd.h |  6 ++++--
+ 2 files changed, 11 insertions(+), 9 deletions(-)
+
+diff --git a/lib/services/systemd.c b/lib/services/systemd.c
+index 7d6e69b7f8f..abc3abff387 100644
+--- a/lib/services/systemd.c
++++ b/lib/services/systemd.c
+@@ -629,18 +629,19 @@ systemd_unit_listall(void)
+     return units;
+ }
+ 
+-gboolean
++bool
+ systemd_unit_exists(const char *name)
+ {
+     char *path = NULL;
+     char *state = NULL;
++    int rc = false;
+ 
+     /* Note: Makes a blocking dbus calls
+      * Used by resources_find_service_class() when resource class=service
+      */
+     if ((invoke_unit_by_name(name, NULL, &path) != pcmk_rc_ok)
+         || (path == NULL)) {
+-        return FALSE;
++        goto done;
+     }
+ 
+     /* A successful LoadUnit is not sufficient to determine the unit's
+@@ -649,13 +650,12 @@ systemd_unit_exists(const char *name)
+      */
+     state = systemd_get_property(path, "LoadState", NULL, NULL, NULL,
+                                  DBUS_TIMEOUT_USE_DEFAULT);
++    rc = pcmk__str_any_of(state, "loaded", "masked", NULL);
++
++done:
+     free(path);
+-    if (pcmk__str_any_of(state, "loaded", "masked", NULL)) {
+-        free(state);
+-        return TRUE;
+-    }
+     free(state);
+-    return FALSE;
++    return rc;
+ }
+ 
+ // @TODO Use XML string constants and maybe a real XML object
+diff --git a/lib/services/systemd.h b/lib/services/systemd.h
+index 0d3dbe6d7fa..92a5fb2630f 100644
+--- a/lib/services/systemd.h
++++ b/lib/services/systemd.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2012-2021 the Pacemaker project contributors
++ * Copyright 2012-2025 the Pacemaker project contributors
+  *
+  * The version control history for this file may have further details.
+  *
+@@ -24,7 +24,9 @@ enum ocf_exitcode services__systemd2ocf(int exit_status);
+ G_GNUC_INTERNAL
+ int services__execute_systemd(svc_action_t *op);
+ 
+-G_GNUC_INTERNAL gboolean systemd_unit_exists(const gchar * name);
++G_GNUC_INTERNAL
++bool systemd_unit_exists(const char *name);
++
+ G_GNUC_INTERNAL void systemd_cleanup(void);
+ 
+ #endif  /* SYSTEMD__H */
+
+From 501bf0591493da568ad2327daa95f647388bd5c9 Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Sun, 2 Mar 2025 03:11:15 -0800
+Subject: [PATCH 05/14] Refactor: libcrmservice: Check for empty arg in
+ invoke_unit_by_name()
+
+And improve the corresponding check in one of its callers.
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ lib/services/systemd.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/lib/services/systemd.c b/lib/services/systemd.c
+index abc3abff387..6ebb458667c 100644
+--- a/lib/services/systemd.c
++++ b/lib/services/systemd.c
+@@ -435,6 +435,10 @@ invoke_unit_by_name(const char *arg_name, svc_action_t *op, char **path)
+     DBusPendingCall *pending = NULL;
+     char *name = NULL;
+ 
++    if (pcmk__str_empty(arg_name)) {
++        return EINVAL;
++    }
++
+     if (!systemd_init()) {
+         if (op != NULL) {
+             services__set_result(op, PCMK_OCF_UNKNOWN_ERROR, PCMK_EXEC_ERROR,
+@@ -1133,7 +1137,7 @@ services__execute_systemd(svc_action_t *op)
+ {
+     pcmk__assert(op != NULL);
+ 
+-    if ((op->action == NULL) || (op->agent == NULL)) {
++    if (pcmk__str_empty(op->action) || pcmk__str_empty(op->agent)) {
+         services__set_result(op, PCMK_OCF_NOT_CONFIGURED, PCMK_EXEC_ERROR_FATAL,
+                              "Bug in action caller");
+         goto done;
+
+From 13074ae9e325702f02df8038eb1c562b8aef1e6d Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Sun, 2 Mar 2025 03:12:49 -0800
+Subject: [PATCH 06/14] Refactor: libcrmcommon: Drop check for unused flag from
+ str_any_of()
+
+This is a static function and we never pass in pcmk__str_null_matches.
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ lib/common/strings.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/lib/common/strings.c b/lib/common/strings.c
+index 38d8f156adf..ce90406d424 100644
+--- a/lib/common/strings.c
++++ b/lib/common/strings.c
+@@ -1005,7 +1005,7 @@ static bool
+ str_any_of(const char *s, va_list args, uint32_t flags)
+ {
+     if (s == NULL) {
+-        return pcmk_is_set(flags, pcmk__str_null_matches);
++        return false;
+     }
+ 
+     while (1) {
+
+From 458df80960c6aec8a6f2b05b4316201569ca2e11 Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Sun, 2 Mar 2025 01:17:31 -0800
+Subject: [PATCH 07/14] Refactor: libcrmservice: Simplify systemd override path
+ getters
+
+Separate the path string creation logic from the directory creation
+logic. This reduces some duplication.
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ lib/services/systemd.c | 74 +++++++++++++++++++++---------------------
+ 1 file changed, 37 insertions(+), 37 deletions(-)
+
+diff --git a/lib/services/systemd.c b/lib/services/systemd.c
+index 6ebb458667c..b03ccad24e8 100644
+--- a/lib/services/systemd.c
++++ b/lib/services/systemd.c
+@@ -795,8 +795,6 @@ unit_method_complete(DBusPendingCall *pending, void *user_data)
+     }
+ }
+ 
+-#define SYSTEMD_OVERRIDE_ROOT "/run/systemd/system/"
+-
+ /* When the cluster manages a systemd resource, we create a unit file override
+  * to order the service "before" pacemaker. The "before" relationship won't
+  * actually be used, since systemd won't ever start the resource -- we're
+@@ -816,37 +814,31 @@ unit_method_complete(DBusPendingCall *pending, void *user_data)
+ 
+ /*!
+  * \internal
+- * \brief Create a runtime drop-in directory for a systemd unit
+- *
+- * This directory does not survive a reboot.
++ * \brief Get runtime drop-in directory path for a systemd unit
+  *
+  * \param[in] agent  Systemd resource agent
+  *
+- * \return Standard Pacemaker return code
+- *
+- * \note Any configuration in \c /etc takes precedence over our drop-in.
+- * \todo Document this in Pacemaker Explained or Administration?
++ * \return Drop-in directory path
+  */
+-static int
+-create_override_dir(const char *agent)
++static GString *
++get_override_dir(const char *agent)
+ {
+-    char *override_dir = crm_strdup_printf(SYSTEMD_OVERRIDE_ROOT
+-                                           "/%s.service.d", agent);
+-    int rc = pcmk__build_path(override_dir, 0755);
++    GString *buf = g_string_sized_new(128);
+ 
+-    if (rc != pcmk_rc_ok) {
+-        crm_err("Could not create systemd override directory %s: %s",
+-                override_dir, pcmk_rc_str(rc));
+-    }
+-    free(override_dir);
+-    return rc;
++    pcmk__g_strcat(buf, "/run/systemd/system/", agent, ".service.d", NULL);
++    return buf;
+ }
+ 
+-static char *
+-get_override_filename(const char *agent)
++/*!
++ * \internal
++ * \brief Append systemd override filename to a directory path
++ *
++ * \param[in,out] buf  Buffer containing directory path to append to
++ */
++static inline void
++append_override_basename(GString *buf)
+ {
+-    return crm_strdup_printf(SYSTEMD_OVERRIDE_ROOT
+-                             "/%s.service.d/50-pacemaker.conf", agent);
++    g_string_append(buf, "/50-pacemaker.conf");
+ }
+ 
+ /*!
+@@ -866,22 +858,26 @@ get_override_filename(const char *agent)
+ static int
+ systemd_create_override(const char *agent, int timeout)
+ {
+-    char *filename = NULL;
++    GString *filename = NULL;
+     FILE *fp = NULL;
+     int fd = 0;
+     char *override = NULL;
+-    int rc = create_override_dir(agent);
++    int rc = pcmk_rc_ok;
+ 
++    filename = get_override_dir(agent);
++    rc = pcmk__build_path(filename->str, 0755);
+     if (rc != pcmk_rc_ok) {
++        crm_err("Could not create systemd override directory %s: %s",
++                filename->str, pcmk_rc_str(rc));
+         goto done;
+     }
+ 
+-    filename = get_override_filename(agent);
+-    fp = fopen(filename, "w");
++    append_override_basename(filename);
++    fp = fopen(filename->str, "w");
+     if (fp == NULL) {
+         rc = errno;
+         crm_err("Cannot open systemd override file %s for writing: %s",
+-                filename, pcmk_rc_str(rc));
++                filename->str, pcmk_rc_str(rc));
+         goto done;
+     }
+ 
+@@ -892,14 +888,14 @@ systemd_create_override(const char *agent, int timeout)
+     if ((fd < 0) || (fchmod(fd, S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH) < 0)) {
+         rc = errno;
+         crm_err("Failed to set permissions on systemd override file %s: %s",
+-                filename, pcmk_rc_str(rc));
++                filename->str, pcmk_rc_str(rc));
+         goto done;
+     }
+ 
+     override = crm_strdup_printf(SYSTEMD_OVERRIDE_TEMPLATE, agent);
+     if (fputs(override, fp) == EOF) {
+         rc = EIO;
+-        crm_err("Cannot write to systemd override file %s", filename);
++        crm_err("Cannot write to systemd override file %s", filename->str);
+     }
+ 
+ done:
+@@ -913,10 +909,12 @@ systemd_create_override(const char *agent, int timeout)
+ 
+     } else if (fp != NULL) {
+         // File was created, so remove it
+-        unlink(filename);
++        unlink(filename->str);
+     }
+ 
+-    free(filename);
++    if (filename != NULL) {
++        g_string_free(filename, TRUE);
++    }
+     free(override);
+     return rc;
+ }
+@@ -924,21 +922,23 @@ systemd_create_override(const char *agent, int timeout)
+ static void
+ systemd_remove_override(const char *agent, int timeout)
+ {
+-    char *filename = get_override_filename(agent);
++    GString *filename = get_override_dir(agent);
+ 
+-    if (unlink(filename) < 0) {
++    append_override_basename(filename);
++    if (unlink(filename->str) < 0) {
+         int rc = errno;
+ 
+         if (rc != ENOENT) {
+             // Stop may be called when already stopped, which is fine
+             crm_warn("Cannot remove systemd override file %s: %s",
+-                     filename, pcmk_rc_str(rc));
++                     filename->str, pcmk_rc_str(rc));
+         }
+ 
+     } else {
+         systemd_daemon_reload(timeout);
+     }
+-    free(filename);
++
++    g_string_free(filename, TRUE);
+ }
+ 
+ /*!
+
+From 89e73715490269a503e2234368714d7c24a0bae1 Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Wed, 26 Feb 2025 16:59:57 -0800
+Subject: [PATCH 08/14] Low: libcrmservice: Fix overrides for systemd resources
+
+Previously, the override directory paths were valid only for systemd
+resources whose type attribute has no extension and thus defaults to
+".service". For example, 'class="systemd" type="httpd"' works, but
+'class="systemd" type="httpd.service"' results in an override directory
+/run/systemd/system/httpd.service.service.d. The same issue affected
+resources for non-service units. For example, for a resource managing
+unit "custom.timer", we would create an override directory
+/run/systemd/system/custom.timer.service.d. In these cases, the
+overrides would not be applied.
+
+This commit fixes that. We also ensure that the [Service] section is
+added only for service units.
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ lib/services/systemd.c | 52 ++++++++++++++++++++++++++++++------------
+ 1 file changed, 37 insertions(+), 15 deletions(-)
+
+diff --git a/lib/services/systemd.c b/lib/services/systemd.c
+index b03ccad24e8..0d509183f7c 100644
+--- a/lib/services/systemd.c
++++ b/lib/services/systemd.c
+@@ -804,10 +804,12 @@ unit_method_complete(DBusPendingCall *pending, void *user_data)
+  *
+  * @TODO Add start timeout
+  */
+-#define SYSTEMD_OVERRIDE_TEMPLATE                           \
++#define SYSTEMD_UNIT_OVERRIDE_TEMPLATE                      \
+     "[Unit]\n"                                              \
+     "Description=Cluster Controlled %s\n"                   \
+-    "Before=pacemaker.service pacemaker_remote.service\n"   \
++    "Before=pacemaker.service pacemaker_remote.service\n"
++
++#define SYSTEMD_SERVICE_OVERRIDE                            \
+     "\n"                                                    \
+     "[Service]\n"                                           \
+     "Restart=no\n"
+@@ -816,16 +818,16 @@ unit_method_complete(DBusPendingCall *pending, void *user_data)
+  * \internal
+  * \brief Get runtime drop-in directory path for a systemd unit
+  *
+- * \param[in] agent  Systemd resource agent
++ * \param[in] unit_name  Systemd unit (with extension)
+  *
+  * \return Drop-in directory path
+  */
+ static GString *
+-get_override_dir(const char *agent)
++get_override_dir(const char *unit_name)
+ {
+     GString *buf = g_string_sized_new(128);
+ 
+-    pcmk__g_strcat(buf, "/run/systemd/system/", agent, ".service.d", NULL);
++    pcmk__g_strcat(buf, "/run/systemd/system/", unit_name, ".d", NULL);
+     return buf;
+ }
+ 
+@@ -858,13 +860,18 @@ append_override_basename(GString *buf)
+ static int
+ systemd_create_override(const char *agent, int timeout)
+ {
++    char *unit_name = NULL;
+     GString *filename = NULL;
++    GString *override = NULL;
+     FILE *fp = NULL;
+     int fd = 0;
+-    char *override = NULL;
+     int rc = pcmk_rc_ok;
+ 
+-    filename = get_override_dir(agent);
++    unit_name = systemd_unit_name(agent, false);
++    CRM_CHECK(!pcmk__str_empty(unit_name),
++              rc = EINVAL; goto done);
++
++    filename = get_override_dir(unit_name);
+     rc = pcmk__build_path(filename->str, 0755);
+     if (rc != pcmk_rc_ok) {
+         crm_err("Could not create systemd override directory %s: %s",
+@@ -881,9 +888,7 @@ systemd_create_override(const char *agent, int timeout)
+         goto done;
+     }
+ 
+-    /* Ensure the override file is world-readable. This is not strictly
+-     * necessary, but it avoids a systemd warning in the logs.
+-     */
++    // Ensure the override file is world-readable (avoid systemd warning in log)
+     fd = fileno(fp);
+     if ((fd < 0) || (fchmod(fd, S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH) < 0)) {
+         rc = errno;
+@@ -892,8 +897,13 @@ systemd_create_override(const char *agent, int timeout)
+         goto done;
+     }
+ 
+-    override = crm_strdup_printf(SYSTEMD_OVERRIDE_TEMPLATE, agent);
+-    if (fputs(override, fp) == EOF) {
++    override = g_string_sized_new(2 * sizeof(SYSTEMD_UNIT_OVERRIDE_TEMPLATE));
++    g_string_printf(override, SYSTEMD_UNIT_OVERRIDE_TEMPLATE, unit_name);
++    if (pcmk__ends_with_ext(unit_name, ".service")) {
++        g_string_append(override, SYSTEMD_SERVICE_OVERRIDE);
++    }
++
++    if (fputs(override->str, fp) == EOF) {
+         rc = EIO;
+         crm_err("Cannot write to systemd override file %s", filename->str);
+     }
+@@ -912,19 +922,27 @@ systemd_create_override(const char *agent, int timeout)
+         unlink(filename->str);
+     }
+ 
++    free(unit_name);
+     if (filename != NULL) {
+         g_string_free(filename, TRUE);
+     }
+-    free(override);
++    if (override != NULL) {
++        g_string_free(override, TRUE);
++    }
+     return rc;
+ }
+ 
+ static void
+ systemd_remove_override(const char *agent, int timeout)
+ {
+-    GString *filename = get_override_dir(agent);
++    char *unit_name = systemd_unit_name(agent, false);
++    GString *filename = NULL;
+ 
++    CRM_CHECK(!pcmk__str_empty(unit_name), goto done);
++
++    filename = get_override_dir(unit_name);
+     append_override_basename(filename);
++
+     if (unlink(filename->str) < 0) {
+         int rc = errno;
+ 
+@@ -938,7 +956,11 @@ systemd_remove_override(const char *agent, int timeout)
+         systemd_daemon_reload(timeout);
+     }
+ 
+-    g_string_free(filename, TRUE);
++done:
++    free(unit_name);
++    if (filename != NULL) {
++        g_string_free(filename, TRUE);
++    }
+ }
+ 
+ /*!
+
+From 03410d37ee8defe1eb6cc6a0b3f1fb5935ff1b42 Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Wed, 5 Mar 2025 23:37:14 -0800
+Subject: [PATCH 09/14] Refactor: tools: NULL-check args in
+ cli_resource_print()
+
+Best practice and makes Coverity happy.
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ tools/crm_resource.h       |  4 ++--
+ tools/crm_resource_print.c | 14 ++++++++------
+ 2 files changed, 10 insertions(+), 8 deletions(-)
+
+diff --git a/tools/crm_resource.h b/tools/crm_resource.h
+index de85a5b3585..9c51f22b637 100644
+--- a/tools/crm_resource.h
++++ b/tools/crm_resource.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2004-2024 the Pacemaker project contributors
++ * Copyright 2004-2025 the Pacemaker project contributors
+  *
+  * The version control history for this file may have further details.
+  *
+@@ -77,7 +77,7 @@ int cli_resource_clear_all_expired(xmlNode *root, cib_t *cib_conn, int cib_optio
+ void cli_resource_print_cts(pcmk_resource_t *rsc, pcmk__output_t *out);
+ void cli_resource_print_cts_constraints(pcmk_scheduler_t *scheduler);
+ 
+-int cli_resource_print(pcmk_resource_t *rsc, pcmk_scheduler_t *scheduler,
++int cli_resource_print(const pcmk_resource_t *rsc, pcmk_scheduler_t *scheduler,
+                        bool expanded);
+ int cli_resource_print_operations(const char *rsc_id, const char *host_uname,
+                                   bool active, pcmk_scheduler_t *scheduler);
+diff --git a/tools/crm_resource_print.c b/tools/crm_resource_print.c
+index e8b20189df8..0694b891801 100644
+--- a/tools/crm_resource_print.c
++++ b/tools/crm_resource_print.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2004-2024 the Pacemaker project contributors
++ * Copyright 2004-2025 the Pacemaker project contributors
+  *
+  * The version control history for this file may have further details.
+  *
+@@ -118,18 +118,20 @@ cli_resource_print_operations(const char *rsc_id, const char *host_uname,
+ 
+ // \return Standard Pacemaker return code
+ int
+-cli_resource_print(pcmk_resource_t *rsc, pcmk_scheduler_t *scheduler,
++cli_resource_print(const pcmk_resource_t *rsc, pcmk_scheduler_t *scheduler,
+                    bool expanded)
+ {
+-    pcmk__output_t *out = scheduler->priv;
+-    uint32_t show_opts = pcmk_show_pending;
++    pcmk__output_t *out = NULL;
+     GList *all = NULL;
+ 
++    pcmk__assert((rsc != NULL) && (scheduler != NULL));
++
++    out = scheduler->priv;
+     all = g_list_prepend(all, (gpointer) "*");
+ 
+     out->begin_list(out, NULL, NULL, "Resource Config");
+-    out->message(out, pcmk__map_element_name(rsc->xml), show_opts, rsc, all,
+-                 all);
++    out->message(out, pcmk__map_element_name(rsc->xml), pcmk_show_pending,
++                 rsc, all, all);
+     out->message(out, "resource-config", rsc, !expanded);
+     out->end_list(out);
+ 
+
+From 3b2e759224a33bab7183054ec7bffc86a71d3764 Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Wed, 5 Mar 2025 23:39:59 -0800
+Subject: [PATCH 10/14] Refactor: tools: NULL-check scheduler arg of
+ cli_resource_move()
+
+Best practice and makes Coverity happy.
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ tools/crm_resource_runtime.c | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/tools/crm_resource_runtime.c b/tools/crm_resource_runtime.c
+index 1a76c650756..2c2cd149ed8 100644
+--- a/tools/crm_resource_runtime.c
++++ b/tools/crm_resource_runtime.c
+@@ -2285,13 +2285,18 @@ cli_resource_move(const pcmk_resource_t *rsc, const char *rsc_id,
+                   int cib_options, pcmk_scheduler_t *scheduler,
+                   gboolean promoted_role_only, gboolean force)
+ {
+-    pcmk__output_t *out = scheduler->priv;
++    pcmk__output_t *out = NULL;
+     int rc = pcmk_rc_ok;
+     unsigned int count = 0;
+     pcmk_node_t *current = NULL;
+-    pcmk_node_t *dest = pcmk_find_node(scheduler, host_name);
++    pcmk_node_t *dest = NULL;
+     bool cur_is_dest = false;
+ 
++
++    pcmk__assert(scheduler != NULL);
++
++    out = scheduler->priv;
++    dest = pcmk_find_node(scheduler, host_name);
+     if (dest == NULL) {
+         return pcmk_rc_node_unknown;
+     }
+
+From 43d0674f23918cb0d516f218b1463935963505a3 Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Wed, 5 Mar 2025 23:41:10 -0800
+Subject: [PATCH 11/14] Refactor: tools: NULL-check scheduler arg of
+ cli_cleanup_all()
+
+Best practice and makes Coverity happy.
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ tools/crm_resource_runtime.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/tools/crm_resource_runtime.c b/tools/crm_resource_runtime.c
+index 2c2cd149ed8..aac9a1a2cc4 100644
+--- a/tools/crm_resource_runtime.c
++++ b/tools/crm_resource_runtime.c
+@@ -979,11 +979,15 @@ cli_cleanup_all(pcmk_ipc_api_t *controld_api, const char *node_name,
+                 const char *operation, const char *interval_spec,
+                 pcmk_scheduler_t *scheduler)
+ {
+-    pcmk__output_t *out = scheduler->priv;
++    pcmk__output_t *out = NULL;
+     int rc = pcmk_rc_ok;
+     int attr_options = pcmk__node_attr_none;
+     const char *display_name = node_name? node_name : "all nodes";
+ 
++    pcmk__assert(scheduler != NULL);
++
++    out = scheduler->priv;
++
+     if (controld_api == NULL) {
+         out->info(out, "Dry run: skipping clean-up of %s due to CIB_file",
+                   display_name);
+
+From db372f971e58d47f298c20fd94e2deb304d02edd Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Wed, 5 Mar 2025 23:43:46 -0800
+Subject: [PATCH 12/14] Refactor: tools: NULL-check scheduler arg in
+ cli_resource_fail()
+
+Best practice and makes Coverity happy.
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ tools/crm_resource_runtime.c | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/tools/crm_resource_runtime.c b/tools/crm_resource_runtime.c
+index aac9a1a2cc4..7350f07aa56 100644
+--- a/tools/crm_resource_runtime.c
++++ b/tools/crm_resource_runtime.c
+@@ -639,7 +639,7 @@ send_lrm_rsc_op(pcmk_ipc_api_t *controld_api, bool do_fail_resource,
+                 const char *host_uname, const char *rsc_id,
+                 pcmk_scheduler_t *scheduler)
+ {
+-    pcmk__output_t *out = scheduler->priv;
++    pcmk__output_t *out = NULL;
+     const char *router_node = host_uname;
+     const char *rsc_api_id = NULL;
+     const char *rsc_long_id = NULL;
+@@ -647,7 +647,12 @@ send_lrm_rsc_op(pcmk_ipc_api_t *controld_api, bool do_fail_resource,
+     const char *rsc_provider = NULL;
+     const char *rsc_type = NULL;
+     bool cib_only = false;
+-    pcmk_resource_t *rsc = pe_find_resource(scheduler->resources, rsc_id);
++    pcmk_resource_t *rsc = NULL;
++
++    pcmk__assert(scheduler != NULL);
++
++    rsc = pe_find_resource(scheduler->resources, rsc_id);
++    out = scheduler->priv;
+ 
+     if (rsc == NULL) {
+         out->err(out, "Resource %s not found", rsc_id);
+
+From bc4c4ae72e1f1d28bef5fc83242a474a2d206893 Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Wed, 5 Mar 2025 23:44:06 -0800
+Subject: [PATCH 13/14] Doc: tools: Suppress Coverity false positives in
+ crm_resource.c
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ tools/crm_resource.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/tools/crm_resource.c b/tools/crm_resource.c
+index 46305eb420b..f3116172b09 100644
+--- a/tools/crm_resource.c
++++ b/tools/crm_resource.c
+@@ -1807,6 +1807,7 @@ main(int argc, char **argv)
+         }
+ 
+         case cmd_list_instances:
++            // coverity[var_deref_op] False positive
+             rc = out->message(out, "resource-names-list", scheduler->resources);
+ 
+             if (rc != pcmk_rc_ok) {
+@@ -1887,6 +1888,7 @@ main(int argc, char **argv)
+ 
+         case cmd_cts:
+             rc = pcmk_rc_ok;
++            // coverity[var_deref_op] False positive
+             g_list_foreach(scheduler->resources, (GFunc) cli_resource_print_cts,
+                            out);
+             cli_resource_print_cts_constraints(scheduler);
+@@ -1992,6 +1994,7 @@ main(int argc, char **argv)
+         case cmd_get_param: {
+             unsigned int count = 0;
+             GHashTable *params = NULL;
++            // coverity[var_deref_op] False positive
+             pcmk_node_t *current = rsc->fns->active_node(rsc, &count, NULL);
+             bool free_params = true;
+             const char* value = NULL;
+
+From a80c1b2df67c3fbc9202ffd1adb8effd8da5ebf2 Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Thu, 6 Mar 2025 00:00:17 -0800
+Subject: [PATCH 14/14] Doc: libcrmservice: Suppress Coverity false positives
+
+Coverity seems not to understand what CRM_CHECK() is doing.
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ lib/services/systemd.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/lib/services/systemd.c b/lib/services/systemd.c
+index 0d509183f7c..e3545a5b123 100644
+--- a/lib/services/systemd.c
++++ b/lib/services/systemd.c
+@@ -923,6 +923,8 @@ systemd_create_override(const char *agent, int timeout)
+     }
+ 
+     free(unit_name);
++
++    // coverity[check_after_deref] False positive
+     if (filename != NULL) {
+         g_string_free(filename, TRUE);
+     }
+@@ -958,6 +960,8 @@ systemd_remove_override(const char *agent, int timeout)
+ 
+ done:
+     free(unit_name);
++
++    // coverity[check_after_deref] False positive
+     if (filename != NULL) {
+         g_string_free(filename, TRUE);
+     }

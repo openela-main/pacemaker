@@ -230,7 +230,7 @@
 Name:          pacemaker
 Summary:       Scalable High-Availability cluster resource manager
 Version:       %{pcmkversion}
-Release:       %{pcmk_release}%{?dist}
+Release:       %{pcmk_release}.2%{?dist}
 License:       GPL-2.0-or-later AND LGPL-2.1-or-later
 Url:           https://www.clusterlabs.org/
 
@@ -247,7 +247,10 @@ Source1:       https://codeload.github.com/%{github_owner}/%{nagios_name}/tar.gz
 Source2:       pacemaker.sysusers
 
 # upstream commits
-#Patch001:      001-xxxx.patch
+Patch001:      001-systemd-overrides.patch
+Patch002:      002-systemd-dbus-prep.patch
+Patch003:      003-systemd-dbus.patch
+Patch004:      004-remote-fencing.patch
 
 Requires:      resource-agents
 Requires:      %{pkgname_pcmk_libs}%{?_isa} = %{version}-%{release}
@@ -914,6 +917,17 @@ exit 0
 %license %{nagios_name}-%{nagios_hash}/COPYING
 
 %changelog
+* Wed May 21 2025 Chris Lumens <clumens@redhat.com> - 2.1.9-1.2
+- Rebuild in proper build root
+- Related: RHEL-92505
+- Related: RHEL-92513
+
+* Tue May 20 2025 Chris Lumens <clumens@redhat.com> - 2.1.9-1.1
+- Use dbus signalling for systemd resource start/stop
+- Add an option to disable default remote node fencing behavior
+- Resolves: RHEL-92505
+- Resolves: RHEL-92513
+
 * Fri Nov 1 2024 Chris Lumens <clumens@redhat.com> - 2.1.9-1
 - Rebase on upstream 2.1.9 final release
 - Use async communication to establish TLS connections
