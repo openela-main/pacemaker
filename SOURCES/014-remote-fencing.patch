@@ -1,0 +1,387 @@
+From 96bb1076281bfe46caab135f24ea24fc02ead388 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Thu, 10 Jul 2025 11:15:20 -0400
+Subject: [PATCH 1/5] Refactor: scheduler: Fix formatting in pe_can_fence.
+
+---
+ lib/pengine/utils.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/lib/pengine/utils.c b/lib/pengine/utils.c
+index 4055d6d..19cc5a2 100644
+--- a/lib/pengine/utils.c
++++ b/lib/pengine/utils.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2004-2023 the Pacemaker project contributors
++ * Copyright 2004-2025 the Pacemaker project contributors
+  *
+  * The version control history for this file may have further details.
+  *
+@@ -63,10 +63,10 @@ pe_can_fence(const pcmk_scheduler_t *scheduler, const pcmk_node_t *node)
+     } else if (scheduler->no_quorum_policy == pcmk_no_quorum_ignore) {
+         return true;
+ 
+-    } else if(node == NULL) {
++    } else if (node == NULL) {
+         return false;
+ 
+-    } else if(node->details->online) {
++    } else if (node->details->online) {
+         crm_notice("We can fence %s without quorum because they're in our membership",
+                    pe__node_name(node));
+         return true;
+-- 
+2.43.0
+
+From a69d33bb78458e5bb19d07dacc91754856418649 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Fri, 28 Mar 2025 15:08:56 -0400
+Subject: [PATCH 2/5] Med: scheduler: Don't always fence online remote nodes.
+
+Let's assume you have a cluster configured as follows:
+
+* Three nodes, plus one Pacemaker Remote node.
+* At least two NICs on each node.
+* Multiple layers of fencing, including fence_kdump.
+* The timeout for fence_kdump is set higher on the real nodes than it is
+  on the remote node.
+* A resource is configured that can only be run on the remote node.
+
+Now, let's assume that the node running the connection resource for the
+remote node is disconnect from the rest of the cluster.  In testing,
+this disconnection was done by bringing one network interface down.
+
+Due to the fence timeouts, the following things will occur:
+
+* The node whose interface was brought down will split off into its own
+  cluster partition without quorum, while the other two nodes maintain
+  quorum.
+* The partition with quorum will restart the remote node resource on
+  another real node in the partition.
+* The node by itself will be fenced.  However, due to the long
+  fence_kdump timeout, it will continue to make decisions regarding
+  resources.
+* The node by itself will re-assign resources, including the remote
+  connection resource.  This resource will be assigned back to the same
+  node again.
+* The node by itself will decide to fence the remote node, which will
+  hit the "in our membership" clause of pe_can_fence.  This is because
+  remote nodes are marked as online when they are assigned, not when
+  they are actually running.
+* When the fence_kdump timeout expires, the node by itself will fence
+  the remote node.  This succeeds because there is still a secondary
+  network connection it can use.  This fencing will succeed, causing the
+  remote node to reboot and then causing a loss of service.
+* The node by itself will then be fenced.
+
+The bug to me seems to be that the remote resource is marked as online
+when it isn't yet.  I think with that changed, all the other remote
+fencing related code would then work as intended.  However, it probably
+has to remain as-is in order to schedule resources on the remote node -
+resources probably can't be assigned to an offline node.  Making changes
+in pe_can_fence seems like the least invasive way to deal with this
+problem.
+
+I also think this probably has probably been here for a very long time -
+perhaps always - but we just haven't seen it due to the number of things
+that have to be configured before it can show up.  In particular, the
+fencing timeouts and secondary network connection are what allow this
+behavior to happen.
+
+I can't think of a good reason why a node without quorum would ever want
+to fence a remote node, especially if the connection resource has been
+moved to the quorate node.
+
+My fix here therefore is just to test whether there is another node it
+could have been moved to and if so, don't fence it.
+
+Fixes T978
+Fixes RHEL-84018
+---
+ lib/pengine/utils.c | 33 +++++++++++++++++++++++++++++++++
+ 1 file changed, 33 insertions(+)
+
+diff --git a/lib/pengine/utils.c b/lib/pengine/utils.c
+index 19cc5a2..402cecd 100644
+--- a/lib/pengine/utils.c
++++ b/lib/pengine/utils.c
+@@ -67,6 +67,39 @@ pe_can_fence(const pcmk_scheduler_t *scheduler, const pcmk_node_t *node)
+         return false;
+ 
+     } else if (node->details->online) {
++        /* Remote nodes are marked online when we assign their resource to a
++         * node, not when they are actually started (see remote_connection_assigned)
++         * so the above test by itself isn't good enough.
++         */
++        if (pe__is_remote_node(node)) {
++            /* If we're on a system without quorum, it's entirely possible that
++             * the remote resource was automatically moved to a node on the
++             * partition with quorum.  We can't tell that from this node - the
++             * best we can do is check if it's possible for the resource to run
++             * on another node in the partition with quorum.  If so, it has
++             * likely been moved and we shouldn't fence it.
++             *
++             * NOTE:  This condition appears to only come up in very limited
++             * circumstances.  It at least requires some very lengthy fencing
++             * timeouts set, some way for fencing to still take place (a second
++             * NIC is how I've reproduced it in testing, but fence_scsi or
++             * sbd could work too), and a resource that runs on the remote node.
++             */
++            pcmk_resource_t *rsc = node->details->remote_rsc;
++            pcmk_node_t *n = NULL;
++            GHashTableIter iter;
++
++            g_hash_table_iter_init(&iter, rsc->allowed_nodes);
++            while (g_hash_table_iter_next(&iter, NULL, (void **) &n)) {
++                /* A node that's not online according to this non-quorum node
++                 * is a node that's in another partition.
++                 */
++                if (!n->details->online) {
++                    return false;
++                }
++            }
++        }
++
+         crm_notice("We can fence %s without quorum because they're in our membership",
+                    pe__node_name(node));
+         return true;
+-- 
+2.43.0
+
+From 7d503928c48b67da0bd06bccaa080f0309f7be90 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Thu, 10 Jul 2025 11:25:05 -0400
+Subject: [PATCH 3/5] Med: scheduler: Require a cluster option for new remote
+ fencing behavior.
+
+We don't have a ton of confidence that the previous patch is the right
+thing to do for everyone, so we are going to hide it behind this
+undocumented cluster config option.  By default, if the option is
+missing (or is set to "true"), the existing remote fencing behavior will
+be what happens.  That is, a node without quorum will be allowed to
+fence remote nodes in the same partition even if they've been restarted
+elsewhere.
+
+However, with fence-remote-without-quorum="false", we will check to see
+if the remote node could possibly have been started on another node and
+if so, it will not be fenced.
+---
+ cts/cli/regression.daemons.exp        |  5 +++++
+ include/crm/common/options_internal.h |  5 ++++-
+ include/crm/common/scheduler.h        |  7 ++++++-
+ lib/common/options.c                  | 13 ++++++++++++-
+ lib/pengine/unpack.c                  | 12 +++++++++++-
+ lib/pengine/utils.c                   |  6 +++++-
+ 6 files changed, 43 insertions(+), 5 deletions(-)
+
+diff --git a/cts/cli/regression.daemons.exp b/cts/cli/regression.daemons.exp
+index 543d62f..678cb62 100644
+--- a/cts/cli/regression.daemons.exp
++++ b/cts/cli/regression.daemons.exp
+@@ -292,6 +292,11 @@
+       <shortdesc lang="en">Whether the cluster should check for active resources during start-up</shortdesc>
+       <content type="boolean" default=""/>
+     </parameter>
++    <parameter name="fence-remote-without-quorum">
++      <longdesc lang="en">By default, inquorate nodes can fence Pacemaker Remote nodes that are part of its partition regardless of whether the resource was successfully restarted elsewhere.  If false, an additional check will be added to only fence remote nodes if the cluster thinks they were unable to be restarted.</longdesc>
++      <shortdesc lang="en">*** Advanced Use Only *** Whether remote nodes can be fenced without quorum</shortdesc>
++      <content type="boolean" default=""/>
++    </parameter>
+     <parameter name="stonith-enabled">
+       <longdesc lang="en">If false, unresponsive nodes are immediately assumed to be harmless, and resources that were active on them may be recovered elsewhere. This can result in a &quot;split-brain&quot; situation, potentially leading to data loss and/or service unavailability.</longdesc>
+       <shortdesc lang="en">*** Advanced Use Only *** Whether nodes may be fenced as part of recovery</shortdesc>
+diff --git a/include/crm/common/options_internal.h b/include/crm/common/options_internal.h
+index b727a58..95edc53 100644
+--- a/include/crm/common/options_internal.h
++++ b/include/crm/common/options_internal.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2006-2023 the Pacemaker project contributors
++ * Copyright 2006-2025 the Pacemaker project contributors
+  *
+  * The version control history for this file may have further details.
+  *
+@@ -167,5 +167,8 @@ bool pcmk__valid_sbd_timeout(const char *value);
+ #define PCMK__VALUE_RED                     "red"
+ #define PCMK__VALUE_UNFENCING               "unfencing"
+ #define PCMK__VALUE_YELLOW                  "yellow"
++ 
++// Cluster options
++#define PCMK__OPT_FENCE_REMOTE_WITHOUT_QUORUM    "fence-remote-without-quorum"
+ 
+ #endif // PCMK__OPTIONS_INTERNAL__H
+diff --git a/include/crm/common/scheduler.h b/include/crm/common/scheduler.h
+index 96f9a62..259fa5b 100644
+--- a/include/crm/common/scheduler.h
++++ b/include/crm/common/scheduler.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2004-2023 the Pacemaker project contributors
++ * Copyright 2004-2025 the Pacemaker project contributors
+  *
+  * The version control history for this file may have further details.
+  *
+@@ -184,6 +184,11 @@ struct pe_working_set_s {
+ 
+     int stonith_timeout;            //!< Value of stonith-timeout property
+     enum pe_quorum_policy no_quorum_policy; //!< Response to loss of quorum
++
++    // Can Pacemaker Remote nodes be fenced even from a node that doesn't
++    // have quorum?
++    bool fence_remote_without_quorum;
++
+     GHashTable *config_hash;        //!< Cluster properties
+ 
+     //!< Ticket constraints unpacked from ticket state
+diff --git a/lib/common/options.c b/lib/common/options.c
+index 13d58e3..96f059c 100644
+--- a/lib/common/options.c
++++ b/lib/common/options.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2004-2022 the Pacemaker project contributors
++ * Copyright 2004-2025 the Pacemaker project contributors
+  *
+  * The version control history for this file may have further details.
+  *
+@@ -232,6 +232,17 @@ static pcmk__cluster_option_t cluster_options[] = {
+     },
+ 
+     // Fencing-related options
++    {   PCMK__OPT_FENCE_REMOTE_WITHOUT_QUORUM, NULL, "boolean", NULL,
++        XML_BOOLEAN_TRUE, pcmk__valid_boolean,
++        pcmk__opt_context_schedulerd,
++        N_("*** Advanced Use Only *** "
++           "Whether remote nodes can be fenced without quorum"),
++        N_("By default, inquorate nodes can fence Pacemaker Remote nodes that "
++           "are part of its partition regardless of whether the resource "
++           "was successfully restarted elsewhere.  If false, an additional "
++           "check will be added to only fence remote nodes if the cluster "
++           "thinks they were unable to be restarted.")
++     },
+     {
+         "stonith-enabled", NULL, "boolean", NULL,
+         XML_BOOLEAN_TRUE, pcmk__valid_boolean,
+diff --git a/lib/pengine/unpack.c b/lib/pengine/unpack.c
+index d484e93..e96b978 100644
+--- a/lib/pengine/unpack.c
++++ b/lib/pengine/unpack.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2004-2023 the Pacemaker project contributors
++ * Copyright 2004-2025 the Pacemaker project contributors
+  *
+  * The version control history for this file may have further details.
+  *
+@@ -435,6 +435,16 @@ unpack_config(xmlNode *config, pcmk_scheduler_t *scheduler)
+                                           * 1000));
+     }
+ 
++    value = pcmk__cluster_option(config_hash,
++                                 PCMK__OPT_FENCE_REMOTE_WITHOUT_QUORUM);
++    if ((value != NULL) && !crm_is_true(value)) {
++        crm_warn(PCMK__OPT_FENCE_REMOTE_WITHOUT_QUORUM " disabled - remote "
++                 "nodes may not be fenced in inquorate partition");
++        scheduler->fence_remote_without_quorum = false;
++    } else {
++        scheduler->fence_remote_without_quorum = true;
++    }
++
+     return TRUE;
+ }
+ 
+diff --git a/lib/pengine/utils.c b/lib/pengine/utils.c
+index 402cecd..f25717d 100644
+--- a/lib/pengine/utils.c
++++ b/lib/pengine/utils.c
+@@ -70,8 +70,12 @@ pe_can_fence(const pcmk_scheduler_t *scheduler, const pcmk_node_t *node)
+         /* Remote nodes are marked online when we assign their resource to a
+          * node, not when they are actually started (see remote_connection_assigned)
+          * so the above test by itself isn't good enough.
++         *
++         * This is experimental behavior, so the user has to opt into it by
++         * adding fence-remote-without-quorum="false" to their CIB.
+          */
+-        if (pe__is_remote_node(node)) {
++        if (pe__is_remote_node(node)
++            && !scheduler->fence_remote_without_quorum) {
+             /* If we're on a system without quorum, it's entirely possible that
+              * the remote resource was automatically moved to a node on the
+              * partition with quorum.  We can't tell that from this node - the
+-- 
+2.43.0
+
+From 9ad7c0157cb0ac271ddf9b401e072a7d00de05de Mon Sep 17 00:00:00 2001
+From: "Gao,Yan" <ygao@suse.com>
+Date: Thu, 10 Apr 2025 12:51:57 +0200
+Subject: [PATCH 4/5] Refactor: libcrmcommon: move the new struct member to the
+ end for backward compatibility
+
+Commit f342b77561 broke backward compatibility by inserting the new
+member `fence_remote_without_quorum` into the middle of the
+`pe_working_set_s` struct.
+---
+ include/crm/common/scheduler.h | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/include/crm/common/scheduler.h b/include/crm/common/scheduler.h
+index 259fa5b..4baee09 100644
+--- a/include/crm/common/scheduler.h
++++ b/include/crm/common/scheduler.h
+@@ -185,10 +185,6 @@ struct pe_working_set_s {
+     int stonith_timeout;            //!< Value of stonith-timeout property
+     enum pe_quorum_policy no_quorum_policy; //!< Response to loss of quorum
+ 
+-    // Can Pacemaker Remote nodes be fenced even from a node that doesn't
+-    // have quorum?
+-    bool fence_remote_without_quorum;
+-
+     GHashTable *config_hash;        //!< Cluster properties
+ 
+     //!< Ticket constraints unpacked from ticket state
+@@ -234,6 +230,10 @@ struct pe_working_set_s {
+     void *priv;                     //!< For Pacemaker use only
+ 
+     guint node_pending_timeout;     //!< Pending join times out after this (ms)
++
++    // Can Pacemaker Remote nodes be fenced even from a node that doesn't
++    // have quorum?
++    bool fence_remote_without_quorum;
+ };
+ 
+ #ifdef __cplusplus
+-- 
+2.43.0
+
+From 8159779e13da5ddd2a6ce77542e945abb4c2663d Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Tue, 29 Apr 2025 12:49:45 -0400
+Subject: [PATCH 5/5] Refactor: scheduler: Lower fencing log message to debug
+ level.
+
+Most other things in unpack_config are logged at debug or trace level.
+Having the fencing message at the warn level makes it come up quite
+often.
+---
+ lib/pengine/unpack.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/lib/pengine/unpack.c b/lib/pengine/unpack.c
+index e96b978..5d124a3 100644
+--- a/lib/pengine/unpack.c
++++ b/lib/pengine/unpack.c
+@@ -438,8 +438,8 @@ unpack_config(xmlNode *config, pcmk_scheduler_t *scheduler)
+     value = pcmk__cluster_option(config_hash,
+                                  PCMK__OPT_FENCE_REMOTE_WITHOUT_QUORUM);
+     if ((value != NULL) && !crm_is_true(value)) {
+-        crm_warn(PCMK__OPT_FENCE_REMOTE_WITHOUT_QUORUM " disabled - remote "
+-                 "nodes may not be fenced in inquorate partition");
++        crm_debug(PCMK__OPT_FENCE_REMOTE_WITHOUT_QUORUM " disabled - remote "
++                  "nodes may not be fenced in inquorate partition");
+         scheduler->fence_remote_without_quorum = false;
+     } else {
+         scheduler->fence_remote_without_quorum = true;
+-- 
+2.43.0
+
