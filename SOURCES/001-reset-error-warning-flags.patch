@@ -1,0 +1,26 @@
+From 78e6b46a2bbb80af24a804045313370a6404a251 Mon Sep 17 00:00:00 2001
+From: Hideo Yamauchi <renayama19661014@ybb.ne.jp>
+Date: Thu, 9 Jan 2025 08:32:48 +0900
+Subject: [PATCH] Mid: schedulerd: Resetting error and warning flags.
+
+---
+ lib/pengine/status.c | 3 +++
+ 1 file changed, 3 insertions(+), 0 deletions(-)
+
+diff --git a/lib/pengine/status.c b/lib/pengine/status.c
+index a97d6f7..87b5f6c 100644
+--- a/lib/pengine/status.c
++++ b/lib/pengine/status.c
+@@ -447,6 +447,9 @@ set_working_set_defaults(pcmk_scheduler_t *scheduler)
+                               |pcmk__sched_stop_removed_resources
+                               |pcmk__sched_cancel_removed_actions);
+ #endif
++
++    pcmk__config_has_error = false;
++    pcmk__config_has_warning = false;
+ }
+ 
+ pcmk_resource_t *
+-- 
+2.47.0
+
