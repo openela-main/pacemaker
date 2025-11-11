@@ -35,11 +35,11 @@
 ## Upstream pacemaker version, and its package version (specversion
 ## can be incremented to build packages reliably considered "newer"
 ## than previously built packages with the same pcmkversion)
-%global pcmkversion 2.1.8
-%global specversion 3
+%global pcmkversion 2.1.10
+%global specversion 1
 
 ## Upstream commit (full commit ID, abbreviated commit ID, or tag) to build
-%global commit 3980678f0372f2c7c294c01f61d63f0b2cafaad1
+%global commit 5693eaeeef06faa1622515963082b5a1731d9fc0
 
 ## Since git v2.11, the extent of abbreviation is autoscaled by default
 ## (used to be constant of 7), so we need to convey it for non-tags, too.
@@ -914,6 +914,24 @@ exit 0
 %license %{nagios_name}-%{nagios_hash}/COPYING
 
 %changelog
+* Mon Jun 23 2025 Chris Lumens <clumens@redhat.com> - 2.1.10-1
+- Rebase on upstream 2.1.10-rc1 release
+- Use dbus to detect completion of systemd resource start/stop actions
+- Add an option for controlling remote node fencing behavior
+- Related: RHEL-89134
+- Resolves: RHEL-86143
+- Resolves: RHEL-84018
+
+* Fri Nov 1 2024 Chris Lumens <clumens@redhat.com> - 2.1.9-1
+- Rebase on upstream 2.1.9 final release
+- Use async communication to establish TLS connections
+- Fix regression in adding alerts to CIB
+- Fix a crash in command line tools when stderr is closed
+- Resolves: RHEL-61382
+- Resolves: RHEL-34276
+- Resolves: RHEL-55458
+- Resolves: RHEL-59043
+
 * Fri Aug 9 2024 Chris Lumens <clumens@redhat.com> - 2.1.8-3
 - Rebase on upstream 2.1.8 final release
 - Resolves: RHEL-38540
