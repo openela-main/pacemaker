@@ -1,0 +1,40 @@
+From 125b434943f57778816135ad147fc827fa706e99 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Mon, 4 Aug 2025 10:38:00 -0400
+Subject: [PATCH] Med: libpacemaker: Do not retry on ECONNREFUSED in tools.
+
+This is a regression introduced by e438946787.  In that patch, what
+we're trying to do is retry IPC connections between daemons.  If a
+daemon gets ECONNREFUSED when it initiates an IPC connection, the most
+likely reason is that another daemon has been killed and is restarting
+but is not yet ready to accept connections.  Waiting and retrying
+repeatedly is an acceptable way to deal with this.
+
+However, if a command line tool gets ECONNREFUSED, it's more likely that
+the problem is the cluster isn't running at all.  In this case, waiting
+and retrying just introduces a delay for a situation that will never be
+resolved.  Reverting just the part in pcmk_cluster_queries.c should fix
+this problem without affecting any of the daemons - they don't call this
+code.
+
+Fixes RHEL-106594
+---
+ lib/pacemaker/pcmk_cluster_queries.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/lib/pacemaker/pcmk_cluster_queries.c b/lib/pacemaker/pcmk_cluster_queries.c
+index 8a08d99180..2f91a68738 100644
+--- a/lib/pacemaker/pcmk_cluster_queries.c
++++ b/lib/pacemaker/pcmk_cluster_queries.c
+@@ -360,7 +360,7 @@ ipc_connect(data_t *data, enum pcmk_ipc_server server, pcmk_ipc_callback_t cb,
+         pcmk_register_ipc_callback(api, cb, data);
+     }
+ 
+-    rc = pcmk__connect_ipc_retry_conrefused(api, dispatch_type, 5);
++    rc = pcmk__connect_ipc(api, dispatch_type, 5);
+     if (rc != pcmk_rc_ok) {
+         if (rc == EREMOTEIO) {
+             data->pcmkd_state = pcmk_pacemakerd_state_remote;
+-- 
+2.49.0
+

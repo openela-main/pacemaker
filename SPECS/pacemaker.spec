@@ -1,5 +1,5 @@
 #
-# Copyright 2008-2024 the Pacemaker project contributors
+# Copyright 2008-2025 the Pacemaker project contributors
 #
 # The version control history for this file may have further details.
 #
@@ -40,11 +40,11 @@
 ## Upstream pacemaker version, and its package version (specversion
 ## can be incremented to build packages reliably considered "newer"
 ## than previously built packages with the same pcmkversion)
-%global pcmkversion 3.0.0
-%global specversion 5
+%global pcmkversion 3.0.1
+%global specversion 3
 
 ## Upstream commit (full commit ID, abbreviated commit ID, or tag) to build
-%global commit d8340737c46ccb265bd82c5493b58e9c14ba67e5
+%global commit 9a5e54bae85847c4bb6ed7c7fb06103ebebbc64a
 
 ## Since git v2.11, the extent of abbreviation is autoscaled by default
 ## (used to be constant of 7), so we need to convey it for non-tags, too.
@@ -184,7 +184,7 @@
 Name:          pacemaker
 Summary:       Scalable High-Availability cluster resource manager
 Version:       %{pcmkversion}
-Release:       %{pcmk_release}.1%{?dist}
+Release:       %{pcmk_release}%{?dist}
 License:       GPL-2.0-or-later AND LGPL-2.1-or-later
 Url:           https://www.clusterlabs.org/
 
@@ -199,8 +199,8 @@ Url:           https://www.clusterlabs.org/
 Source0:       https://codeload.github.com/%{github_owner}/%{name}/tar.gz/%{archive_github_url}
 Source1:       pacemaker.sysusers
 # upstream commits
-Patch001:      001-reset-error-warning-flags.patch
-Patch002:      002-remote-fencing.patch
+Patch001:      001-econnrefused.patch
+Patch002:      002-corosync.patch
 
 Requires:      resource-agents
 Requires:      %{pkgname_pcmk_libs}%{?_isa} = %{version}-%{release}
@@ -212,10 +212,10 @@ Requires:      %{python_name}-%{name} = %{version}-%{release}
 %{?systemd_requires}
 
 %if %{defined centos}
-ExclusiveArch: aarch64 i686 ppc64le s390x x86_64 %{arm}
+ExclusiveArch: aarch64 i686 ppc64le s390x x86_64 %{arm} riscv64
 %else
 %if 0%{?rhel}
-ExclusiveArch: aarch64 i686 ppc64le s390x x86_64
+ExclusiveArch: aarch64 i686 ppc64le s390x x86_64 riscv64
 %endif
 %endif
 
@@ -274,7 +274,6 @@ BuildRequires: %{pkgname_glue_libs}-devel
 %endif
 
 %if %{with doc}
-BuildRequires: asciidoc
 BuildRequires: %{python_name}-sphinx
 %endif
 
@@ -500,7 +499,7 @@ popd
 %check
 make %{_smp_mflags} check
 { cts/cts-scheduler --run load-stopped-loop \
-  && cts/cts-cli \
+  && cts/cts-cli -V \
   && touch .CHECKED
 } 2>&1 | sed 's/[fF]ail/faiil/g'  # prevent false positives in rpmlint
 [ -f .CHECKED ] && rm -f -- .CHECKED
@@ -793,9 +792,26 @@ exit 0
 %{_datadir}/pkgconfig/pacemaker-schemas.pc
 
 %changelog
-* Mon Jul 07 2025 Chris Lumens <clumens@redhat.com> - 3.0.0-5.1
+* Wed Aug 13 2025 Reid Wahl <nwahl@redhat.com> - 3.0.1-3
+- CTS launches Corosync using systemd if available.
+- Resolves: RHEL-110075
+
+* Mon Aug 11 2025 Chris Lumens <clumens@redhat.com> - 3.0.1-2
+- Do not retry on ECONNREFUSED in command line tools.
+- Resolves: RHEL-106594
+
+* Tue Jun 24 2025 Chris Lumens <clumens@redhat.com> - 3.0.1-1
+- Rebase on upstream 3.0.1-rc1
+- Use dbus to detect completion of systemd resource start/stop actions
 - Add an option for controlling remote node fencing behavior
-- Resolves: RHEL-101072
+- Split large IPC messages into multiple smaller ones
+- Related: RHEL-86085
+- Resolves: RHEL-71181
+- Resolves: RHEL-86146
+- Resolves: RHEL-86144
+
+* Wed Apr 02 2025 Kashyap Chamarthy <kchamart@redhat.com> - 3.0.0-6
+- Add riscv64 into ExclusiveArch  (thanks, Zhengyu He)
 
 * Fri Jan 10 2025 Chris Lumens <clumens@redhat.com> - 3.0.0-5
 - Rebase on upstream 3.0.0 final release
