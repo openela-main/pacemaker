@@ -244,7 +244,7 @@
 Name:          pacemaker
 Summary:       Scalable High-Availability cluster resource manager
 Version:       %{pcmkversion}
-Release:       %{pcmk_release}.3%{?dist}
+Release:       %{pcmk_release}.5%{?dist}
 %if %{defined _unitdir}
 License:       GPL-2.0-or-later AND LGPL-2.1-or-later
 %else
@@ -279,6 +279,8 @@ Patch011:      011-attrd-memory-leak.patch
 Patch012:      012-dont-set-as-xml-id.patch
 Patch013:      013-crm_node-i-initialize.patch
 Patch014:      014-remote-fencing.patch
+Patch015:      015-ipc-disconnect.patch
+Patch016:      016-fewer-messages.patch
 
 Requires:      resource-agents
 Requires:      %{pkgname_pcmk_libs}%{?_isa} = %{version}-%{release}
@@ -1030,6 +1032,14 @@ exit 0
 %license %{nagios_name}-%{nagios_hash}/COPYING
 
 %changelog
+* Mon Nov 17 2025 Chris Lumens <clumens@redhat.com> - 2.1.7-5.5
+- Don't overwhelm the FSA queue with repeated CIB queries
+- Related: RHEL-76276
+
+* Tue Sep 30 2025 Chris Lumens <clumens@redhat.com> - 2.1.7-5.4
+- Be more lenient in evicting IPC clients
+- Resolves: RHEL-76276
+
 * Thu Jul 10 2025 Chris Lumens <clumens@redhat.com> - 2.1.7-5.3
 - Add option for controlling remote node fencing behavior
 - Resolves: RHEL-93220
