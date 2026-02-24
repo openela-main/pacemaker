@@ -1,0 +1,1262 @@
+From 26c022d2a3b6061ff9a60f86e50834a08e8360d4 Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Thu, 13 Nov 2025 02:14:45 -0800
+Subject: [PATCH 01/10] Fix: pacemaker-attrd: Wipe CIB along with memory
+
+Previously, when the attribute manager purged a node, it would purge the
+node's transient attributes only from memory, and assumed the controller
+would purge them from the CIB. Now, the writer will purge them from the
+CIB as well.
+
+This fixes a variety of timing issues when multiple nodes including the
+attribute writer are shutting down. If the writer leaves before some
+other node, the DC wipes that other node's attributes from the CIB when
+that other node leaves the controller process group (or all other nodes
+do if the DC is the leaving node). If a new writer (possibly even the
+node itself) is elected before the node's attribute manager leaves the
+cluster layer, it will write the attributes back to the CIB. Once the
+other node leaves the cluster layer, all attribute managers remove its
+attributes from memory, but they are now "stuck" in the CIB.
+
+As of this commit, the controller still erases the attributes from the
+CIB when the node leaves the controller process group, which is
+redundant but doesn't cause any new problems. This will be corrected in
+an upcoming commit.
+
+Note: This will cause an insignificant regression if backported to
+Pacemaker 2. The Pacemaker 2 controller purges attributes from the CIB
+for leaving DCs only if they are at version 1.1.13 or later, because
+earlier DCs will otherwise get fenced after a clean shutdown. Since the
+attribute manager doesn't know the DC or its version, the attributes
+would now always be wiped, so old leaving DCs will get fenced. The
+fencing would occur only in the highly unlikely situation of a rolling
+upgrade from Pacemaker 2-supported versions 1.1.11 or 1.1.12, and the
+upgrade would still succeed without any negative impact on resources.
+
+Fixes T138
+
+Co-Authored-By: Ken Gaillot <kgaillot@redhat.com>
+Co-Authored-By: Chris Lumens <clumens@redhat.com>
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ daemons/attrd/attrd_corosync.c  | 93 +++++++++++++++++++++++++++++++++
+ daemons/attrd/attrd_elections.c |  2 +
+ daemons/attrd/pacemaker-attrd.c |  1 +
+ daemons/attrd/pacemaker-attrd.h |  3 ++
+ 4 files changed, 99 insertions(+)
+
+diff --git a/daemons/attrd/attrd_corosync.c b/daemons/attrd/attrd_corosync.c
+index 94fc85f..8497f34 100644
+--- a/daemons/attrd/attrd_corosync.c
++++ b/daemons/attrd/attrd_corosync.c
+@@ -23,6 +23,43 @@
+ 
+ #include "pacemaker-attrd.h"
+ 
++/*!
++ * \internal
++ * \brief Nodes removed by \c attrd_peer_remove()
++ *
++ * This table is to be used as a set. It contains nodes that have been removed
++ * by \c attrd_peer_remove() and whose transient attributes should be erased
++ * from the CIB.
++ *
++ * Setting an attribute value for a node via \c update_attr_on_host() removes
++ * the node from the table. At that point, we have transient attributes in
++ * memory for the node, so it should no longer be erased from the CIB.
++ *
++ * If another node erases a removed node's transient attributes from the CIB,
++ * the removed node remains in this table until an attribute value is set for
++ * it. This is for convenience: it avoids the need to monitor for CIB updates
++ * that erase a node's \c node_state or \c transient attributes element, just to
++ * remove the node from the table.
++ *
++ * Leaving a removed node in the table after erasure should be harmless. If a
++ * node is in this table, then we have no transient attributes for it in memory.
++ * If for some reason we erase its transient attributes from the CIB twice, its
++ * state in the CIB will still be correct.
++ */
++static GHashTable *removed_peers = NULL;
++
++/*!
++ * \internal
++ * \brief Free the removed nodes table
++ */
++void
++attrd_free_removed_peers(void)
++{
++    if (removed_peers != NULL) {
++        g_hash_table_destroy(removed_peers);
++    }
++}
++
+ static xmlNode *
+ attrd_confirmation(int callid)
+ {
+@@ -236,6 +273,10 @@ update_attr_on_host(attribute_t *a, const pcmk__node_status_t *peer,
+     const char *prev_xml_id = NULL;
+     const char *node_xml_id = crm_element_value(xml, PCMK__XA_ATTR_HOST_ID);
+ 
++    if (removed_peers != NULL) {
++        g_hash_table_remove(removed_peers, host);
++    }
++
+     // Create entry for value if not already existing
+     v = g_hash_table_lookup(a->values, host);
+     if (v == NULL) {
+@@ -530,6 +571,29 @@ attrd_peer_sync_response(const pcmk__node_status_t *peer, bool peer_won,
+     }
+ }
+ 
++/*!
++ * \internal
++ * \brief Erase all removed nodes' transient attributes from the CIB
++ *
++ * This should be called by a newly elected writer upon winning the election.
++ */
++void
++attrd_erase_removed_peer_attributes(void)
++{
++    const char *host = NULL;
++    GHashTableIter iter;
++
++    if (!attrd_election_won() || (removed_peers == NULL)) {
++        return;
++    }
++
++    g_hash_table_iter_init(&iter, removed_peers);
++    while (g_hash_table_iter_next(&iter, (gpointer *) &host, NULL)) {
++        attrd_cib_erase_transient_attrs(host);
++        g_hash_table_iter_remove(&iter);
++    }
++}
++
+ /*!
+  * \internal
+  * \brief Remove all attributes and optionally peer cache entries for a node
+@@ -556,6 +620,35 @@ attrd_peer_remove(const char *host, bool uncache, const char *source)
+         }
+     }
+ 
++    if (attrd_election_won()) {
++        // We are the writer. Wipe node's transient attributes from CIB now.
++        attrd_cib_erase_transient_attrs(host);
++
++    } else {
++        /* Make sure the attributes get erased from the CIB eventually.
++         * - If there's already a writer, it will call this function and enter
++         *   the "if" block above, requesting the erasure (unless it leaves
++         *   before sending the request -- see below).
++         *   attrd_start_election_if_needed() will do nothing here.
++         * - Otherwise, we ensure an election is happening (unless we're
++         *   shutting down). The winner will erase transient attributes from the
++         *   CIB for all removed nodes in attrd_election_cb().
++         *
++         * We add the node to the removed_peers table in case we win an election
++         * and need to request CIB erasures based on the table contents. This
++         * could happen for either of two reasons:
++         * - There is no current writer and we're not shutting down. An election
++         *   either is already in progress or will be triggered here.
++         * - The current writer leaves before sending the CIB update request. A
++         *   new election will be triggered.
++         */
++        if (removed_peers == NULL) {
++            removed_peers = pcmk__strikey_table(free, NULL);
++        }
++        g_hash_table_add(removed_peers, pcmk__str_copy(host));
++        attrd_start_election_if_needed();
++    }
++
+     if (uncache) {
+         pcmk__purge_node_from_cache(host, 0);
+         attrd_forget_node_xml_id(host);
+diff --git a/daemons/attrd/attrd_elections.c b/daemons/attrd/attrd_elections.c
+index 281ec12..e75a1d3 100644
+--- a/daemons/attrd/attrd_elections.c
++++ b/daemons/attrd/attrd_elections.c
+@@ -24,6 +24,8 @@ attrd_election_cb(pcmk_cluster_t *cluster)
+     /* Update the peers after an election */
+     attrd_peer_sync(NULL);
+ 
++    attrd_erase_removed_peer_attributes();
++
+     /* After winning an election, update the CIB with the values of all
+      * attributes as the winner knows them.
+      */
+diff --git a/daemons/attrd/pacemaker-attrd.c b/daemons/attrd/pacemaker-attrd.c
+index 7711fd2..3fa099b 100644
+--- a/daemons/attrd/pacemaker-attrd.c
++++ b/daemons/attrd/pacemaker-attrd.c
+@@ -201,6 +201,7 @@ main(int argc, char **argv)
+             attrd_cib_disconnect();
+         }
+ 
++        attrd_free_removed_peers();
+         attrd_free_waitlist();
+         pcmk_cluster_disconnect(attrd_cluster);
+         pcmk_cluster_free(attrd_cluster);
+diff --git a/daemons/attrd/pacemaker-attrd.h b/daemons/attrd/pacemaker-attrd.h
+index d9423c8..80ae0d9 100644
+--- a/daemons/attrd/pacemaker-attrd.h
++++ b/daemons/attrd/pacemaker-attrd.h
+@@ -184,6 +184,9 @@ extern GHashTable *peer_protocol_vers;
+ 
+ #define CIB_OP_TIMEOUT_S 120
+ 
++void attrd_free_removed_peers(void);
++void attrd_erase_removed_peer_attributes(void);
++
+ int attrd_cluster_connect(void);
+ void attrd_broadcast_value(const attribute_t *a, const attribute_value_t *v);
+ void attrd_peer_update(const pcmk__node_status_t *peer, xmlNode *xml,
+-- 
+2.47.1
+
+From 9db7cad74c9c051761c9d8a099a235cc2320f35d Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Thu, 14 Dec 2023 14:56:11 -0600
+Subject: [PATCH 02/10] Low: pacemaker-attrd: Drop "requesting shutdown" code
+
+The requesting_shutdown variable was checked only by
+attrd_shutting_down(), when the if_requested argument was set to true.
+In that case, it returned true if either the shutting_down variable was
+true or both the if_requested argument and the requesting_shutdown
+variable were true.
+
+The only caller that passed if_requested=true was
+attrd_cib_updated_cb(). It did this if:
+a. the alerts section was changed, or
+b. the status section or nodes section was changed by an untrusted
+  client.
+
+Details:
+a. Prior to f42e170, we didn't pass if_requested=true for an alerts
+   section change. We started doing so as of that commit mostly for
+   convenience. We decided that it seemed reasonable to ignore alert
+   changes when there was a shutdown pending.
+
+   This commit reverts to NOT ignoring alert changes due to pending
+   shutdown. That seems like it might be better. I'm not sure if it's
+   possible for us to land in attrd_send_attribute_alert() while a
+   shutdown is requested but has not begun. If so, it would be good to
+   send the correct alerts.
+
+b. The other call with true is to avoid writing out all attributes when
+   the status or nodes section changes. It's probably okay to drop the
+   true there too. It was added by a1a9c54, to resolve a race condition
+   where:
+   * node2 left.
+   * node1's controller deleted node2's transient attributes from the
+     CIB.
+   * node1 took over as DC and replaced the CIB.
+   * node2's attribute manager was not yet actually shutting down, and
+     it responded to the CIB replacement by writing out all of the
+     attributes that were in its memory, including its own "shutdown"
+     attribute.
+
+   Now (as of the previous commit), node1's attribute manager would
+   delete this "shutdown" attribute as part of its shutdown process. (Or
+   more accurately, I think the attribute writer node will do that.)
+
+   So if we understand correctly, the attrd_shutting_down(true)
+   workaround is no longer needed.
+
+With no more callers needing to pass true, the supporting code can go
+away.
+
+Co-Authored-By: Reid Wahl <nrwahl@protonmail.com>
+---
+ daemons/attrd/attrd_cib.c       |  6 +++---
+ daemons/attrd/attrd_corosync.c  | 15 ++-----------
+ daemons/attrd/attrd_elections.c |  4 ++--
+ daemons/attrd/attrd_ipc.c       |  2 +-
+ daemons/attrd/attrd_utils.c     | 37 ++++-----------------------------
+ daemons/attrd/pacemaker-attrd.h |  4 +---
+ 6 files changed, 13 insertions(+), 55 deletions(-)
+
+diff --git a/daemons/attrd/attrd_cib.c b/daemons/attrd/attrd_cib.c
+index 4231e4a..acd4621 100644
+--- a/daemons/attrd/attrd_cib.c
++++ b/daemons/attrd/attrd_cib.c
+@@ -34,7 +34,7 @@ attrd_cib_destroy_cb(gpointer user_data)
+ 
+     cib->cmds->signoff(cib);
+ 
+-    if (attrd_shutting_down(false)) {
++    if (attrd_shutting_down()) {
+         crm_info("Disconnected from the CIB manager");
+ 
+     } else {
+@@ -57,7 +57,7 @@ attrd_cib_updated_cb(const char *event, xmlNode *msg)
+     }
+ 
+     if (pcmk__cib_element_in_patchset(patchset, PCMK_XE_ALERTS)) {
+-        if (attrd_shutting_down(true)) {
++        if (attrd_shutting_down()) {
+             crm_debug("Ignoring alerts change in CIB during shutdown");
+         } else {
+             mainloop_set_trigger(attrd_config_read);
+@@ -82,7 +82,7 @@ attrd_cib_updated_cb(const char *event, xmlNode *msg)
+     if (status_changed
+         || pcmk__cib_element_in_patchset(patchset, PCMK_XE_NODES)) {
+ 
+-        if (attrd_shutting_down(true)) {
++        if (attrd_shutting_down()) {
+             crm_debug("Ignoring node change in CIB during shutdown");
+             return;
+         }
+diff --git a/daemons/attrd/attrd_corosync.c b/daemons/attrd/attrd_corosync.c
+index 8497f34..02ddec6 100644
+--- a/daemons/attrd/attrd_corosync.c
++++ b/daemons/attrd/attrd_corosync.c
+@@ -83,7 +83,7 @@ attrd_peer_message(pcmk__node_status_t *peer, xmlNode *xml)
+         return;
+     }
+ 
+-    if (attrd_shutting_down(false)) {
++    if (attrd_shutting_down()) {
+         /* If we're shutting down, we want to continue responding to election
+          * ops as long as we're a cluster member (because our vote may be
+          * needed). Ignore all other messages.
+@@ -166,7 +166,7 @@ attrd_cpg_dispatch(cpg_handle_t handle,
+ static void
+ attrd_cpg_destroy(gpointer unused)
+ {
+-    if (attrd_shutting_down(false)) {
++    if (attrd_shutting_down()) {
+         crm_info("Disconnected from Corosync process group");
+ 
+     } else {
+@@ -328,17 +328,6 @@ update_attr_on_host(attribute_t *a, const pcmk__node_status_t *peer,
+         pcmk__str_update(&v->current, value);
+         attrd_set_attr_flags(a, attrd_attr_changed);
+ 
+-        if (pcmk__str_eq(host, attrd_cluster->priv->node_name, pcmk__str_casei)
+-            && pcmk__str_eq(attr, PCMK__NODE_ATTR_SHUTDOWN, pcmk__str_none)) {
+-
+-            if (!pcmk__str_eq(value, "0", pcmk__str_null_matches)) {
+-                attrd_set_requesting_shutdown();
+-
+-            } else {
+-                attrd_clear_requesting_shutdown();
+-            }
+-        }
+-
+         // Write out new value or start dampening timer
+         if (a->timeout_ms && a->timer) {
+             crm_trace("Delaying write of %s %s for dampening",
+diff --git a/daemons/attrd/attrd_elections.c b/daemons/attrd/attrd_elections.c
+index e75a1d3..eb9ef8c 100644
+--- a/daemons/attrd/attrd_elections.c
++++ b/daemons/attrd/attrd_elections.c
+@@ -43,7 +43,7 @@ attrd_start_election_if_needed(void)
+ {
+     if ((peer_writer == NULL)
+         && (election_state(attrd_cluster) != election_in_progress)
+-        && !attrd_shutting_down(false)) {
++        && !attrd_shutting_down()) {
+ 
+         crm_info("Starting an election to determine the writer");
+         election_vote(attrd_cluster);
+@@ -65,7 +65,7 @@ attrd_handle_election_op(const pcmk__node_status_t *peer, xmlNode *xml)
+     crm_xml_add(xml, PCMK__XA_SRC, peer->name);
+ 
+     // Don't become writer if we're shutting down
+-    rc = election_count_vote(attrd_cluster, xml, !attrd_shutting_down(false));
++    rc = election_count_vote(attrd_cluster, xml, !attrd_shutting_down());
+ 
+     switch(rc) {
+         case election_start:
+diff --git a/daemons/attrd/attrd_ipc.c b/daemons/attrd/attrd_ipc.c
+index 43e0f41..8a3bb36 100644
+--- a/daemons/attrd/attrd_ipc.c
++++ b/daemons/attrd/attrd_ipc.c
+@@ -492,7 +492,7 @@ static int32_t
+ attrd_ipc_accept(qb_ipcs_connection_t *c, uid_t uid, gid_t gid)
+ {
+     crm_trace("New client connection %p", c);
+-    if (attrd_shutting_down(false)) {
++    if (attrd_shutting_down()) {
+         crm_info("Ignoring new connection from pid %d during shutdown",
+                  pcmk__client_pid(c));
+         return -ECONNREFUSED;
+diff --git a/daemons/attrd/attrd_utils.c b/daemons/attrd/attrd_utils.c
+index f219b88..e3e814d 100644
+--- a/daemons/attrd/attrd_utils.c
++++ b/daemons/attrd/attrd_utils.c
+@@ -25,7 +25,6 @@
+ 
+ cib_t *the_cib = NULL;
+ 
+-static bool requesting_shutdown = false;
+ static bool shutting_down = false;
+ static GMainLoop *mloop = NULL;
+ 
+@@ -34,45 +33,17 @@ static GMainLoop *mloop = NULL;
+  */
+ GHashTable *peer_protocol_vers = NULL;
+ 
+-/*!
+- * \internal
+- * \brief  Set requesting_shutdown state
+- */
+-void
+-attrd_set_requesting_shutdown(void)
+-{
+-    requesting_shutdown = true;
+-}
+-
+-/*!
+- * \internal
+- * \brief  Clear requesting_shutdown state
+- */
+-void
+-attrd_clear_requesting_shutdown(void)
+-{
+-    requesting_shutdown = false;
+-}
+-
+ /*!
+  * \internal
+  * \brief Check whether local attribute manager is shutting down
+  *
+- * \param[in] if_requested  If \c true, also consider presence of
+- *                          \c PCMK__NODE_ATTR_SHUTDOWN attribute
+- *
+- * \return \c true if local attribute manager has begun shutdown sequence
+- *         or (if \p if_requested is \c true) whether local node has a nonzero
+- *         \c PCMK__NODE_ATTR_SHUTDOWN attribute set, otherwise \c false
+- * \note Most callers should pass \c false for \p if_requested, because the
+- *       attribute manager needs to continue performing while the controller is
+- *       shutting down, and even needs to be eligible for election in case all
+- *       nodes are shutting down.
++ * \return \c true if local attribute manager has begun shutdown sequence,
++ *         otherwise \c false
+  */
+ bool
+-attrd_shutting_down(bool if_requested)
++attrd_shutting_down(void)
+ {
+-    return shutting_down || (if_requested && requesting_shutdown);
++    return shutting_down;
+ }
+ 
+ /*!
+diff --git a/daemons/attrd/pacemaker-attrd.h b/daemons/attrd/pacemaker-attrd.h
+index 80ae0d9..d3e5765 100644
+--- a/daemons/attrd/pacemaker-attrd.h
++++ b/daemons/attrd/pacemaker-attrd.h
+@@ -56,10 +56,8 @@
+ void attrd_init_mainloop(void);
+ void attrd_run_mainloop(void);
+ 
+-void attrd_set_requesting_shutdown(void);
+-void attrd_clear_requesting_shutdown(void);
+ void attrd_free_waitlist(void);
+-bool attrd_shutting_down(bool if_requested);
++bool attrd_shutting_down(void);
+ void attrd_shutdown(int nsig);
+ void attrd_init_ipc(void);
+ void attrd_ipc_fini(void);
+-- 
+2.47.1
+
+From 19a157cb90466aaa5d929573edeabded3ba047ef Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Mon, 18 Dec 2023 11:38:00 -0600
+Subject: [PATCH 03/10] Low: controller: don't need to erase node attributes
+ for remote nodes
+
+Now that the attribute manager will erase transient attributes from the
+CIB when purging a node, we don't need to do that separately in the
+controller.
+
+Co-Authored-By: Chris Lumens <clumens@redhat.com>
+---
+ daemons/controld/controld_remote_ra.c | 41 +++++++--------------------
+ 1 file changed, 11 insertions(+), 30 deletions(-)
+
+diff --git a/daemons/controld/controld_remote_ra.c b/daemons/controld/controld_remote_ra.c
+index 1cc4ae0..c9adf97 100644
+--- a/daemons/controld/controld_remote_ra.c
++++ b/daemons/controld/controld_remote_ra.c
+@@ -237,35 +237,19 @@ should_purge_attributes(pcmk__node_status_t *node)
+     return true;
+ }
+ 
+-static enum controld_section_e
+-section_to_delete(bool purge)
+-{
+-    if (pcmk_is_set(controld_globals.flags, controld_shutdown_lock_enabled)) {
+-        if (purge) {
+-            return controld_section_all_unlocked;
+-        } else {
+-            return controld_section_lrm_unlocked;
+-        }
+-    } else {
+-        if (purge) {
+-            return controld_section_all;
+-        } else {
+-            return controld_section_lrm;
+-        }
+-    }
+-}
+-
+ static void
+ purge_remote_node_attrs(int call_opt, pcmk__node_status_t *node)
+ {
+-    bool purge = should_purge_attributes(node);
+-    enum controld_section_e section = section_to_delete(purge);
++    enum controld_section_e section = controld_section_lrm;
+ 
+-    /* Purge node from attrd's memory */
+-    if (purge) {
++    // Purge node's transient attributes (from attribute manager and CIB)
++    if (should_purge_attributes(node)) {
+         update_attrd_remote_node_removed(node->name, NULL);
+     }
+ 
++    if (pcmk_is_set(controld_globals.flags, controld_shutdown_lock_enabled)) {
++        section = controld_section_lrm_unlocked;
++    }
+     controld_delete_node_state(node->name, section, call_opt);
+ }
+ 
+@@ -367,18 +351,15 @@ remote_node_down(const char *node_name, const enum down_opts opts)
+     int call_opt = crmd_cib_smart_opt();
+     pcmk__node_status_t *node = NULL;
+ 
+-    /* Purge node from attrd's memory */
++    // Purge node's transient attributes (from attribute manager and CIB)
+     update_attrd_remote_node_removed(node_name, NULL);
+ 
+-    /* Normally, only node attributes should be erased, and the resource history
+-     * should be kept until the node comes back up. However, after a successful
+-     * fence, we want to clear the history as well, so we don't think resources
+-     * are still running on the node.
++    /* Normally, the resource history should be kept until the node comes back
++     * up. However, after a successful fence, clear the history so we don't
++     * think resources are still running on the node.
+      */
+     if (opts == DOWN_ERASE_LRM) {
+-        controld_delete_node_state(node_name, controld_section_all, call_opt);
+-    } else {
+-        controld_delete_node_state(node_name, controld_section_attrs, call_opt);
++        controld_delete_node_state(node_name, controld_section_lrm, call_opt);
+     }
+ 
+     /* Ensure node is in the remote peer cache with lost state */
+-- 
+2.47.1
+
+From d49965412a5433a9a92463178d69074da9b3c349 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Thu, 14 Dec 2023 15:42:39 -0600
+Subject: [PATCH 04/10] Refactor: controller: Allow purging node attrs without
+ cache removal
+
+Nothing uses the new capability yet.
+---
+ daemons/controld/controld_attrd.c     | 22 +++++++++++++++-------
+ daemons/controld/controld_remote_ra.c |  4 ++--
+ daemons/controld/controld_utils.h     |  2 +-
+ 3 files changed, 18 insertions(+), 10 deletions(-)
+
+diff --git a/daemons/controld/controld_attrd.c b/daemons/controld/controld_attrd.c
+index eff8070..c8591ef 100644
+--- a/daemons/controld/controld_attrd.c
++++ b/daemons/controld/controld_attrd.c
+@@ -106,8 +106,15 @@ update_attrd_list(GList *attrs, uint32_t opts)
+     }
+ }
+ 
++/*!
++ * \internal
++ * \brief Ask attribute manager to purge a node and its transient attributes
++ *
++ * \param[in] node_name   Node to purge
++ * \param[in] from_cache  If true, purge from node caches as well
++ */
+ void
+-update_attrd_remote_node_removed(const char *host, const char *user_name)
++controld_purge_node_attrs(const char *node_name, bool from_cache)
+ {
+     int rc = pcmk_rc_ok;
+ 
+@@ -115,14 +122,15 @@ update_attrd_remote_node_removed(const char *host, const char *user_name)
+         rc = pcmk_new_ipc_api(&attrd_api, pcmk_ipc_attrd);
+     }
+     if (rc == pcmk_rc_ok) {
+-        crm_trace("Asking attribute manager to purge Pacemaker Remote node %s",
+-                  host);
+-        rc = pcmk__attrd_api_purge(attrd_api, host, true);
++        crm_debug("Asking %s to purge transient attributes%s for %s",
++                  pcmk_ipc_name(attrd_api, true),
++                  (from_cache? " and node cache" : ""), node_name);
++        rc = pcmk__attrd_api_purge(attrd_api, node_name, from_cache);
+     }
+     if (rc != pcmk_rc_ok) {
+-        crm_err("Could not purge Pacemaker Remote node %s "
+-                "in attribute manager%s: %s " QB_XS " rc=%d",
+-                host, when(), pcmk_rc_str(rc), rc);
++        crm_err("Could not purge node %s from %s%s: %s "
++                QB_XS " rc=%d", node_name, pcmk_ipc_name(attrd_api, true),
++                when(), pcmk_rc_str(rc), rc);
+     }
+ }
+ 
+diff --git a/daemons/controld/controld_remote_ra.c b/daemons/controld/controld_remote_ra.c
+index c9adf97..3136180 100644
+--- a/daemons/controld/controld_remote_ra.c
++++ b/daemons/controld/controld_remote_ra.c
+@@ -244,7 +244,7 @@ purge_remote_node_attrs(int call_opt, pcmk__node_status_t *node)
+ 
+     // Purge node's transient attributes (from attribute manager and CIB)
+     if (should_purge_attributes(node)) {
+-        update_attrd_remote_node_removed(node->name, NULL);
++        controld_purge_node_attrs(node->name, true);
+     }
+ 
+     if (pcmk_is_set(controld_globals.flags, controld_shutdown_lock_enabled)) {
+@@ -352,7 +352,7 @@ remote_node_down(const char *node_name, const enum down_opts opts)
+     pcmk__node_status_t *node = NULL;
+ 
+     // Purge node's transient attributes (from attribute manager and CIB)
+-    update_attrd_remote_node_removed(node_name, NULL);
++    controld_purge_node_attrs(node_name, true);
+ 
+     /* Normally, the resource history should be kept until the node comes back
+      * up. However, after a successful fence, clear the history so we don't
+diff --git a/daemons/controld/controld_utils.h b/daemons/controld/controld_utils.h
+index e633888..262e0d1 100644
+--- a/daemons/controld/controld_utils.h
++++ b/daemons/controld/controld_utils.h
+@@ -69,7 +69,7 @@ void crm_update_quorum(gboolean quorum, gboolean force_update);
+ void controld_close_attrd_ipc(void);
+ void update_attrd(const char *host, const char *name, const char *value, const char *user_name, gboolean is_remote_node);
+ void update_attrd_list(GList *attrs, uint32_t opts);
+-void update_attrd_remote_node_removed(const char *host, const char *user_name);
++void controld_purge_node_attrs(const char *node_name, bool from_cache);
+ void update_attrd_clear_failures(const char *host, const char *rsc,
+                                  const char *op, const char *interval_spec,
+                                  gboolean is_remote_node);
+-- 
+2.47.1
+
+From 5fb8fdc72f457c7e9a691c10a99d54d0e03bd77d Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Thu, 14 Dec 2023 16:09:40 -0600
+Subject: [PATCH 05/10] Fix: controller: Don't purge transient attributes on
+ node loss
+
+With recent changes, the attribute manager now handles it when the node
+leaves the cluster, so the controller purge is redundant.
+
+This does alter the timing somewhat, since the controller's purge
+occurred when the node left the controller process group, while the
+attribute manager's purge occurs when it leaves the cluster, but that
+shouldn't make a significant difference.
+
+This fixes a problem when a node's controller crashes and is respawned
+while fencing is disabled. Previously, another node's controller would
+remove that node's transient attributes from the CIB, but they would
+remain in the attribute managers' memory. Now, the attributes are
+correctly retained in the CIB in this situation.
+
+Fixes T137
+Fixes T139
+
+Co-Authored-By: Chris Lumens <clumens@redhat.com>
+---
+ daemons/controld/controld_callbacks.c | 14 +-------------
+ 1 file changed, 1 insertion(+), 13 deletions(-)
+
+diff --git a/daemons/controld/controld_callbacks.c b/daemons/controld/controld_callbacks.c
+index 48c255e..57e5183 100644
+--- a/daemons/controld/controld_callbacks.c
++++ b/daemons/controld/controld_callbacks.c
+@@ -233,19 +233,11 @@ peer_update_callback(enum pcmk__node_update type, pcmk__node_status_t *node,
+                                     pcmk__str_casei)
+                        && !pcmk__cluster_is_node_active(node)) {
+ 
+-                /* The DC has left, so delete its transient attributes and
+-                 * trigger a new election.
+-                 *
+-                 * A DC sends its shutdown request to all peers, who update the
+-                 * DC's expected state to down. This avoids fencing upon
+-                 * deletion of its transient attributes.
+-                 */
++                // The DC has left, so trigger a new election
+                 crm_notice("Our peer on the DC (%s) is dead",
+                            controld_globals.dc_name);
+ 
+                 register_fsa_input(C_CRMD_STATUS_CALLBACK, I_ELECTION, NULL);
+-                controld_delete_node_state(node->name, controld_section_attrs,
+-                                           cib_none);
+ 
+             } else if (AM_I_DC
+                        || pcmk_is_set(controld_globals.flags, controld_dc_left)
+@@ -256,10 +248,6 @@ peer_update_callback(enum pcmk__node_update type, pcmk__node_status_t *node,
+                  */
+                 if (appeared) {
+                     te_trigger_stonith_history_sync(FALSE);
+-                } else {
+-                    controld_delete_node_state(node->name,
+-                                               controld_section_attrs,
+-                                               cib_none);
+                 }
+             }
+             break;
+-- 
+2.47.1
+
+From c40026fb77a6f7ee804979293e3019943a34e06b Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Mon, 18 Dec 2023 13:05:35 -0600
+Subject: [PATCH 06/10] Low: controller: Ask attribute manager to purge fenced
+ nodes' attributes
+
+...instead of wiping from the CIB directly.
+
+Co-Authored-By: Chris Lumens <clumens@redhat.com>
+---
+ daemons/controld/controld_fencing.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/daemons/controld/controld_fencing.c b/daemons/controld/controld_fencing.c
+index 51367ca..de074aa 100644
+--- a/daemons/controld/controld_fencing.c
++++ b/daemons/controld/controld_fencing.c
+@@ -267,7 +267,13 @@ update_node_state_after_fencing(const char *target, const char *target_xml_id)
+     crm_debug("Updating node state for %s after fencing (call %d)", target, rc);
+     fsa_register_cib_callback(rc, pcmk__str_copy(target), cib_fencing_updated);
+ 
+-    controld_delete_node_state(peer->name, controld_section_all, cib_none);
++    // Delete node's resource history from CIB
++    controld_delete_node_state(peer->name, controld_section_lrm, cib_none);
++
++    // Ask attribute manager to delete node's transient attributes
++    // @TODO: This is the only call to controld_purge_node_attrs that doesn't
++    //        want to also purge the node from the caches.  Why?
++    controld_purge_node_attrs(peer->name, false);
+ }
+ 
+ /*!
+-- 
+2.47.1
+
+From d9d19827d93f2394a831a9651aae064ea5a04fa4 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Mon, 18 Dec 2023 13:14:53 -0600
+Subject: [PATCH 07/10] Refactor: controller: Drop no-longer-used section enum
+ values
+
+---
+ daemons/controld/controld_cib.c | 24 ------------------------
+ daemons/controld/controld_cib.h |  5 +----
+ 2 files changed, 1 insertion(+), 28 deletions(-)
+
+diff --git a/daemons/controld/controld_cib.c b/daemons/controld/controld_cib.c
+index e2a0d50..39c2b06 100644
+--- a/daemons/controld/controld_cib.c
++++ b/daemons/controld/controld_cib.c
+@@ -279,17 +279,6 @@ cib_delete_callback(xmlNode *msg, int call_id, int rc, xmlNode *output,
+                                 "[not(@" PCMK_OPT_SHUTDOWN_LOCK ") "        \
+                                     "or " PCMK_OPT_SHUTDOWN_LOCK "<%lld]"
+ 
+-// Node's PCMK__XE_TRANSIENT_ATTRIBUTES section (name 1x)
+-#define XPATH_NODE_ATTRS XPATH_NODE_STATE "/" PCMK__XE_TRANSIENT_ATTRIBUTES
+-
+-// Everything under PCMK__XE_NODE_STATE (name 1x)
+-#define XPATH_NODE_ALL          XPATH_NODE_STATE "/*"
+-
+-/* Unlocked history + transient attributes
+- * (name 2x, (seconds_since_epoch - PCMK_OPT_SHUTDOWN_LOCK_LIMIT) 1x, name 1x)
+- */
+-#define XPATH_NODE_ALL_UNLOCKED XPATH_NODE_LRM_UNLOCKED "|" XPATH_NODE_ATTRS
+-
+ /*!
+  * \internal
+  * \brief Get the XPath and description of a node state section to be deleted
+@@ -320,19 +309,6 @@ controld_node_state_deletion_strings(const char *uname,
+                                        uname, uname, expire);
+             desc_pre = "resource history (other than shutdown locks)";
+             break;
+-        case controld_section_attrs:
+-            *xpath = crm_strdup_printf(XPATH_NODE_ATTRS, uname);
+-            desc_pre = "transient attributes";
+-            break;
+-        case controld_section_all:
+-            *xpath = crm_strdup_printf(XPATH_NODE_ALL, uname);
+-            desc_pre = "all state";
+-            break;
+-        case controld_section_all_unlocked:
+-            *xpath = crm_strdup_printf(XPATH_NODE_ALL_UNLOCKED,
+-                                       uname, uname, expire, uname);
+-            desc_pre = "all state (other than shutdown locks)";
+-            break;
+         default:
+             // We called this function incorrectly
+             pcmk__assert(false);
+diff --git a/daemons/controld/controld_cib.h b/daemons/controld/controld_cib.h
+index b8622d5..25277e7 100644
+--- a/daemons/controld/controld_cib.h
++++ b/daemons/controld/controld_cib.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2004-2024 the Pacemaker project contributors
++ * Copyright 2004-2025 the Pacemaker project contributors
+  *
+  * The version control history for this file may have further details.
+  *
+@@ -50,9 +50,6 @@ unsigned int cib_op_timeout(void);
+ enum controld_section_e {
+     controld_section_lrm,
+     controld_section_lrm_unlocked,
+-    controld_section_attrs,
+-    controld_section_all,
+-    controld_section_all_unlocked
+ };
+ 
+ void controld_node_state_deletion_strings(const char *uname,
+-- 
+2.47.1
+
+From 1056a0e3f6b618c23eb5a73d7e4a600619713a0c Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Mon, 18 Dec 2023 13:39:49 -0600
+Subject: [PATCH 08/10] Refactor: controller: Drop node state section enum
+
+It now boils down to a bool for whether we want only unlocked resources.
+---
+ daemons/controld/controld_cib.c       | 48 +++++++++++----------------
+ daemons/controld/controld_cib.h       | 13 ++------
+ daemons/controld/controld_execd.c     |  3 +-
+ daemons/controld/controld_fencing.c   |  2 +-
+ daemons/controld/controld_join_dc.c   |  9 +++--
+ daemons/controld/controld_remote_ra.c | 10 +++---
+ 6 files changed, 32 insertions(+), 53 deletions(-)
+
+diff --git a/daemons/controld/controld_cib.c b/daemons/controld/controld_cib.c
+index 39c2b06..298c321 100644
+--- a/daemons/controld/controld_cib.c
++++ b/daemons/controld/controld_cib.c
+@@ -281,16 +281,15 @@ cib_delete_callback(xmlNode *msg, int call_id, int rc, xmlNode *output,
+ 
+ /*!
+  * \internal
+- * \brief Get the XPath and description of a node state section to be deleted
++ * \brief Get the XPath and description of resource history to be deleted
+  *
+- * \param[in]  uname    Desired node
+- * \param[in]  section  Subsection of \c PCMK__XE_NODE_STATE to be deleted
+- * \param[out] xpath    Where to store XPath of \p section
+- * \param[out] desc     If not \c NULL, where to store description of \p section
++ * \param[in]  uname          Name of node to delete resource history for
++ * \param[in]  unlocked_only  If true, delete history of only unlocked resources
++ * \param[out] xpath          Where to store XPath for history deletion
++ * \param[out] desc           If not NULL, where to store loggable description
+  */
+ void
+-controld_node_state_deletion_strings(const char *uname,
+-                                     enum controld_section_e section,
++controld_node_state_deletion_strings(const char *uname, bool unlocked_only,
+                                      char **xpath, char **desc)
+ {
+     const char *desc_pre = NULL;
+@@ -299,20 +298,13 @@ controld_node_state_deletion_strings(const char *uname,
+     long long expire = (long long) time(NULL)
+                        - controld_globals.shutdown_lock_limit;
+ 
+-    switch (section) {
+-        case controld_section_lrm:
+-            *xpath = crm_strdup_printf(XPATH_NODE_LRM, uname);
+-            desc_pre = "resource history";
+-            break;
+-        case controld_section_lrm_unlocked:
+-            *xpath = crm_strdup_printf(XPATH_NODE_LRM_UNLOCKED,
+-                                       uname, uname, expire);
+-            desc_pre = "resource history (other than shutdown locks)";
+-            break;
+-        default:
+-            // We called this function incorrectly
+-            pcmk__assert(false);
+-            break;
++    if (unlocked_only) {
++        *xpath = crm_strdup_printf(XPATH_NODE_LRM_UNLOCKED,
++                                   uname, uname, expire);
++        desc_pre = "resource history (other than shutdown locks)";
++    } else {
++        *xpath = crm_strdup_printf(XPATH_NODE_LRM, uname);
++        desc_pre = "resource history";
+     }
+ 
+     if (desc != NULL) {
+@@ -322,15 +314,14 @@ controld_node_state_deletion_strings(const char *uname,
+ 
+ /*!
+  * \internal
+- * \brief Delete subsection of a node's CIB \c PCMK__XE_NODE_STATE
++ * \brief Delete a node's resource history from the CIB
+  *
+- * \param[in] uname    Desired node
+- * \param[in] section  Subsection of \c PCMK__XE_NODE_STATE to delete
+- * \param[in] options  CIB call options to use
++ * \param[in] uname          Name of node to delete resource history for
++ * \param[in] unlocked_only  If true, delete history of only unlocked resources
++ * \param[in] options        CIB call options to use
+  */
+ void
+-controld_delete_node_state(const char *uname, enum controld_section_e section,
+-                           int options)
++controld_delete_node_state(const char *uname, bool unlocked_only, int options)
+ {
+     cib_t *cib = controld_globals.cib_conn;
+     char *xpath = NULL;
+@@ -339,8 +330,7 @@ controld_delete_node_state(const char *uname, enum controld_section_e section,
+ 
+     pcmk__assert((uname != NULL) && (cib != NULL));
+ 
+-    controld_node_state_deletion_strings(uname, section, &xpath, &desc);
+-
++    controld_node_state_deletion_strings(uname, unlocked_only, &xpath, &desc);
+     cib__set_call_options(options, "node state deletion",
+                           cib_xpath|cib_multiple);
+     cib_rc = cib->cmds->remove(cib, xpath, NULL, options);
+diff --git a/daemons/controld/controld_cib.h b/daemons/controld/controld_cib.h
+index 25277e7..f423f93 100644
+--- a/daemons/controld/controld_cib.h
++++ b/daemons/controld/controld_cib.h
+@@ -46,17 +46,10 @@ int controld_update_cib(const char *section, xmlNode *data, int options,
+                                          void *));
+ unsigned int cib_op_timeout(void);
+ 
+-// Subsections of PCMK__XE_NODE_STATE
+-enum controld_section_e {
+-    controld_section_lrm,
+-    controld_section_lrm_unlocked,
+-};
+-
+-void controld_node_state_deletion_strings(const char *uname,
+-                                          enum controld_section_e section,
++void controld_node_state_deletion_strings(const char *uname, bool unlocked_only,
+                                           char **xpath, char **desc);
+-void controld_delete_node_state(const char *uname,
+-                                enum controld_section_e section, int options);
++void controld_delete_node_state(const char *uname, bool unlocked_only,
++                                int options);
+ int controld_delete_resource_history(const char *rsc_id, const char *node,
+                                      const char *user_name, int call_options);
+ 
+diff --git a/daemons/controld/controld_execd.c b/daemons/controld/controld_execd.c
+index 2ec6893..801a5db 100644
+--- a/daemons/controld/controld_execd.c
++++ b/daemons/controld/controld_execd.c
+@@ -1074,8 +1074,7 @@ force_reprobe(lrm_state_t *lrm_state, const char *from_sys,
+     }
+ 
+     /* Now delete the copy in the CIB */
+-    controld_delete_node_state(lrm_state->node_name, controld_section_lrm,
+-                               cib_none);
++    controld_delete_node_state(lrm_state->node_name, false, cib_none);
+ }
+ 
+ /*!
+diff --git a/daemons/controld/controld_fencing.c b/daemons/controld/controld_fencing.c
+index de074aa..6270dcd 100644
+--- a/daemons/controld/controld_fencing.c
++++ b/daemons/controld/controld_fencing.c
+@@ -268,7 +268,7 @@ update_node_state_after_fencing(const char *target, const char *target_xml_id)
+     fsa_register_cib_callback(rc, pcmk__str_copy(target), cib_fencing_updated);
+ 
+     // Delete node's resource history from CIB
+-    controld_delete_node_state(peer->name, controld_section_lrm, cib_none);
++    controld_delete_node_state(peer->name, false, cib_none);
+ 
+     // Ask attribute manager to delete node's transient attributes
+     // @TODO: This is the only call to controld_purge_node_attrs that doesn't
+diff --git a/daemons/controld/controld_join_dc.c b/daemons/controld/controld_join_dc.c
+index a91fbfa..f88cc47 100644
+--- a/daemons/controld/controld_join_dc.c
++++ b/daemons/controld/controld_join_dc.c
+@@ -771,7 +771,8 @@ do_dc_join_ack(long long action,
+     pcmk__node_status_t *peer = NULL;
+     enum controld_join_phase phase = controld_join_none;
+ 
+-    enum controld_section_e section = controld_section_lrm;
++    const bool unlocked_only = pcmk_is_set(controld_globals.flags,
++                                           controld_shutdown_lock_enabled);
+     char *xpath = NULL;
+     xmlNode *state = join_ack->xml;
+     xmlNode *execd_state = NULL;
+@@ -832,10 +833,8 @@ do_dc_join_ack(long long action,
+     }
+ 
+     // Delete relevant parts of node's current executor state from CIB
+-    if (pcmk_is_set(controld_globals.flags, controld_shutdown_lock_enabled)) {
+-        section = controld_section_lrm_unlocked;
+-    }
+-    controld_node_state_deletion_strings(join_from, section, &xpath, NULL);
++    controld_node_state_deletion_strings(join_from, unlocked_only, &xpath,
++                                         NULL);
+ 
+     rc = cib->cmds->remove(cib, xpath, NULL,
+                            cib_xpath|cib_multiple|cib_transaction);
+diff --git a/daemons/controld/controld_remote_ra.c b/daemons/controld/controld_remote_ra.c
+index 3136180..86a3544 100644
+--- a/daemons/controld/controld_remote_ra.c
++++ b/daemons/controld/controld_remote_ra.c
+@@ -240,17 +240,15 @@ should_purge_attributes(pcmk__node_status_t *node)
+ static void
+ purge_remote_node_attrs(int call_opt, pcmk__node_status_t *node)
+ {
+-    enum controld_section_e section = controld_section_lrm;
++    const bool unlocked_only = pcmk_is_set(controld_globals.flags,
++                                           controld_shutdown_lock_enabled);
+ 
+     // Purge node's transient attributes (from attribute manager and CIB)
+     if (should_purge_attributes(node)) {
+         controld_purge_node_attrs(node->name, true);
+     }
+ 
+-    if (pcmk_is_set(controld_globals.flags, controld_shutdown_lock_enabled)) {
+-        section = controld_section_lrm_unlocked;
+-    }
+-    controld_delete_node_state(node->name, section, call_opt);
++    controld_delete_node_state(node->name, unlocked_only, call_opt);
+ }
+ 
+ /*!
+@@ -359,7 +357,7 @@ remote_node_down(const char *node_name, const enum down_opts opts)
+      * think resources are still running on the node.
+      */
+     if (opts == DOWN_ERASE_LRM) {
+-        controld_delete_node_state(node_name, controld_section_lrm, call_opt);
++        controld_delete_node_state(node_name, false, call_opt);
+     }
+ 
+     /* Ensure node is in the remote peer cache with lost state */
+-- 
+2.47.1
+
+From 050a3caad4989cc1c958420dff47b04be9a1cd55 Mon Sep 17 00:00:00 2001
+From: Ken Gaillot <kgaillot@redhat.com>
+Date: Mon, 18 Dec 2023 15:45:00 -0600
+Subject: [PATCH 09/10] Refactor: controller: Rename
+ controld_delete_node_state()
+
+...to controld_delete_node_history(), and
+controld_node_state_deletion_strings() to
+controld_node_history_deletion_strings(), since they delete only history
+now.
+---
+ daemons/controld/controld_cib.c       | 8 ++++----
+ daemons/controld/controld_cib.h       | 9 +++++----
+ daemons/controld/controld_execd.c     | 2 +-
+ daemons/controld/controld_fencing.c   | 2 +-
+ daemons/controld/controld_join_dc.c   | 4 ++--
+ daemons/controld/controld_remote_ra.c | 4 ++--
+ 6 files changed, 15 insertions(+), 14 deletions(-)
+
+diff --git a/daemons/controld/controld_cib.c b/daemons/controld/controld_cib.c
+index 298c321..fb06f22 100644
+--- a/daemons/controld/controld_cib.c
++++ b/daemons/controld/controld_cib.c
+@@ -289,8 +289,8 @@ cib_delete_callback(xmlNode *msg, int call_id, int rc, xmlNode *output,
+  * \param[out] desc           If not NULL, where to store loggable description
+  */
+ void
+-controld_node_state_deletion_strings(const char *uname, bool unlocked_only,
+-                                     char **xpath, char **desc)
++controld_node_history_deletion_strings(const char *uname, bool unlocked_only,
++                                       char **xpath, char **desc)
+ {
+     const char *desc_pre = NULL;
+ 
+@@ -321,7 +321,7 @@ controld_node_state_deletion_strings(const char *uname, bool unlocked_only,
+  * \param[in] options        CIB call options to use
+  */
+ void
+-controld_delete_node_state(const char *uname, bool unlocked_only, int options)
++controld_delete_node_history(const char *uname, bool unlocked_only, int options)
+ {
+     cib_t *cib = controld_globals.cib_conn;
+     char *xpath = NULL;
+@@ -330,7 +330,7 @@ controld_delete_node_state(const char *uname, bool unlocked_only, int options)
+ 
+     pcmk__assert((uname != NULL) && (cib != NULL));
+ 
+-    controld_node_state_deletion_strings(uname, unlocked_only, &xpath, &desc);
++    controld_node_history_deletion_strings(uname, unlocked_only, &xpath, &desc);
+     cib__set_call_options(options, "node state deletion",
+                           cib_xpath|cib_multiple);
+     cib_rc = cib->cmds->remove(cib, xpath, NULL, options);
+diff --git a/daemons/controld/controld_cib.h b/daemons/controld/controld_cib.h
+index f423f93..116db64 100644
+--- a/daemons/controld/controld_cib.h
++++ b/daemons/controld/controld_cib.h
+@@ -46,10 +46,11 @@ int controld_update_cib(const char *section, xmlNode *data, int options,
+                                          void *));
+ unsigned int cib_op_timeout(void);
+ 
+-void controld_node_state_deletion_strings(const char *uname, bool unlocked_only,
+-                                          char **xpath, char **desc);
+-void controld_delete_node_state(const char *uname, bool unlocked_only,
+-                                int options);
++void controld_node_history_deletion_strings(const char *uname,
++                                            bool unlocked_only,
++                                            char **xpath, char **desc);
++void controld_delete_node_history(const char *uname, bool unlocked_only,
++                                  int options);
+ int controld_delete_resource_history(const char *rsc_id, const char *node,
+                                      const char *user_name, int call_options);
+ 
+diff --git a/daemons/controld/controld_execd.c b/daemons/controld/controld_execd.c
+index 801a5db..977acf0 100644
+--- a/daemons/controld/controld_execd.c
++++ b/daemons/controld/controld_execd.c
+@@ -1074,7 +1074,7 @@ force_reprobe(lrm_state_t *lrm_state, const char *from_sys,
+     }
+ 
+     /* Now delete the copy in the CIB */
+-    controld_delete_node_state(lrm_state->node_name, false, cib_none);
++    controld_delete_node_history(lrm_state->node_name, false, cib_none);
+ }
+ 
+ /*!
+diff --git a/daemons/controld/controld_fencing.c b/daemons/controld/controld_fencing.c
+index 6270dcd..026b240 100644
+--- a/daemons/controld/controld_fencing.c
++++ b/daemons/controld/controld_fencing.c
+@@ -268,7 +268,7 @@ update_node_state_after_fencing(const char *target, const char *target_xml_id)
+     fsa_register_cib_callback(rc, pcmk__str_copy(target), cib_fencing_updated);
+ 
+     // Delete node's resource history from CIB
+-    controld_delete_node_state(peer->name, false, cib_none);
++    controld_delete_node_history(peer->name, false, cib_none);
+ 
+     // Ask attribute manager to delete node's transient attributes
+     // @TODO: This is the only call to controld_purge_node_attrs that doesn't
+diff --git a/daemons/controld/controld_join_dc.c b/daemons/controld/controld_join_dc.c
+index f88cc47..90d1bc0 100644
+--- a/daemons/controld/controld_join_dc.c
++++ b/daemons/controld/controld_join_dc.c
+@@ -833,8 +833,8 @@ do_dc_join_ack(long long action,
+     }
+ 
+     // Delete relevant parts of node's current executor state from CIB
+-    controld_node_state_deletion_strings(join_from, unlocked_only, &xpath,
+-                                         NULL);
++    controld_node_history_deletion_strings(join_from, unlocked_only, &xpath,
++                                           NULL);
+ 
+     rc = cib->cmds->remove(cib, xpath, NULL,
+                            cib_xpath|cib_multiple|cib_transaction);
+diff --git a/daemons/controld/controld_remote_ra.c b/daemons/controld/controld_remote_ra.c
+index 86a3544..1c52477 100644
+--- a/daemons/controld/controld_remote_ra.c
++++ b/daemons/controld/controld_remote_ra.c
+@@ -248,7 +248,7 @@ purge_remote_node_attrs(int call_opt, pcmk__node_status_t *node)
+         controld_purge_node_attrs(node->name, true);
+     }
+ 
+-    controld_delete_node_state(node->name, unlocked_only, call_opt);
++    controld_delete_node_history(node->name, unlocked_only, call_opt);
+ }
+ 
+ /*!
+@@ -357,7 +357,7 @@ remote_node_down(const char *node_name, const enum down_opts opts)
+      * think resources are still running on the node.
+      */
+     if (opts == DOWN_ERASE_LRM) {
+-        controld_delete_node_state(node_name, false, call_opt);
++        controld_delete_node_history(node_name, false, call_opt);
+     }
+ 
+     /* Ensure node is in the remote peer cache with lost state */
+-- 
+2.47.1
+
+From 97dfc11f6c9d1a90ef744e5de2fe7678f3518bba Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Wed, 10 Sep 2025 14:59:38 -0400
+Subject: [PATCH 10/10] Refactor: daemons: Remove the down_opts enum
+
+This has only ever had two values, which basically just means it's a
+bool.
+---
+ daemons/controld/controld_remote_ra.c | 21 ++++++++-------------
+ 1 file changed, 8 insertions(+), 13 deletions(-)
+
+diff --git a/daemons/controld/controld_remote_ra.c b/daemons/controld/controld_remote_ra.c
+index 1c52477..eb1bc55 100644
+--- a/daemons/controld/controld_remote_ra.c
++++ b/daemons/controld/controld_remote_ra.c
+@@ -330,20 +330,15 @@ remote_node_up(const char *node_name)
+     pcmk__xml_free(update);
+ }
+ 
+-enum down_opts {
+-    DOWN_KEEP_LRM,
+-    DOWN_ERASE_LRM
+-};
+-
+ /*!
+  * \internal
+  * \brief Handle cluster communication related to pacemaker_remote node leaving
+  *
+  * \param[in] node_name  Name of lost node
+- * \param[in] opts       Whether to keep or erase LRM history
++ * \param[in] erase_lrm  If \c true, erase the LRM history
+  */
+ static void
+-remote_node_down(const char *node_name, const enum down_opts opts)
++remote_node_down(const char *node_name, bool erase_lrm)
+ {
+     xmlNode *update;
+     int call_opt = crmd_cib_smart_opt();
+@@ -356,7 +351,7 @@ remote_node_down(const char *node_name, const enum down_opts opts)
+      * up. However, after a successful fence, clear the history so we don't
+      * think resources are still running on the node.
+      */
+-    if (opts == DOWN_ERASE_LRM) {
++    if (erase_lrm) {
+         controld_delete_node_history(node_name, false, call_opt);
+     }
+ 
+@@ -416,7 +411,7 @@ check_remote_node_state(const remote_ra_cmd_t *cmd)
+         if (ra_data) {
+             if (!pcmk_is_set(ra_data->status, takeover_complete)) {
+                 /* Stop means down if we didn't successfully migrate elsewhere */
+-                remote_node_down(cmd->rsc_id, DOWN_KEEP_LRM);
++                remote_node_down(cmd->rsc_id, false);
+             } else if (AM_I_DC == FALSE) {
+                 /* Only the connection host and DC track node state,
+                  * so if the connection migrated elsewhere and we aren't DC,
+@@ -692,7 +687,7 @@ remote_lrm_op_callback(lrmd_event_data_t * op)
+                        lrm_state->node_name);
+             /* Do roughly what a 'stop' on the remote-resource would do */
+             handle_remote_ra_stop(lrm_state, NULL);
+-            remote_node_down(lrm_state->node_name, DOWN_KEEP_LRM);
++            remote_node_down(lrm_state->node_name, false);
+             /* now fake the reply of a successful 'stop' */
+             synthesize_lrmd_success(NULL, lrm_state->node_name,
+                                     PCMK_ACTION_STOP);
+@@ -1366,11 +1361,11 @@ remote_ra_process_pseudo(xmlNode *xml)
+          * peer cache state will be incorrect unless and until the guest is
+          * recovered.
+          */
+-        if (result) {
++        if (result != NULL) {
+             const char *remote = pcmk__xe_id(result);
+ 
+-            if (remote) {
+-                remote_node_down(remote, DOWN_ERASE_LRM);
++            if (remote != NULL) {
++                remote_node_down(remote, true);
+             }
+         }
+     }
+-- 
+2.47.1

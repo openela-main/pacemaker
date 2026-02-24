@@ -1,5 +1,5 @@
 #
-# Copyright 2008-2025 the Pacemaker project contributors
+# Copyright 2008-2026 the Pacemaker project contributors
 #
 # The version control history for this file may have further details.
 #
@@ -184,7 +184,7 @@
 Name:          pacemaker
 Summary:       Scalable High-Availability cluster resource manager
 Version:       %{pcmkversion}
-Release:       %{pcmk_release}%{?dist}
+Release:       %{pcmk_release}.1%{?dist}
 License:       GPL-2.0-or-later AND LGPL-2.1-or-later
 Url:           https://www.clusterlabs.org/
 
@@ -201,6 +201,7 @@ Source1:       pacemaker.sysusers
 # upstream commits
 Patch001:      001-econnrefused.patch
 Patch002:      002-corosync.patch
+Patch003:      003-transient_attrs.patch
 
 Requires:      resource-agents
 Requires:      %{pkgname_pcmk_libs}%{?_isa} = %{version}-%{release}
@@ -792,6 +793,10 @@ exit 0
 %{_datadir}/pkgconfig/pacemaker-schemas.pc
 
 %changelog
+* Mon Jan 19 2026 Chris Lumens <clumens@redhat.com> - 3.0.1-3.1
+- Fix a race condition between daemons when erasing transient attrs
+- Resolves: RHEL-135091
+
 * Wed Aug 13 2025 Reid Wahl <nwahl@redhat.com> - 3.0.1-3
 - CTS launches Corosync using systemd if available.
 - Resolves: RHEL-110075
