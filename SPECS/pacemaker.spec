@@ -230,7 +230,7 @@
 Name:          pacemaker
 Summary:       Scalable High-Availability cluster resource manager
 Version:       %{pcmkversion}
-Release:       %{pcmk_release}%{?dist}
+Release:       %{pcmk_release}.1%{?dist}
 License:       GPL-2.0-or-later AND LGPL-2.1-or-later
 Url:           https://www.clusterlabs.org/
 
@@ -247,7 +247,8 @@ Source1:       https://codeload.github.com/%{github_owner}/%{nagios_name}/tar.gz
 Source2:       pacemaker.sysusers
 
 # upstream commits
-#Patch001:      001-xxxx.patch
+Patch001:      001-ipc_evict.patch
+Patch002:      002-fewer_messages.patch
 
 Requires:      resource-agents
 Requires:      %{pkgname_pcmk_libs}%{?_isa} = %{version}-%{release}
@@ -914,6 +915,11 @@ exit 0
 %license %{nagios_name}-%{nagios_hash}/COPYING
 
 %changelog
+* Wed Feb 18 2026 Chris Lumens <clumens@redhat.com> - 2.1.10-1.1
+- Don't evict IPC clients as long as they're still processing messages
+- Don't overwhelm the FSA queue with repeated CIB queries
+- Resolves: RHEL-150167
+
 * Mon Jun 23 2025 Chris Lumens <clumens@redhat.com> - 2.1.10-1
 - Rebase on upstream 2.1.10-rc1 release
 - Use dbus to detect completion of systemd resource start/stop actions

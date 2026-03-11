@@ -1,0 +1,88 @@
+From 468ea9851958d26c25121f201f3631dfdd709cb4 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Tue, 11 Nov 2025 15:11:58 -0500
+Subject: [PATCH] Med: daemons: Don't add repeated I_PE_CALC messages to the
+ fsa queue.
+
+Let's say you have a two node cluster, node1 and node2.  For purposes of
+testing, it's easiest if you use fence_dummy instead of a real fencing
+agent as this will fake fencing happening but without rebooting the node
+so you can see all the log files.
+
+Assume the DC is node1.  Now do the following on node2:
+
+- pcs node standby node1
+- pcs resource defaults update resource-stickiness=1
+- for i in $(seq 1 300); do echo $i; pcs resource create dummy$i ocf:heartbeat:Dummy --group dummy-group; done
+- pcs node unstandby node1
+
+It will take a long time to create that many resources.  After node1
+comes out of standby, it'll take a minute or two but eventually you'll
+see that node1 was fenced.  On node1, you'll see a lot of transition
+abort messages happen.  Each of these transition aborts causes an
+I_PE_CALC message to be generated and added to the fsa queue.  In my
+testing, I've seen the queue grow to ~ 600 messages, all of which are
+exactly the same thing.
+
+The FSA is triggered at G_PRIORITY_HIGH, and once it is triggered, it
+will run until its queue is empty.  With so many messages being added so
+quickly, we've basically ensured it won't be empty any time soon.  While
+controld is processing the FSA messages, it will be unable to read
+anything out of the IPC backlog.
+
+based continues to attempt to send IPC events to controld but is unable
+to do so, so the backlog continues to grow.  Eventually, the backlog
+reaches that 500 message threshold without anything having been read by
+controld, which triggers the eviction process.
+
+There doesn't seem to be any reason for all these I_PE_CALC messages to
+be generated.  They're all exactly the same, they don't appear to be
+tagged with any unique data tying them to a specific query, and their
+presence just slows everything down.
+
+Thus, the fix here is very simple: if the latest message in the queue is
+an I_PE_CALC message, just don't add another one.  We could also make
+sure there's only ever one I_PE_CALC message in the queue, but there
+could potentially be valid reasons for there to be multiple interleaved
+with other message types.  I am erring on the side of caution with this
+minimal fix.
+
+Resolves: RHEL-114894
+---
+ daemons/controld/controld_messages.c | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/daemons/controld/controld_messages.c b/daemons/controld/controld_messages.c
+index 88c032f..ae54743 100644
+--- a/daemons/controld/controld_messages.c
++++ b/daemons/controld/controld_messages.c
+@@ -71,6 +71,26 @@ register_fsa_input_adv(enum crmd_fsa_cause cause, enum crmd_fsa_input input,
+         return;
+     }
+ 
++    if (input == I_PE_CALC) {
++        GList *ele = NULL;
++
++        if (prepend) {
++            ele = g_list_first(controld_globals.fsa_message_queue);
++        } else {
++            ele = g_list_last(controld_globals.fsa_message_queue);
++        }
++
++        if (ele != NULL) {
++            fsa_data_t *message = (fsa_data_t *) ele->data;
++
++            if (message->fsa_input == I_PE_CALC) {
++                crm_debug("%s item in fsa queue is I_PE_CALC, not adding another",
++                          (prepend ? "First" : "Last"));
++                return;
++            }
++        }
++    }
++
+     if (input == I_WAIT_FOR_EVENT) {
+         controld_set_global_flags(controld_fsa_is_stalled);
+         crm_debug("Stalling the FSA pending further input: source=%s cause=%s data=%p queue=%d",
+-- 
+2.47.1
+

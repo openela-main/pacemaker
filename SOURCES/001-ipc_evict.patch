@@ -1,0 +1,330 @@
+From fd592986fb50c7b07197df077d744c3e4d4aecd1 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Wed, 27 Aug 2025 10:41:13 -0400
+Subject: [PATCH 1/5] Refactor: libcrmcommon: Rearrange the queue_len check.
+
+Check if the queue length is 0 first and return, which allows everything
+else to be un-indented one level.
+---
+ lib/common/ipc_server.c | 47 ++++++++++++++++++++---------------------
+ 1 file changed, 23 insertions(+), 24 deletions(-)
+
+diff --git a/lib/common/ipc_server.c b/lib/common/ipc_server.c
+index 96f3cdb..dddd96f 100644
+--- a/lib/common/ipc_server.c
++++ b/lib/common/ipc_server.c
+@@ -547,34 +547,33 @@ crm_ipcs_flush_events(pcmk__client_t *c)
+                   pcmk_rc_str(rc), (long long) qb_rc);
+     }
+ 
+-    if (queue_len) {
+-
+-        /* Allow clients to briefly fall behind on processing incoming messages,
+-         * but drop completely unresponsive clients so the connection doesn't
+-         * consume resources indefinitely.
+-         */
+-        if (queue_len > QB_MAX(c->queue_max, PCMK_IPC_DEFAULT_QUEUE_MAX)) {
+-            if ((c->queue_backlog <= 1) || (queue_len < c->queue_backlog)) {
+-                /* Don't evict for a new or shrinking backlog */
+-                crm_warn("Client with process ID %u has a backlog of %u messages "
+-                         CRM_XS " %p", c->pid, queue_len, c->ipcs);
+-            } else {
+-                crm_err("Evicting client with process ID %u due to backlog of %u messages "
+-                         CRM_XS " %p", c->pid, queue_len, c->ipcs);
+-                c->queue_backlog = 0;
+-                qb_ipcs_disconnect(c->ipcs);
+-                return rc;
+-            }
+-        }
+-
+-        c->queue_backlog = queue_len;
+-        delay_next_flush(c, queue_len);
+-
+-    } else {
++    if (queue_len == 0) {
+         /* Event queue is empty, there is no backlog */
+         c->queue_backlog = 0;
++        return rc;
+     }
+ 
++    /* Allow clients to briefly fall behind on processing incoming messages,
++     * but drop completely unresponsive clients so the connection doesn't
++     * consume resources indefinitely.
++     */
++    if (queue_len > QB_MAX(c->queue_max, PCMK_IPC_DEFAULT_QUEUE_MAX)) {
++        if ((c->queue_backlog <= 1) || (queue_len < c->queue_backlog)) {
++            /* Don't evict for a new or shrinking backlog */
++            crm_warn("Client with process ID %u has a backlog of %u messages "
++                     CRM_XS " %p", c->pid, queue_len, c->ipcs);
++        } else {
++            crm_err("Evicting client with process ID %u due to backlog of %u messages "
++                    CRM_XS " %p", c->pid, queue_len, c->ipcs);
++            c->queue_backlog = 0;
++            qb_ipcs_disconnect(c->ipcs);
++            return rc;
++        }
++    }
++
++    c->queue_backlog = queue_len;
++    delay_next_flush(c, queue_len);
++
+     return rc;
+ }
+ 
+-- 
+2.47.1
+
+From 652e78628d9edc39fc0ec1a6ba6729b2adcaeb22 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Wed, 27 Aug 2025 11:31:37 -0400
+Subject: [PATCH 2/5] Refactor: libcrmcommon: Simplify an empty event queue
+ check.
+
+I find this just a little bit more straightforward to follow.
+---
+ lib/common/ipc_server.c | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/lib/common/ipc_server.c b/lib/common/ipc_server.c
+index dddd96f..249b0d1 100644
+--- a/lib/common/ipc_server.c
++++ b/lib/common/ipc_server.c
+@@ -512,10 +512,13 @@ crm_ipcs_flush_events(pcmk__client_t *c)
+         pcmk__ipc_header_t *header = NULL;
+         struct iovec *event = NULL;
+ 
+-        if (c->event_queue) {
+-            // We don't pop unless send is successful
+-            event = g_queue_peek_head(c->event_queue);
++        if ((c->event_queue == NULL) || g_queue_is_empty(c->event_queue)) {
++            break;
+         }
++
++        // We don't pop unless send is successful
++        event = g_queue_peek_head(c->event_queue);
++
+         if (event == NULL) { // Queue is empty
+             break;
+         }
+-- 
+2.47.1
+
+From e5aa53eda1675a2930527f8af93455e9a6fbecb5 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Wed, 27 Aug 2025 11:35:38 -0400
+Subject: [PATCH 3/5] Refactor: libcrmcommon: Rearrange a few tests in
+ crm_ipcs_flush_events.
+
+Again, no important code changes here.  I just find these a little
+easier to follow.
+---
+ lib/common/ipc_server.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/lib/common/ipc_server.c b/lib/common/ipc_server.c
+index 249b0d1..e47f461 100644
+--- a/lib/common/ipc_server.c
++++ b/lib/common/ipc_server.c
+@@ -498,16 +498,18 @@ crm_ipcs_flush_events(pcmk__client_t *c)
+ 
+     if (c == NULL) {
+         return rc;
++    }
+ 
+-    } else if (c->event_timer) {
++    if (c->event_timer != 0) {
+         /* There is already a timer, wait until it goes off */
+         crm_trace("Timer active for %p - %d", c->ipcs, c->event_timer);
+         return rc;
+     }
+ 
+-    if (c->event_queue) {
++    if (c->event_queue != NULL) {
+         queue_len = g_queue_get_length(c->event_queue);
+     }
++
+     while (sent < 100) {
+         pcmk__ipc_header_t *header = NULL;
+         struct iovec *event = NULL;
+-- 
+2.47.1
+
+From d61b6184dbfcd7b534804d95ad3d38707aab2880 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Wed, 27 Aug 2025 13:14:54 -0400
+Subject: [PATCH 4/5] Feature: libcrmcommon: Be more lenient in evicting IPC
+ clients.
+
+Each IPC connection has a message queue.  If the client is unable to
+process messages faster than the server is sending them, that queue
+start to back up.  pacemaker enforces a cap on the queue size, and
+that's adjustable with the cluster-ipc-limit parameter.  Once the queue
+grows beyond that size, the client is assumed to be dead and is evicted
+so it can be restarted and the queue resources freed.
+
+However, it's possible that the client is not dead.  On clusters with
+very large numbers of resources (I've tried with 300, but fewer might
+also cause problems), certain actions can happen that cause a spike in
+IPC messages.  In RHEL-76276, the action that causes this is moving
+nodes in and out of standby.  This spike in messages causes the server
+to overwhelm the client, which is then evicted.
+
+My multi-part IPC patches made this even worse, as now if the CIB is so
+large that it needs to split an IPC message up, there will be more
+messages than before.
+
+What this fix does is get rid of the cap on the queue size for pacemaker
+daemons.  As long as the server has been able to send messages to the
+client, the client is still doing work and shouldn't be evicted.  It may
+just be processing messages slower than the server is sending them.
+Note that this could lead the queue to grow without bound, eventually
+crashing the server.  For this reason, we're only allowing pacemaker
+daemons to ignore the queue size limit.
+
+Potential problems with this approach:
+
+* If the client is so busy that it can't receive even a single message
+  that crm_ipcs_flush_events tries to send, it will still be evicted.
+  However, the flush operation does retry with a delay several times
+  giving the client time to finish up what it's doing.
+
+* We have timers all over the place with daemons waiting on replies.
+  It's possible that because we are no longer just evicting the clients,
+  we will now see those timers expire which will just lead to different
+  problems.  If so, these fixes would probably need to take place in the
+  client code.
+
+Fixes T38
+---
+ lib/common/ipc_server.c | 14 ++++++++++++--
+ 1 file changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/lib/common/ipc_server.c b/lib/common/ipc_server.c
+index e47f461..83c501b 100644
+--- a/lib/common/ipc_server.c
++++ b/lib/common/ipc_server.c
+@@ -563,10 +563,20 @@ crm_ipcs_flush_events(pcmk__client_t *c)
+      * consume resources indefinitely.
+      */
+     if (queue_len > QB_MAX(c->queue_max, PCMK_IPC_DEFAULT_QUEUE_MAX)) {
+-        if ((c->queue_backlog <= 1) || (queue_len < c->queue_backlog)) {
+-            /* Don't evict for a new or shrinking backlog */
++        /* Don't evict:
++         * - Clients with a new backlog.
++         * - Clients with a shrinking backlog (the client is processing
++         *   messages faster than the server is sending them).
++         * - Clients that are pacemaker daemons and have had any messages sent
++         *   to them in this flush call (the server is sending messages faster
++         *   than the client is processing them, but the client is not dead).
++         */
++        if ((c->queue_backlog <= 1)
++            || (queue_len < c->queue_backlog)
++            || ((sent > 0) && crm_is_daemon_name(c->name))) {
+             crm_warn("Client with process ID %u has a backlog of %u messages "
+                      CRM_XS " %p", c->pid, queue_len, c->ipcs);
++
+         } else {
+             crm_err("Evicting client with process ID %u due to backlog of %u messages "
+                     CRM_XS " %p", c->pid, queue_len, c->ipcs);
+-- 
+2.47.1
+
+From 0336f2c961470ad5afbfe18e2a90a0f2c0614e68 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Tue, 30 Sep 2025 13:50:53 -0400
+Subject: [PATCH 5/5] Feature: libcrmcommon: Update documentation for
+ cluster-ipc-limit.
+
+Clarify that this no longer applies to pacemaker daemons.
+---
+ cts/cli/regression.daemons.exp |  4 ++--
+ cts/cli/regression.tools.exp   | 16 ++++++++--------
+ lib/common/options.c           |  6 +++---
+ 3 files changed, 13 insertions(+), 13 deletions(-)
+
+diff --git a/cts/cli/regression.daemons.exp b/cts/cli/regression.daemons.exp
+index fe53044..a16056f 100644
+--- a/cts/cli/regression.daemons.exp
++++ b/cts/cli/regression.daemons.exp
+@@ -21,10 +21,10 @@
+     </parameter>
+     <parameter name="cluster-ipc-limit">
+       <longdesc lang="en">
+-        Raise this if log has "Evicting client" messages for cluster daemon PIDs (a good value is the number of resources in the cluster multiplied by the number of nodes).
++        Raise this if log has "Evicting client" messages for cluster PIDs (a good value is the number of resources in the cluster multiplied by the number of nodes).
+       </longdesc>
+       <shortdesc lang="en">
+-        Maximum IPC message backlog before disconnecting a cluster daemon
++        Maximum IPC message backlog before disconnecting a client
+       </shortdesc>
+       <content type="integer" default=""/>
+     </parameter>
+diff --git a/cts/cli/regression.tools.exp b/cts/cli/regression.tools.exp
+index 5448ae3..08ddd44 100644
+--- a/cts/cli/regression.tools.exp
++++ b/cts/cli/regression.tools.exp
+@@ -139,8 +139,8 @@ Also known as properties, these are options that affect behavior across the enti
+   * migration-limit: The number of live migration actions that the cluster is allowed to execute in parallel on a node (-1 means no limit)
+     * Possible values: integer (default: )
+ 
+-  * cluster-ipc-limit: Maximum IPC message backlog before disconnecting a cluster daemon
+-    * Raise this if log has "Evicting client" messages for cluster daemon PIDs (a good value is the number of resources in the cluster multiplied by the number of nodes).
++  * cluster-ipc-limit: Maximum IPC message backlog before disconnecting a client
++    * Raise this if log has "Evicting client" messages for cluster PIDs (a good value is the number of resources in the cluster multiplied by the number of nodes).
+     * Possible values: nonnegative_integer (default: )
+ 
+   * stop-all-resources: Whether the cluster should stop all active resources
+@@ -385,8 +385,8 @@ Also known as properties, these are options that affect behavior across the enti
+         <content type="integer" default=""/>
+       </parameter>
+       <parameter name="cluster-ipc-limit" advanced="0" generated="0">
+-        <longdesc lang="en">Raise this if log has "Evicting client" messages for cluster daemon PIDs (a good value is the number of resources in the cluster multiplied by the number of nodes).</longdesc>
+-        <shortdesc lang="en">Maximum IPC message backlog before disconnecting a cluster daemon</shortdesc>
++        <longdesc lang="en">Raise this if log has "Evicting client" messages for cluster PIDs (a good value is the number of resources in the cluster multiplied by the number of nodes).</longdesc>
++        <shortdesc lang="en">Maximum IPC message backlog before disconnecting a client</shortdesc>
+         <content type="nonnegative_integer" default=""/>
+       </parameter>
+       <parameter name="stop-all-resources" advanced="0" generated="0">
+@@ -574,8 +574,8 @@ Also known as properties, these are options that affect behavior across the enti
+   * migration-limit: The number of live migration actions that the cluster is allowed to execute in parallel on a node (-1 means no limit)
+     * Possible values: integer (default: )
+ 
+-  * cluster-ipc-limit: Maximum IPC message backlog before disconnecting a cluster daemon
+-    * Raise this if log has "Evicting client" messages for cluster daemon PIDs (a good value is the number of resources in the cluster multiplied by the number of nodes).
++  * cluster-ipc-limit: Maximum IPC message backlog before disconnecting a client
++    * Raise this if log has "Evicting client" messages for cluster PIDs (a good value is the number of resources in the cluster multiplied by the number of nodes).
+     * Possible values: nonnegative_integer (default: )
+ 
+   * stop-all-resources: Whether the cluster should stop all active resources
+@@ -856,8 +856,8 @@ Also known as properties, these are options that affect behavior across the enti
+         <content type="integer" default=""/>
+       </parameter>
+       <parameter name="cluster-ipc-limit" advanced="0" generated="0">
+-        <longdesc lang="en">Raise this if log has "Evicting client" messages for cluster daemon PIDs (a good value is the number of resources in the cluster multiplied by the number of nodes).</longdesc>
+-        <shortdesc lang="en">Maximum IPC message backlog before disconnecting a cluster daemon</shortdesc>
++        <longdesc lang="en">Raise this if log has "Evicting client" messages for cluster PIDs (a good value is the number of resources in the cluster multiplied by the number of nodes).</longdesc>
++        <shortdesc lang="en">Maximum IPC message backlog before disconnecting a client</shortdesc>
+         <content type="nonnegative_integer" default=""/>
+       </parameter>
+       <parameter name="stop-all-resources" advanced="0" generated="0">
+diff --git a/lib/common/options.c b/lib/common/options.c
+index c47a402..e7a76c5 100644
+--- a/lib/common/options.c
++++ b/lib/common/options.c
+@@ -440,10 +440,10 @@ static const pcmk__cluster_option_t cluster_options[] = {
+         PCMK_OPT_CLUSTER_IPC_LIMIT, NULL, PCMK_VALUE_NONNEGATIVE_INTEGER, NULL,
+         "500", pcmk__valid_positive_int,
+         pcmk__opt_based,
+-        N_("Maximum IPC message backlog before disconnecting a cluster daemon"),
++        N_("Maximum IPC message backlog before disconnecting a client"),
+         N_("Raise this if log has \"Evicting client\" messages for cluster "
+-            "daemon PIDs (a good value is the number of resources in the "
+-            "cluster multiplied by the number of nodes)."),
++            "PIDs (a good value is the number of resources in the cluster "
++            "multiplied by the number of nodes)."),
+     },
+ 
+     // Orphans and stopping
+-- 
+2.47.1
+
