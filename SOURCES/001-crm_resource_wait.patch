@@ -1,0 +1,131 @@
+From 17a2d7acffc86e06b2fa8b49c96c33d72466e7f7 Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Fri, 5 Sep 2025 20:35:31 -0700
+Subject: [PATCH] Fix: tools: Handle large timeouts correctly in crm_resource
+ --wait
+
+Previously, if the --timeout value parsed to a value greater than
+(UINT_MAX - 999), the wait timeout would overflow. The effective timeout
+would be either 0 seconds or 1 second. This is because 999 was added to
+the guint value before passing it to pcmk__timeout_ms2s().
+
+Now, we simply pass the timeout in milliseconds to
+pcmk__timeout_ms2s(), without adding 999.
+
+This implies a slight behavior change. Previously, timeouts were always
+rounded up to the next greatest second. Now, they're rounded to the
+nearest second. For example, previously:
+* timeout values between 1ms and 500ms => wait timeout of 1 second
+* timeout values between 501ms and 1500ms => wait timeout of 2 seconds
+* timeout values between 1501ms and 2500ms => wait timeout of 3 seconds
+* and so on
+
+Now:
+* timeout values between 1ms and 1499ms => wait timeout of 1 second
+* timeout values between 1500ms and 2499ms => wait timeout of 2 seconds
+* timeout values between 2500ms and 3499ms => wait timeout of 3 seconds
+* and so on
+
+The previous rounding behavior has existed since crm_resource --wait was
+added by 424afcdf.
+
+Update the help text to note the granularity and rounding behavior. The
+exact behavior of the restart command is confusing, and its logic should
+be cleaned up in the future.
+
+Fixes RHEL-45869
+Fixes RHEL-86148
+Closes T841
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ include/crm/common/internal.h |  1 +
+ lib/common/utils.c            | 30 ++++++++++++++++++++++++++++++
+ tools/crm_resource.c          |  4 +++-
+ tools/crm_resource_runtime.c  |  2 +-
+ 4 files changed, 35 insertions(+), 2 deletions(-)
+
+diff --git a/include/crm/common/internal.h b/include/crm/common/internal.h
+index 7d1e95f..ee26321 100644
+--- a/include/crm/common/internal.h
++++ b/include/crm/common/internal.h
+@@ -249,6 +249,7 @@ void pcmk__daemonize(const char *name, const char *pidfile);
+ void pcmk__panic(const char *origin);
+ pid_t pcmk__locate_sbd(void);
+ void pcmk__sleep_ms(unsigned int ms);
++guint pcmk__timeout_ms2s(guint timeout_ms);
+ 
+ extern int pcmk__score_red;
+ extern int pcmk__score_green;
+diff --git a/lib/common/utils.c b/lib/common/utils.c
+index 9e44c22..0a38811 100644
+--- a/lib/common/utils.c
++++ b/lib/common/utils.c
+@@ -413,6 +413,36 @@ pcmk__sleep_ms(unsigned int ms)
+ #endif
+ }
+ 
++/*!
++ * \internal
++ * \brief Convert milliseconds to seconds
++ *
++ * \param[in] timeout_ms The interval, in ms
++ *
++ * \return If \p timeout_ms is 0, return 0.  Otherwise, return the number of
++ *         seconds, rounded to the nearest integer, with a minimum of 1.
++ */
++guint
++pcmk__timeout_ms2s(guint timeout_ms)
++{
++    guint quot, rem;
++
++    if (timeout_ms == 0) {
++        return 0;
++    } else if (timeout_ms < 1000) {
++        return 1;
++    }
++
++    quot = timeout_ms / 1000;
++    rem = timeout_ms % 1000;
++
++    if (rem >= 500) {
++        quot += 1;
++    }
++
++    return quot;
++}
++
+ // Deprecated functions kept only for backward API compatibility
+ // LCOV_EXCL_START
+ 
+diff --git a/tools/crm_resource.c b/tools/crm_resource.c
+index 898c21e..ac50c5e 100644
+--- a/tools/crm_resource.c
++++ b/tools/crm_resource.c
+@@ -766,7 +766,9 @@ static GOptionEntry addl_entries[] = {
+       "ID" },
+     { "timeout", 'T', G_OPTION_FLAG_NONE, G_OPTION_ARG_CALLBACK, timeout_cb,
+       "(Advanced) Abort if command does not finish in this time (with\n"
+-      INDENT "--restart, --wait, --force-*)",
++      INDENT "--restart, --wait, --force-*). The --restart command uses a\n"
++      INDENT "two-second granularity and the --wait command uses a one-second\n"
++      INDENT "granularity, with rounding.",
+       "N" },
+     { "all", 0, G_OPTION_FLAG_NONE, G_OPTION_ARG_NONE, &options.all,
+       "List all options, including advanced and deprecated (with\n"
+diff --git a/tools/crm_resource_runtime.c b/tools/crm_resource_runtime.c
+index 7350f07..286c10c 100644
+--- a/tools/crm_resource_runtime.c
++++ b/tools/crm_resource_runtime.c
+@@ -1977,7 +1977,7 @@ wait_till_stable(pcmk__output_t *out, guint timeout_ms, cib_t * cib)
+     if (timeout_ms == 0) {
+         expire_time += WAIT_DEFAULT_TIMEOUT_S;
+     } else {
+-        expire_time += (timeout_ms + 999) / 1000;
++        expire_time += pcmk__timeout_ms2s(timeout_ms);
+     }
+ 
+     scheduler = pe_new_working_set();
+-- 
+2.47.1
+

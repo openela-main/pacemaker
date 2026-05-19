@@ -1,0 +1,178 @@
+From 8ff58d786907b64c32350e72e341cdd0f5026813 Mon Sep 17 00:00:00 2001
+From: Thomas Jones <thomas.jones@ibm.com>
+Date: Fri, 30 May 2025 16:40:13 -0400
+Subject: [PATCH 1/2] Fix: libcrmcommon: Add retries on connect to avoid fatal
+ errors when sub-daemons communicate Add pcmk__connect_ipc_retry_conrefused()
+ and use it where it makes sense Add retry loop to
+ connect_and_send_attrd_request() that retries connect and send.
+
+---
+ daemons/controld/controld_schedulerd.c |  2 +-
+ include/crm/common/ipc_internal.h      |  4 ++++
+ lib/common/ipc_attrd.c                 | 19 ++++++++++++----
+ lib/common/ipc_client.c                | 30 ++++++++++++++++++++++++++
+ lib/pacemaker/pcmk_cluster_queries.c   |  2 +-
+ 5 files changed, 51 insertions(+), 6 deletions(-)
+
+diff --git a/daemons/controld/controld_schedulerd.c b/daemons/controld/controld_schedulerd.c
+index 22b37b8..444bdef 100644
+--- a/daemons/controld/controld_schedulerd.c
++++ b/daemons/controld/controld_schedulerd.c
+@@ -197,7 +197,7 @@ new_schedulerd_ipc_connection(void)
+ 
+     pcmk_register_ipc_callback(schedulerd_api, scheduler_event_callback, NULL);
+ 
+-    rc = pcmk__connect_ipc(schedulerd_api, pcmk_ipc_dispatch_main, 3);
++    rc = pcmk__connect_ipc_retry_conrefused(schedulerd_api, pcmk_ipc_dispatch_main, 3);
+     if (rc != pcmk_rc_ok) {
+         crm_err("Error connecting to %s: %s",
+                 pcmk_ipc_name(schedulerd_api, true), pcmk_rc_str(rc));
+diff --git a/include/crm/common/ipc_internal.h b/include/crm/common/ipc_internal.h
+index 27b8bfc..09145ba 100644
+--- a/include/crm/common/ipc_internal.h
++++ b/include/crm/common/ipc_internal.h
+@@ -101,6 +101,10 @@ int pcmk__ipc_fd(crm_ipc_t *ipc, int *fd);
+ int pcmk__connect_ipc(pcmk_ipc_api_t *api, enum pcmk_ipc_dispatch dispatch_type,
+                       int attempts);
+ 
++int pcmk__connect_ipc_retry_conrefused(pcmk_ipc_api_t *api,
++                                       enum pcmk_ipc_dispatch dispatch_type,
++                                       int attempts);
++
+ /*
+  * Server-related
+  */
+diff --git a/lib/common/ipc_attrd.c b/lib/common/ipc_attrd.c
+index 5ab0f2d..60a92a0 100644
+--- a/lib/common/ipc_attrd.c
++++ b/lib/common/ipc_attrd.c
+@@ -152,6 +152,8 @@ create_attrd_op(const char *user_name)
+ static int
+ connect_and_send_attrd_request(pcmk_ipc_api_t *api, const xmlNode *request)
+ {
++    static const int max_retries = 5;
++    int remaining_attempts = max_retries;
+     int rc = pcmk_rc_ok;
+     bool created_api = false;
+ 
+@@ -163,10 +165,19 @@ connect_and_send_attrd_request(pcmk_ipc_api_t *api, const xmlNode *request)
+         created_api = true;
+     }
+ 
+-    rc = pcmk__connect_ipc(api, pcmk_ipc_dispatch_sync, 5);
+-    if (rc == pcmk_rc_ok) {
+-        rc = pcmk__send_ipc_request(api, request);
+-    }
++    // If attrd is killed and is being restarted we will temporarily get
++    // ECONNREFUSED on connect if it is already dead or ENOTCONN if it died
++    // after we connected to it. We should wait a bit and retry in those cases.
++    do {
++        if (rc == ENOTCONN || rc == ECONNREFUSED) {
++            sleep(max_retries - remaining_attempts);
++        }
++        rc = pcmk__connect_ipc(api, pcmk_ipc_dispatch_sync, remaining_attempts);
++        if (rc == pcmk_rc_ok) {
++            rc = pcmk__send_ipc_request(api, request);
++        }
++        remaining_attempts--;
++    } while ((rc == ENOTCONN || rc == ECONNREFUSED) && remaining_attempts >= 0);
+ 
+     if (created_api) {
+         pcmk_free_ipc_api(api);
+diff --git a/lib/common/ipc_client.c b/lib/common/ipc_client.c
+index 24d7745..4ac7810 100644
+--- a/lib/common/ipc_client.c
++++ b/lib/common/ipc_client.c
+@@ -488,6 +488,36 @@ connect_without_main_loop(pcmk_ipc_api_t *api)
+     return rc;
+ }
+ 
++/*!
++ * \internal
++ * \brief Connect to a Pacemaker daemon via IPC (retrying after soft errors
++ *        and ECONNREFUSED)
++ *
++ * \param[in,out] api            IPC API instance
++ * \param[in]     dispatch_type  How IPC replies should be dispatched
++ * \param[in]     attempts       How many times to try (in case of soft error)
++ *
++ * \return Standard Pacemaker return code
++*/
++int
++pcmk__connect_ipc_retry_conrefused(pcmk_ipc_api_t *api,
++                                   enum pcmk_ipc_dispatch dispatch_type,
++                                   int attempts)
++{
++    int remaining = attempts;
++    int rc = pcmk_rc_ok;
++
++    do {
++        if (rc == ECONNREFUSED) {
++            pcmk__sleep_ms((attempts - remaining) * 500);
++        }
++        rc = pcmk__connect_ipc(api, dispatch_type, remaining);
++        remaining--;
++    } while (rc == ECONNREFUSED && remaining >= 0);
++
++    return rc;
++}
++
+ /*!
+  * \internal
+  * \brief Connect to a Pacemaker daemon via IPC (retrying after soft errors)
+diff --git a/lib/pacemaker/pcmk_cluster_queries.c b/lib/pacemaker/pcmk_cluster_queries.c
+index bbefcda..c1fcf73 100644
+--- a/lib/pacemaker/pcmk_cluster_queries.c
++++ b/lib/pacemaker/pcmk_cluster_queries.c
+@@ -360,7 +360,7 @@ ipc_connect(data_t *data, enum pcmk_ipc_server server, pcmk_ipc_callback_t cb,
+         pcmk_register_ipc_callback(api, cb, data);
+     }
+ 
+-    rc = pcmk__connect_ipc(api, dispatch_type, 5);
++    rc = pcmk__connect_ipc_retry_conrefused(api, dispatch_type, 5);
+     if (rc != pcmk_rc_ok) {
+         if (rc == EREMOTEIO) {
+             data->pcmkd_state = pcmk_pacemakerd_state_remote;
+-- 
+2.47.1
+
+From 2e46b914fb08d346d7b022ba75302f9290034507 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Mon, 4 Aug 2025 10:38:00 -0400
+Subject: [PATCH 2/2] Med: libpacemaker: Do not retry on ECONNREFUSED in tools.
+
+This is a regression introduced by e438946787.  In that patch, what
+we're trying to do is retry IPC connections between daemons.  If a
+daemon gets ECONNREFUSED when it initiates an IPC connection, the most
+likely reason is that another daemon has been killed and is restarting
+but is not yet ready to accept connections.  Waiting and retrying
+repeatedly is an acceptable way to deal with this.
+
+However, if a command line tool gets ECONNREFUSED, it's more likely that
+the problem is the cluster isn't running at all.  In this case, waiting
+and retrying just introduces a delay for a situation that will never be
+resolved.  Reverting just the part in pcmk_cluster_queries.c should fix
+this problem without affecting any of the daemons - they don't call this
+code.
+
+Fixes RHEL-106594
+---
+ lib/pacemaker/pcmk_cluster_queries.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/lib/pacemaker/pcmk_cluster_queries.c b/lib/pacemaker/pcmk_cluster_queries.c
+index c1fcf73..bbefcda 100644
+--- a/lib/pacemaker/pcmk_cluster_queries.c
++++ b/lib/pacemaker/pcmk_cluster_queries.c
+@@ -360,7 +360,7 @@ ipc_connect(data_t *data, enum pcmk_ipc_server server, pcmk_ipc_callback_t cb,
+         pcmk_register_ipc_callback(api, cb, data);
+     }
+ 
+-    rc = pcmk__connect_ipc_retry_conrefused(api, dispatch_type, 5);
++    rc = pcmk__connect_ipc(api, dispatch_type, 5);
+     if (rc != pcmk_rc_ok) {
+         if (rc == EREMOTEIO) {
+             data->pcmkd_state = pcmk_pacemakerd_state_remote;
+-- 
+2.47.1
+

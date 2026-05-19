@@ -36,7 +36,7 @@
 ## can be incremented to build packages reliably considered "newer"
 ## than previously built packages with the same pcmkversion)
 %global pcmkversion 2.1.10
-%global specversion 1
+%global specversion 2
 
 ## Upstream commit (full commit ID, abbreviated commit ID, or tag) to build
 %global commit 5693eaeeef06faa1622515963082b5a1731d9fc0
@@ -230,7 +230,7 @@
 Name:          pacemaker
 Summary:       Scalable High-Availability cluster resource manager
 Version:       %{pcmkversion}
-Release:       %{pcmk_release}.1%{?dist}
+Release:       %{pcmk_release}%{?dist}
 License:       GPL-2.0-or-later AND LGPL-2.1-or-later
 Url:           https://www.clusterlabs.org/
 
@@ -247,8 +247,10 @@ Source1:       https://codeload.github.com/%{github_owner}/%{nagios_name}/tar.gz
 Source2:       pacemaker.sysusers
 
 # upstream commits
-Patch001:      001-ipc_evict.patch
-Patch002:      002-fewer_messages.patch
+Patch001:      001-crm_resource_wait.patch
+Patch002:      002-ipc_connect_retry.patch
+Patch003:      003-ipc_evict.patch
+Patch004:      004-fewer_messages.patch
 
 Requires:      resource-agents
 Requires:      %{pkgname_pcmk_libs}%{?_isa} = %{version}-%{release}
@@ -915,10 +917,14 @@ exit 0
 %license %{nagios_name}-%{nagios_hash}/COPYING
 
 %changelog
-* Wed Feb 18 2026 Chris Lumens <clumens@redhat.com> - 2.1.10-1.1
+* Wed Nov 12 2025 Chris Lumens <clumens@redhat.com> - 2.1.10-2
+- Handle large timeouts correctly in crm_resource --wait
+- Do not try to connect to subdaemons before they're respawned
 - Don't evict IPC clients as long as they're still processing messages
 - Don't overwhelm the FSA queue with repeated CIB queries
-- Resolves: RHEL-150167
+- Resolves: RHEL-45869
+- Resolves: RHEL-87484
+- Resolves: RHEL-114894
 
 * Mon Jun 23 2025 Chris Lumens <clumens@redhat.com> - 2.1.10-1
 - Rebase on upstream 2.1.10-rc1 release
