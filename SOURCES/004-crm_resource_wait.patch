@@ -1,0 +1,76 @@
+From ce1dc488d46b373292569b397c9c765b55654eea Mon Sep 17 00:00:00 2001
+From: Reid Wahl <nrwahl@protonmail.com>
+Date: Fri, 5 Sep 2025 20:35:31 -0700
+Subject: [PATCH] Fix: tools: Handle large timeouts correctly in crm_resource
+ --wait
+
+Previously, if the --timeout value parsed to a value greater than
+(UINT_MAX - 999), the wait timeout would overflow. The effective timeout
+would be either 0 seconds or 1 second. This is because 999 was added to
+the guint value before passing it to pcmk__timeout_ms2s().
+
+Now, we simply pass the timeout in milliseconds to
+pcmk__timeout_ms2s(), without adding 999.
+
+This implies a slight behavior change. Previously, timeouts were always
+rounded up to the next greatest second. Now, they're rounded to the
+nearest second. For example, previously:
+* timeout values between 1ms and 500ms => wait timeout of 1 second
+* timeout values between 501ms and 1500ms => wait timeout of 2 seconds
+* timeout values between 1501ms and 2500ms => wait timeout of 3 seconds
+* and so on
+
+Now:
+* timeout values between 1ms and 1499ms => wait timeout of 1 second
+* timeout values between 1500ms and 2499ms => wait timeout of 2 seconds
+* timeout values between 2500ms and 3499ms => wait timeout of 3 seconds
+* and so on
+
+The previous rounding behavior has existed since crm_resource --wait was
+added by 424afcdf.
+
+Update the help text to note the granularity and rounding behavior. The
+exact behavior of the restart command is confusing, and its logic should
+be cleaned up in the future.
+
+Fixes RHEL-45869
+Fixes RHEL-86148
+Closes T841
+
+Signed-off-by: Reid Wahl <nrwahl@protonmail.com>
+---
+ tools/crm_resource.c         | 4 +++-
+ tools/crm_resource_runtime.c | 2 +-
+ 2 files changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/tools/crm_resource.c b/tools/crm_resource.c
+index 162ae40..74f84f0 100644
+--- a/tools/crm_resource.c
++++ b/tools/crm_resource.c
+@@ -831,7 +831,9 @@ static GOptionEntry addl_entries[] = {
+       "ID" },
+     { "timeout", 'T', G_OPTION_FLAG_NONE, G_OPTION_ARG_CALLBACK, timeout_cb,
+       "(Advanced) Abort if command does not finish in this time (with\n"
+-      INDENT "--restart, --wait, --force-*)",
++      INDENT "--restart, --wait, --force-*). The --restart command uses a\n"
++      INDENT "two-second granularity and the --wait command uses a one-second\n"
++      INDENT "granularity, with rounding.",
+       "N" },
+     { "all", 0, G_OPTION_FLAG_NONE, G_OPTION_ARG_NONE, &options.all,
+       "List all options, including advanced and deprecated (with\n"
+diff --git a/tools/crm_resource_runtime.c b/tools/crm_resource_runtime.c
+index f0a84c0..a44794e 100644
+--- a/tools/crm_resource_runtime.c
++++ b/tools/crm_resource_runtime.c
+@@ -2108,7 +2108,7 @@ wait_till_stable(pcmk__output_t *out, guint timeout_ms, cib_t * cib)
+     if (timeout_ms == 0) {
+         expire_time += WAIT_DEFAULT_TIMEOUT_S;
+     } else {
+-        expire_time += pcmk__timeout_ms2s(timeout_ms + 999);
++        expire_time += pcmk__timeout_ms2s(timeout_ms);
+     }
+ 
+     scheduler = pcmk_new_scheduler();
+-- 
+2.47.1
+

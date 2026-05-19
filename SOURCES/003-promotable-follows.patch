@@ -1,0 +1,801 @@
+From 6e5d574de9ad3a131cc0c51f2c5300e2cf4e7db3 Mon Sep 17 00:00:00 2001
+From: Klaus Wenninger <klaus.wenninger@aon.at>
+Date: Tue, 7 Oct 2025 05:07:04 +0200
+Subject: [PATCH 1/2] Test: scheduler: promoted state with promoted state with
+ attribute
+
+Add testcase. Previous fix attribute based colocation didn't adhere
+the attribute with promoted state with promoted state.
+---
+ cts/cts-scheduler.in                          |   1 +
+ ...motable-colocation-with-node-attribute.dot |  28 +++
+ ...motable-colocation-with-node-attribute.exp | 175 ++++++++++++++++++
+ ...able-colocation-with-node-attribute.scores |  81 ++++++++
+ ...ble-colocation-with-node-attribute.summary |  45 +++++
+ ...motable-colocation-with-node-attribute.xml | 155 ++++++++++++++++
+ 6 files changed, 485 insertions(+)
+ create mode 100644 cts/scheduler/dot/promotable-colocation-with-node-attribute.dot
+ create mode 100644 cts/scheduler/exp/promotable-colocation-with-node-attribute.exp
+ create mode 100644 cts/scheduler/scores/promotable-colocation-with-node-attribute.scores
+ create mode 100644 cts/scheduler/summary/promotable-colocation-with-node-attribute.summary
+ create mode 100644 cts/scheduler/xml/promotable-colocation-with-node-attribute.xml
+
+diff --git a/cts/cts-scheduler.in b/cts/cts-scheduler.in
+index f5d4ed5..be8af87 100644
+--- a/cts/cts-scheduler.in
++++ b/cts/cts-scheduler.in
+@@ -633,6 +633,7 @@ TESTS = [
+         SchedulerTest("no_quorum_demote", "Promotable demotion and primitive stop with no-quorum-policy=\"demote\""),
+         SchedulerTest("no-promote-on-unrunnable-guest", "Don't select bundle instance for promotion when container can't run"),
+         SchedulerTest("leftover-pending-monitor", "Prevent a leftover pending monitor from causing unexpected stop of other instances"),
++        SchedulerTest("promotable-colocation-with-node-attribute", "Promote dependent clone on nodes belonging to a site that has a primary clone promoted"),
+     ]),
+     SchedulerTestGroup([
+         SchedulerTest("history-1", "Correctly parse stateful-1 resource state"),
+diff --git a/cts/scheduler/dot/promotable-colocation-with-node-attribute.dot b/cts/scheduler/dot/promotable-colocation-with-node-attribute.dot
+new file mode 100644
+index 0000000..89d066f
+--- /dev/null
++++ b/cts/scheduler/dot/promotable-colocation-with-node-attribute.dot
+@@ -0,0 +1,28 @@
++ digraph "g" {
++"dependent-clone_demote_0" -> "dependent-clone_demoted_0" [ style = bold]
++"dependent-clone_demote_0" -> "dependent-rsc_demote_0 node3" [ style = bold]
++"dependent-clone_demote_0" [ style=bold color="green" fontcolor="orange"]
++"dependent-clone_demoted_0" -> "dependent-clone_promote_0" [ style = bold]
++"dependent-clone_demoted_0" [ style=bold color="green" fontcolor="orange"]
++"dependent-clone_promote_0" -> "dependent-rsc_promote_0 node1" [ style = bold]
++"dependent-clone_promote_0" -> "dependent-rsc_promote_0 node2" [ style = bold]
++"dependent-clone_promote_0" [ style=bold color="green" fontcolor="orange"]
++"dependent-clone_promoted_0" [ style=bold color="green" fontcolor="orange"]
++"dependent-rsc_demote_0 node3" -> "dependent-clone_demoted_0" [ style = bold]
++"dependent-rsc_demote_0 node3" -> "dependent-rsc_monitor_11000 node3" [ style = bold]
++"dependent-rsc_demote_0 node3" [ style=bold color="green" fontcolor="black"]
++"dependent-rsc_monitor_10000 node1" [ style=bold color="green" fontcolor="black"]
++"dependent-rsc_monitor_10000 node2" [ style=bold color="green" fontcolor="black"]
++"dependent-rsc_monitor_11000 node3" [ style=bold color="green" fontcolor="black"]
++"dependent-rsc_monitor_11000 node4" [ style=bold color="green" fontcolor="black"]
++"dependent-rsc_promote_0 node1" -> "dependent-clone_promoted_0" [ style = bold]
++"dependent-rsc_promote_0 node1" -> "dependent-rsc_monitor_10000 node1" [ style = bold]
++"dependent-rsc_promote_0 node1" [ style=bold color="green" fontcolor="black"]
++"dependent-rsc_promote_0 node2" -> "dependent-clone_promoted_0" [ style = bold]
++"dependent-rsc_promote_0 node2" -> "dependent-rsc_monitor_10000 node2" [ style = bold]
++"dependent-rsc_promote_0 node2" [ style=bold color="green" fontcolor="black"]
++"primary-rsc_monitor_10000 node1" [ style=bold color="green" fontcolor="black"]
++"primary-rsc_monitor_11000 node2" [ style=bold color="green" fontcolor="black"]
++"primary-rsc_monitor_11000 node3" [ style=bold color="green" fontcolor="black"]
++"primary-rsc_monitor_11000 node4" [ style=bold color="green" fontcolor="black"]
++}
+diff --git a/cts/scheduler/exp/promotable-colocation-with-node-attribute.exp b/cts/scheduler/exp/promotable-colocation-with-node-attribute.exp
+new file mode 100644
+index 0000000..76371f1
+--- /dev/null
++++ b/cts/scheduler/exp/promotable-colocation-with-node-attribute.exp
+@@ -0,0 +1,175 @@
++<transition_graph cluster-delay="60s" stonith-timeout="60s" failed-stop-offset="INFINITY" failed-start-offset="INFINITY"  transition_id="1">
++  <synapse id="0">
++    <action_set>
++      <rsc_op id="5" operation="monitor" operation_key="primary-rsc_monitor_10000" internal_operation_key="primary-rsc:0_monitor_10000" on_node="node1" on_node_uuid="node1">
++        <primitive id="primary-rsc" long-id="primary-rsc:0" class="ocf" provider="pacemaker" type="Stateful"/>
++        <attributes CRM_meta_clone="0" CRM_meta_clone_max="4" CRM_meta_clone_node_max="1" CRM_meta_globally_unique="false" CRM_meta_interval="10000" CRM_meta_master_max="1" CRM_meta_master_node_max="1" CRM_meta_name="monitor" CRM_meta_notify="false" CRM_meta_on_node="node1" CRM_meta_on_node_uuid="node1" CRM_meta_op_target_rc="8" CRM_meta_promoted_max="1" CRM_meta_promoted_node_max="1" CRM_meta_role="Promoted" CRM_meta_timeout="20000" />
++      </rsc_op>
++    </action_set>
++    <inputs/>
++  </synapse>
++  <synapse id="1">
++    <action_set>
++      <rsc_op id="8" operation="monitor" operation_key="primary-rsc_monitor_11000" internal_operation_key="primary-rsc:1_monitor_11000" on_node="node2" on_node_uuid="node2">
++        <primitive id="primary-rsc" long-id="primary-rsc:1" class="ocf" provider="pacemaker" type="Stateful"/>
++        <attributes CRM_meta_clone="1" CRM_meta_clone_max="4" CRM_meta_clone_node_max="1" CRM_meta_globally_unique="false" CRM_meta_interval="11000" CRM_meta_master_max="1" CRM_meta_master_node_max="1" CRM_meta_name="monitor" CRM_meta_notify="false" CRM_meta_on_node="node2" CRM_meta_on_node_uuid="node2" CRM_meta_promoted_max="1" CRM_meta_promoted_node_max="1" CRM_meta_role="Unpromoted" CRM_meta_timeout="20000" />
++      </rsc_op>
++    </action_set>
++    <inputs/>
++  </synapse>
++  <synapse id="2">
++    <action_set>
++      <rsc_op id="11" operation="monitor" operation_key="primary-rsc_monitor_11000" internal_operation_key="primary-rsc:2_monitor_11000" on_node="node3" on_node_uuid="node3">
++        <primitive id="primary-rsc" long-id="primary-rsc:2" class="ocf" provider="pacemaker" type="Stateful"/>
++        <attributes CRM_meta_clone="2" CRM_meta_clone_max="4" CRM_meta_clone_node_max="1" CRM_meta_globally_unique="false" CRM_meta_interval="11000" CRM_meta_master_max="1" CRM_meta_master_node_max="1" CRM_meta_name="monitor" CRM_meta_notify="false" CRM_meta_on_node="node3" CRM_meta_on_node_uuid="node3" CRM_meta_promoted_max="1" CRM_meta_promoted_node_max="1" CRM_meta_role="Unpromoted" CRM_meta_timeout="20000" />
++      </rsc_op>
++    </action_set>
++    <inputs/>
++  </synapse>
++  <synapse id="3">
++    <action_set>
++      <rsc_op id="14" operation="monitor" operation_key="primary-rsc_monitor_11000" internal_operation_key="primary-rsc:3_monitor_11000" on_node="node4" on_node_uuid="node4">
++        <primitive id="primary-rsc" long-id="primary-rsc:3" class="ocf" provider="pacemaker" type="Stateful"/>
++        <attributes CRM_meta_clone="3" CRM_meta_clone_max="4" CRM_meta_clone_node_max="1" CRM_meta_globally_unique="false" CRM_meta_interval="11000" CRM_meta_master_max="1" CRM_meta_master_node_max="1" CRM_meta_name="monitor" CRM_meta_notify="false" CRM_meta_on_node="node4" CRM_meta_on_node_uuid="node4" CRM_meta_promoted_max="1" CRM_meta_promoted_node_max="1" CRM_meta_role="Unpromoted" CRM_meta_timeout="20000" />
++      </rsc_op>
++    </action_set>
++    <inputs/>
++  </synapse>
++  <synapse id="4">
++    <action_set>
++      <rsc_op id="26" operation="monitor" operation_key="dependent-rsc_monitor_10000" internal_operation_key="dependent-rsc:0_monitor_10000" on_node="node1" on_node_uuid="node1">
++        <primitive id="dependent-rsc" long-id="dependent-rsc:0" class="ocf" provider="pacemaker" type="Stateful"/>
++        <attributes CRM_meta_clone="0" CRM_meta_clone_max="4" CRM_meta_clone_node_max="1" CRM_meta_globally_unique="false" CRM_meta_interval="10000" CRM_meta_master_max="2" CRM_meta_master_node_max="1" CRM_meta_name="monitor" CRM_meta_notify="false" CRM_meta_on_node="node1" CRM_meta_on_node_uuid="node1" CRM_meta_op_target_rc="8" CRM_meta_promoted_max="2" CRM_meta_promoted_node_max="1" CRM_meta_role="Promoted" CRM_meta_timeout="20000" />
++      </rsc_op>
++    </action_set>
++    <inputs>
++      <trigger>
++        <rsc_op id="25" operation="promote" operation_key="dependent-rsc_promote_0" internal_operation_key="dependent-rsc:0_promote_0" on_node="node1" on_node_uuid="node1"/>
++      </trigger>
++    </inputs>
++  </synapse>
++  <synapse id="5">
++    <action_set>
++      <rsc_op id="25" operation="promote" operation_key="dependent-rsc_promote_0" internal_operation_key="dependent-rsc:0_promote_0" on_node="node1" on_node_uuid="node1">
++        <primitive id="dependent-rsc" long-id="dependent-rsc:0" class="ocf" provider="pacemaker" type="Stateful"/>
++        <attributes CRM_meta_clone="0" CRM_meta_clone_max="4" CRM_meta_clone_node_max="1" CRM_meta_globally_unique="false" CRM_meta_master_max="2" CRM_meta_master_node_max="1" CRM_meta_notify="false" CRM_meta_on_node="node1" CRM_meta_on_node_uuid="node1" CRM_meta_promoted_max="2" CRM_meta_promoted_node_max="1" CRM_meta_timeout="20000" />
++      </rsc_op>
++    </action_set>
++    <inputs>
++      <trigger>
++        <pseudo_event id="42" operation="promote" operation_key="dependent-clone_promote_0"/>
++      </trigger>
++    </inputs>
++  </synapse>
++  <synapse id="6">
++    <action_set>
++      <rsc_op id="30" operation="monitor" operation_key="dependent-rsc_monitor_10000" internal_operation_key="dependent-rsc:1_monitor_10000" on_node="node2" on_node_uuid="node2">
++        <primitive id="dependent-rsc" long-id="dependent-rsc:1" class="ocf" provider="pacemaker" type="Stateful"/>
++        <attributes CRM_meta_clone="1" CRM_meta_clone_max="4" CRM_meta_clone_node_max="1" CRM_meta_globally_unique="false" CRM_meta_interval="10000" CRM_meta_master_max="2" CRM_meta_master_node_max="1" CRM_meta_name="monitor" CRM_meta_notify="false" CRM_meta_on_node="node2" CRM_meta_on_node_uuid="node2" CRM_meta_op_target_rc="8" CRM_meta_promoted_max="2" CRM_meta_promoted_node_max="1" CRM_meta_role="Promoted" CRM_meta_timeout="20000" />
++      </rsc_op>
++    </action_set>
++    <inputs>
++      <trigger>
++        <rsc_op id="29" operation="promote" operation_key="dependent-rsc_promote_0" internal_operation_key="dependent-rsc:1_promote_0" on_node="node2" on_node_uuid="node2"/>
++      </trigger>
++    </inputs>
++  </synapse>
++  <synapse id="7">
++    <action_set>
++      <rsc_op id="29" operation="promote" operation_key="dependent-rsc_promote_0" internal_operation_key="dependent-rsc:1_promote_0" on_node="node2" on_node_uuid="node2">
++        <primitive id="dependent-rsc" long-id="dependent-rsc:1" class="ocf" provider="pacemaker" type="Stateful"/>
++        <attributes CRM_meta_clone="1" CRM_meta_clone_max="4" CRM_meta_clone_node_max="1" CRM_meta_globally_unique="false" CRM_meta_master_max="2" CRM_meta_master_node_max="1" CRM_meta_notify="false" CRM_meta_on_node="node2" CRM_meta_on_node_uuid="node2" CRM_meta_promoted_max="2" CRM_meta_promoted_node_max="1" CRM_meta_timeout="20000" />
++      </rsc_op>
++    </action_set>
++    <inputs>
++      <trigger>
++        <pseudo_event id="42" operation="promote" operation_key="dependent-clone_promote_0"/>
++      </trigger>
++    </inputs>
++  </synapse>
++  <synapse id="8">
++    <action_set>
++      <rsc_op id="34" operation="monitor" operation_key="dependent-rsc_monitor_11000" internal_operation_key="dependent-rsc:2_monitor_11000" on_node="node3" on_node_uuid="node3">
++        <primitive id="dependent-rsc" long-id="dependent-rsc:2" class="ocf" provider="pacemaker" type="Stateful"/>
++        <attributes CRM_meta_clone="2" CRM_meta_clone_max="4" CRM_meta_clone_node_max="1" CRM_meta_globally_unique="false" CRM_meta_interval="11000" CRM_meta_master_max="2" CRM_meta_master_node_max="1" CRM_meta_name="monitor" CRM_meta_notify="false" CRM_meta_on_node="node3" CRM_meta_on_node_uuid="node3" CRM_meta_promoted_max="2" CRM_meta_promoted_node_max="1" CRM_meta_role="Unpromoted" CRM_meta_timeout="20000" />
++      </rsc_op>
++    </action_set>
++    <inputs>
++      <trigger>
++        <rsc_op id="32" operation="demote" operation_key="dependent-rsc_demote_0" internal_operation_key="dependent-rsc:2_demote_0" on_node="node3" on_node_uuid="node3"/>
++      </trigger>
++    </inputs>
++  </synapse>
++  <synapse id="9">
++    <action_set>
++      <rsc_op id="32" operation="demote" operation_key="dependent-rsc_demote_0" internal_operation_key="dependent-rsc:2_demote_0" on_node="node3" on_node_uuid="node3">
++        <primitive id="dependent-rsc" long-id="dependent-rsc:2" class="ocf" provider="pacemaker" type="Stateful"/>
++        <attributes CRM_meta_clone="2" CRM_meta_clone_max="4" CRM_meta_clone_node_max="1" CRM_meta_globally_unique="false" CRM_meta_master_max="2" CRM_meta_master_node_max="1" CRM_meta_notify="false" CRM_meta_on_node="node3" CRM_meta_on_node_uuid="node3" CRM_meta_promoted_max="2" CRM_meta_promoted_node_max="1" CRM_meta_timeout="20000" />
++      </rsc_op>
++    </action_set>
++    <inputs>
++      <trigger>
++        <pseudo_event id="44" operation="demote" operation_key="dependent-clone_demote_0"/>
++      </trigger>
++    </inputs>
++  </synapse>
++  <synapse id="10">
++    <action_set>
++      <rsc_op id="37" operation="monitor" operation_key="dependent-rsc_monitor_11000" internal_operation_key="dependent-rsc:3_monitor_11000" on_node="node4" on_node_uuid="node4">
++        <primitive id="dependent-rsc" long-id="dependent-rsc:3" class="ocf" provider="pacemaker" type="Stateful"/>
++        <attributes CRM_meta_clone="3" CRM_meta_clone_max="4" CRM_meta_clone_node_max="1" CRM_meta_globally_unique="false" CRM_meta_interval="11000" CRM_meta_master_max="2" CRM_meta_master_node_max="1" CRM_meta_name="monitor" CRM_meta_notify="false" CRM_meta_on_node="node4" CRM_meta_on_node_uuid="node4" CRM_meta_promoted_max="2" CRM_meta_promoted_node_max="1" CRM_meta_role="Unpromoted" CRM_meta_timeout="20000" />
++      </rsc_op>
++    </action_set>
++    <inputs/>
++  </synapse>
++  <synapse id="11" priority="1000000">
++    <action_set>
++      <pseudo_event id="45" operation="demoted" operation_key="dependent-clone_demoted_0">
++        <attributes CRM_meta_clone_max="4" CRM_meta_clone_node_max="1" CRM_meta_globally_unique="false" CRM_meta_master_max="2" CRM_meta_master_node_max="1" CRM_meta_notify="false" CRM_meta_promoted_max="2" CRM_meta_promoted_node_max="1" CRM_meta_timeout="20000" />
++      </pseudo_event>
++    </action_set>
++    <inputs>
++      <trigger>
++        <rsc_op id="32" operation="demote" operation_key="dependent-rsc_demote_0" internal_operation_key="dependent-rsc:2_demote_0" on_node="node3" on_node_uuid="node3"/>
++      </trigger>
++      <trigger>
++        <pseudo_event id="44" operation="demote" operation_key="dependent-clone_demote_0"/>
++      </trigger>
++    </inputs>
++  </synapse>
++  <synapse id="12">
++    <action_set>
++      <pseudo_event id="44" operation="demote" operation_key="dependent-clone_demote_0">
++        <attributes CRM_meta_clone_max="4" CRM_meta_clone_node_max="1" CRM_meta_globally_unique="false" CRM_meta_master_max="2" CRM_meta_master_node_max="1" CRM_meta_notify="false" CRM_meta_promoted_max="2" CRM_meta_promoted_node_max="1" CRM_meta_timeout="20000" />
++      </pseudo_event>
++    </action_set>
++    <inputs/>
++  </synapse>
++  <synapse id="13" priority="1000000">
++    <action_set>
++      <pseudo_event id="43" operation="promoted" operation_key="dependent-clone_promoted_0">
++        <attributes CRM_meta_clone_max="4" CRM_meta_clone_node_max="1" CRM_meta_globally_unique="false" CRM_meta_master_max="2" CRM_meta_master_node_max="1" CRM_meta_notify="false" CRM_meta_promoted_max="2" CRM_meta_promoted_node_max="1" CRM_meta_timeout="20000" />
++      </pseudo_event>
++    </action_set>
++    <inputs>
++      <trigger>
++        <rsc_op id="25" operation="promote" operation_key="dependent-rsc_promote_0" internal_operation_key="dependent-rsc:0_promote_0" on_node="node1" on_node_uuid="node1"/>
++      </trigger>
++      <trigger>
++        <rsc_op id="29" operation="promote" operation_key="dependent-rsc_promote_0" internal_operation_key="dependent-rsc:1_promote_0" on_node="node2" on_node_uuid="node2"/>
++      </trigger>
++    </inputs>
++  </synapse>
++  <synapse id="14">
++    <action_set>
++      <pseudo_event id="42" operation="promote" operation_key="dependent-clone_promote_0">
++        <attributes CRM_meta_clone_max="4" CRM_meta_clone_node_max="1" CRM_meta_globally_unique="false" CRM_meta_master_max="2" CRM_meta_master_node_max="1" CRM_meta_notify="false" CRM_meta_promoted_max="2" CRM_meta_promoted_node_max="1" CRM_meta_timeout="20000" />
++      </pseudo_event>
++    </action_set>
++    <inputs>
++      <trigger>
++        <pseudo_event id="45" operation="demoted" operation_key="dependent-clone_demoted_0"/>
++      </trigger>
++    </inputs>
++  </synapse>
++</transition_graph>
+diff --git a/cts/scheduler/scores/promotable-colocation-with-node-attribute.scores b/cts/scheduler/scores/promotable-colocation-with-node-attribute.scores
+new file mode 100644
+index 0000000..023ee77
+--- /dev/null
++++ b/cts/scheduler/scores/promotable-colocation-with-node-attribute.scores
+@@ -0,0 +1,81 @@
++
++dependent-rsc:0 promotion score on node1: INFINITY
++dependent-rsc:1 promotion score on node2: INFINITY
++dependent-rsc:2 promotion score on node3: -INFINITY
++dependent-rsc:3 promotion score on node4: -INFINITY
++pcmk__clone_assign: dependent-clone allocation score on node1: 0
++pcmk__clone_assign: dependent-clone allocation score on node2: 0
++pcmk__clone_assign: dependent-clone allocation score on node3: 0
++pcmk__clone_assign: dependent-clone allocation score on node4: 0
++pcmk__clone_assign: dependent-rsc:0 allocation score on node1: 6
++pcmk__clone_assign: dependent-rsc:0 allocation score on node2: 0
++pcmk__clone_assign: dependent-rsc:0 allocation score on node3: 0
++pcmk__clone_assign: dependent-rsc:0 allocation score on node4: 0
++pcmk__clone_assign: dependent-rsc:1 allocation score on node1: 0
++pcmk__clone_assign: dependent-rsc:1 allocation score on node2: 6
++pcmk__clone_assign: dependent-rsc:1 allocation score on node3: 0
++pcmk__clone_assign: dependent-rsc:1 allocation score on node4: 0
++pcmk__clone_assign: dependent-rsc:2 allocation score on node1: 0
++pcmk__clone_assign: dependent-rsc:2 allocation score on node2: 0
++pcmk__clone_assign: dependent-rsc:2 allocation score on node3: 11
++pcmk__clone_assign: dependent-rsc:2 allocation score on node4: 0
++pcmk__clone_assign: dependent-rsc:3 allocation score on node1: 0
++pcmk__clone_assign: dependent-rsc:3 allocation score on node2: 0
++pcmk__clone_assign: dependent-rsc:3 allocation score on node3: 0
++pcmk__clone_assign: dependent-rsc:3 allocation score on node4: 6
++pcmk__clone_assign: primary-clone allocation score on node1: 0
++pcmk__clone_assign: primary-clone allocation score on node2: 0
++pcmk__clone_assign: primary-clone allocation score on node3: 0
++pcmk__clone_assign: primary-clone allocation score on node4: 0
++pcmk__clone_assign: primary-rsc:0 allocation score on node1: 11
++pcmk__clone_assign: primary-rsc:0 allocation score on node2: 0
++pcmk__clone_assign: primary-rsc:0 allocation score on node3: 0
++pcmk__clone_assign: primary-rsc:0 allocation score on node4: 0
++pcmk__clone_assign: primary-rsc:1 allocation score on node1: 0
++pcmk__clone_assign: primary-rsc:1 allocation score on node2: 6
++pcmk__clone_assign: primary-rsc:1 allocation score on node3: 0
++pcmk__clone_assign: primary-rsc:1 allocation score on node4: 0
++pcmk__clone_assign: primary-rsc:2 allocation score on node1: 0
++pcmk__clone_assign: primary-rsc:2 allocation score on node2: 0
++pcmk__clone_assign: primary-rsc:2 allocation score on node3: 6
++pcmk__clone_assign: primary-rsc:2 allocation score on node4: 0
++pcmk__clone_assign: primary-rsc:3 allocation score on node1: 0
++pcmk__clone_assign: primary-rsc:3 allocation score on node2: 0
++pcmk__clone_assign: primary-rsc:3 allocation score on node3: 0
++pcmk__clone_assign: primary-rsc:3 allocation score on node4: 6
++pcmk__primitive_assign: dependent-rsc:0 allocation score on node1: 6
++pcmk__primitive_assign: dependent-rsc:0 allocation score on node2: 0
++pcmk__primitive_assign: dependent-rsc:0 allocation score on node3: -INFINITY
++pcmk__primitive_assign: dependent-rsc:0 allocation score on node4: 0
++pcmk__primitive_assign: dependent-rsc:1 allocation score on node1: -INFINITY
++pcmk__primitive_assign: dependent-rsc:1 allocation score on node2: 6
++pcmk__primitive_assign: dependent-rsc:1 allocation score on node3: -INFINITY
++pcmk__primitive_assign: dependent-rsc:1 allocation score on node4: 0
++pcmk__primitive_assign: dependent-rsc:2 allocation score on node1: 0
++pcmk__primitive_assign: dependent-rsc:2 allocation score on node2: 0
++pcmk__primitive_assign: dependent-rsc:2 allocation score on node3: 11
++pcmk__primitive_assign: dependent-rsc:2 allocation score on node4: 0
++pcmk__primitive_assign: dependent-rsc:3 allocation score on node1: -INFINITY
++pcmk__primitive_assign: dependent-rsc:3 allocation score on node2: -INFINITY
++pcmk__primitive_assign: dependent-rsc:3 allocation score on node3: -INFINITY
++pcmk__primitive_assign: dependent-rsc:3 allocation score on node4: 6
++pcmk__primitive_assign: primary-rsc:0 allocation score on node1: 11
++pcmk__primitive_assign: primary-rsc:0 allocation score on node2: 0
++pcmk__primitive_assign: primary-rsc:0 allocation score on node3: 0
++pcmk__primitive_assign: primary-rsc:0 allocation score on node4: 0
++pcmk__primitive_assign: primary-rsc:1 allocation score on node1: -INFINITY
++pcmk__primitive_assign: primary-rsc:1 allocation score on node2: 6
++pcmk__primitive_assign: primary-rsc:1 allocation score on node3: 0
++pcmk__primitive_assign: primary-rsc:1 allocation score on node4: 0
++pcmk__primitive_assign: primary-rsc:2 allocation score on node1: -INFINITY
++pcmk__primitive_assign: primary-rsc:2 allocation score on node2: -INFINITY
++pcmk__primitive_assign: primary-rsc:2 allocation score on node3: 6
++pcmk__primitive_assign: primary-rsc:2 allocation score on node4: 0
++pcmk__primitive_assign: primary-rsc:3 allocation score on node1: -INFINITY
++pcmk__primitive_assign: primary-rsc:3 allocation score on node2: -INFINITY
++pcmk__primitive_assign: primary-rsc:3 allocation score on node3: -INFINITY
++pcmk__primitive_assign: primary-rsc:3 allocation score on node4: 6
++primary-rsc:0 promotion score on node1: 10
++primary-rsc:1 promotion score on node2: 5
++primary-rsc:2 promotion score on node3: 5
++primary-rsc:3 promotion score on node4: 5
+diff --git a/cts/scheduler/summary/promotable-colocation-with-node-attribute.summary b/cts/scheduler/summary/promotable-colocation-with-node-attribute.summary
+new file mode 100644
+index 0000000..30e81c8
+--- /dev/null
++++ b/cts/scheduler/summary/promotable-colocation-with-node-attribute.summary
+@@ -0,0 +1,45 @@
++Current cluster status:
++  * Node List:
++    * Online: [ node1 node2 node3 node4 ]
++
++  * Full List of Resources:
++    * Clone Set: primary-clone [primary-rsc] (promotable):
++      * Promoted: [ node1 ]
++      * Unpromoted: [ node2 node3 node4 ]
++    * Clone Set: dependent-clone [dependent-rsc] (promotable):
++      * Promoted: [ node3 ]
++      * Unpromoted: [ node1 node2 node4 ]
++
++Transition Summary:
++  * Promote    dependent-rsc:0     ( Unpromoted -> Promoted node1 )
++  * Promote    dependent-rsc:1     ( Unpromoted -> Promoted node2 )
++  * Demote     dependent-rsc:2     ( Promoted -> Unpromoted node3 )
++
++Executing Cluster Transition:
++  * Resource action: primary-rsc     monitor=10000 on node1
++  * Resource action: primary-rsc     monitor=11000 on node2
++  * Resource action: primary-rsc     monitor=11000 on node3
++  * Resource action: primary-rsc     monitor=11000 on node4
++  * Resource action: dependent-rsc   monitor=11000 on node4
++  * Pseudo action:   dependent-clone_demote_0
++  * Resource action: dependent-rsc   demote on node3
++  * Pseudo action:   dependent-clone_demoted_0
++  * Pseudo action:   dependent-clone_promote_0
++  * Resource action: dependent-rsc   promote on node1
++  * Resource action: dependent-rsc   promote on node2
++  * Resource action: dependent-rsc   monitor=11000 on node3
++  * Pseudo action:   dependent-clone_promoted_0
++  * Resource action: dependent-rsc   monitor=10000 on node1
++  * Resource action: dependent-rsc   monitor=10000 on node2
++
++Revised Cluster Status:
++  * Node List:
++    * Online: [ node1 node2 node3 node4 ]
++
++  * Full List of Resources:
++    * Clone Set: primary-clone [primary-rsc] (promotable):
++      * Promoted: [ node1 ]
++      * Unpromoted: [ node2 node3 node4 ]
++    * Clone Set: dependent-clone [dependent-rsc] (promotable):
++      * Promoted: [ node1 node2 ]
++      * Unpromoted: [ node3 node4 ]
+diff --git a/cts/scheduler/xml/promotable-colocation-with-node-attribute.xml b/cts/scheduler/xml/promotable-colocation-with-node-attribute.xml
+new file mode 100644
+index 0000000..5b4ab10
+--- /dev/null
++++ b/cts/scheduler/xml/promotable-colocation-with-node-attribute.xml
+@@ -0,0 +1,155 @@
++<cib crm_feature_set="3.19.7" validate-with="pacemaker-3.10" epoch="1" num_updates="0" admin_epoch="0" cib-last-written="Mon Jan 1 12:00:00 2024" have-quorum="1" dc-uuid="node1">
++  <configuration>
++    <crm_config>
++      <cluster_property_set id="cib-bootstrap-options">
++        <nvpair id="cib-bootstrap-options-dc-version" name="dc-version" value="2.1.8"/>
++        <nvpair id="cib-bootstrap-options-cluster-infrastructure" name="cluster-infrastructure" value="corosync"/>
++        <nvpair id="cib-bootstrap-options-stonith-enabled" name="stonith-enabled" value="false"/>
++      </cluster_property_set>
++    </crm_config>
++    <nodes>
++      <!-- Site A nodes -->
++      <node id="node1" uname="node1">
++        <instance_attributes id="node1-attrs">
++          <nvpair id="node1-site" name="site" value="siteA"/>
++        </instance_attributes>
++      </node>
++      <node id="node2" uname="node2">
++        <instance_attributes id="node2-attrs">
++          <nvpair id="node2-site" name="site" value="siteA"/>
++        </instance_attributes>
++      </node>
++      <!-- Site B nodes -->
++      <node id="node3" uname="node3">
++        <instance_attributes id="node3-attrs">
++          <nvpair id="node3-site" name="site" value="siteB"/>
++        </instance_attributes>
++      </node>
++      <node id="node4" uname="node4">
++        <instance_attributes id="node4-attrs">
++          <nvpair id="node4-site" name="site" value="siteB"/>
++        </instance_attributes>
++      </node>
++    </nodes>
++    <resources>
++      <!-- Primary promotable clone -->
++      <clone id="primary-clone">
++        <meta_attributes id="primary-clone-meta">
++          <nvpair id="primary-clone-promotable" name="promotable" value="true"/>
++          <nvpair id="primary-clone-promoted-max" name="promoted-max" value="1"/>
++          <nvpair id="primary-clone-clone-max" name="clone-max" value="4"/>
++        </meta_attributes>
++        <primitive id="primary-rsc" class="ocf" provider="pacemaker" type="Stateful">
++          <operations>
++            <op id="primary-rsc-monitor-promoted" name="monitor" interval="10s" role="Promoted"/>
++            <op id="primary-rsc-monitor-unpromoted" name="monitor" interval="11s" role="Unpromoted"/>
++          </operations>
++        </primitive>
++      </clone>
++      <!-- Dependent promotable clone -->
++      <clone id="dependent-clone">
++        <meta_attributes id="dependent-clone-meta">
++          <nvpair id="dependent-clone-promotable" name="promotable" value="true"/>
++          <nvpair id="dependent-clone-promoted-max" name="promoted-max" value="2"/>
++          <nvpair id="dependent-clone-clone-max" name="clone-max" value="4"/>
++        </meta_attributes>
++        <primitive id="dependent-rsc" class="ocf" provider="pacemaker" type="Stateful">
++          <operations>
++            <op id="dependent-rsc-monitor-promoted" name="monitor" interval="10s" role="Promoted"/>
++            <op id="dependent-rsc-monitor-unpromoted" name="monitor" interval="11s" role="Unpromoted"/>
++          </operations>
++        </primitive>
++      </clone>
++    </resources>
++    <constraints>
++      <!--
++        This constraint should ensure that dependent-clone is promoted
++        on all nodes in the same site as where primary-clone is promoted.
++        With the fix, if primary-clone is promoted on nodes in siteA,
++        dependent-clone should also be promoted on nodes in siteA.
++      -->
++      <rsc_colocation id="coloc-dependent-with-primary-promoted"
++                      rsc="dependent-clone"
++                      rsc-role="Promoted"
++                      with-rsc="primary-clone"
++                      with-rsc-role="Promoted"
++                      node-attribute="site"
++                      score="INFINITY"/>
++    </constraints>
++  </configuration>
++  <status>
++    <!-- All nodes are online and clean -->
++    <node_state id="node1" uname="node1" in_ccm="true" crmd="online" join="member" expected="member">
++      <transient_attributes id="node1-transient">
++        <instance_attributes id="node1-transient-attrs">
++          <nvpair id="node1-promoted-primary-rsc" name="master-primary-rsc" value="10"/>
++          <nvpair id="node1-promoted-dependent-rsc" name="master-dependent-rsc" value="5"/>
++        </instance_attributes>
++      </transient_attributes>
++      <lrm id="node1-lrm">
++        <lrm_resources>
++          <lrm_resource id="primary-rsc" type="Stateful" class="ocf" provider="pacemaker">
++            <lrm_rsc_op id="primary-rsc_last_0" operation_key="primary-rsc_promote_0" operation="promote" crm-debug-origin="do_update_resource" transition-key="1:0:0:test" on_node="node1" call-id="10" rc-code="0" op-status="0" interval="0" last-rc-change="1609459200" exec-time="100" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++          </lrm_resource>
++          <lrm_resource id="dependent-rsc" type="Stateful" class="ocf" provider="pacemaker">
++            <lrm_rsc_op id="dependent-rsc_last_0" operation_key="dependent-rsc_start_0" operation="start" crm-debug-origin="do_update_resource" transition-key="1:0:0:test" on_node="node1" call-id="10" rc-code="0" op-status="0" interval="0" last-rc-change="1609459200" exec-time="100" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++          </lrm_resource>
++        </lrm_resources>
++      </lrm>
++    </node_state>
++    <node_state id="node2" uname="node2" in_ccm="true" crmd="online" join="member" expected="member">
++      <transient_attributes id="node2-transient">
++        <instance_attributes id="node2-transient-attrs">
++          <nvpair id="node2-promoted-primary-rsc" name="master-primary-rsc" value="5"/>
++          <nvpair id="node2-promoted-dependent-rsc" name="master-dependent-rsc" value="5"/>
++        </instance_attributes>
++      </transient_attributes>
++      <lrm id="node2-lrm">
++        <lrm_resources>
++          <lrm_resource id="primary-rsc" type="Stateful" class="ocf" provider="pacemaker">
++            <lrm_rsc_op id="primary-rsc_last_0" operation_key="primary-rsc_start_0" operation="start" crm-debug-origin="do_update_resource" transition-key="1:0:0:test" on_node="node2" call-id="10" rc-code="0" op-status="0" interval="0" last-rc-change="1609459200" exec-time="100" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++          </lrm_resource>
++          <lrm_resource id="dependent-rsc" type="Stateful" class="ocf" provider="pacemaker">
++            <lrm_rsc_op id="dependent-rsc_last_0" operation_key="dependent-rsc_start_0" operation="start" crm-debug-origin="do_update_resource" transition-key="1:0:0:test" on_node="node2" call-id="10" rc-code="0" op-status="0" interval="0" last-rc-change="1609459200" exec-time="100" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++          </lrm_resource>
++        </lrm_resources>
++      </lrm>
++    </node_state>
++    <node_state id="node3" uname="node3" in_ccm="true" crmd="online" join="member" expected="member">
++      <transient_attributes id="node3-transient">
++        <instance_attributes id="node3-transient-attrs">
++          <nvpair id="node3-promoted-primary-rsc" name="master-primary-rsc" value="5"/>
++          <nvpair id="node3-promoted-dependent-rsc" name="master-dependent-rsc" value="10"/>
++        </instance_attributes>
++      </transient_attributes>
++      <lrm id="node3-lrm">
++        <lrm_resources>
++          <lrm_resource id="primary-rsc" type="Stateful" class="ocf" provider="pacemaker">
++            <lrm_rsc_op id="primary-rsc_last_0" operation_key="primary-rsc_start_0" operation="start" crm-debug-origin="do_update_resource" transition-key="1:0:0:test" on_node="node3" call-id="10" rc-code="0" op-status="0" interval="0" last-rc-change="1609459200" exec-time="100" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++          </lrm_resource>
++          <lrm_resource id="dependent-rsc" type="Stateful" class="ocf" provider="pacemaker">
++            <lrm_rsc_op id="dependent-rsc_last_0" operation_key="dependent-rsc_promote_0" operation="promote" crm-debug-origin="do_update_resource" transition-key="1:0:0:test" on_node="node3" call-id="10" rc-code="0" op-status="0" interval="0" last-rc-change="1609459200" exec-time="100" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++          </lrm_resource>
++        </lrm_resources>
++      </lrm>
++    </node_state>
++    <node_state id="node4" uname="node4" in_ccm="true" crmd="online" join="member" expected="member">
++      <transient_attributes id="node4-transient">
++        <instance_attributes id="node4-transient-attrs">
++          <nvpair id="node4-promoted-primary-rsc" name="master-primary-rsc" value="5"/>
++          <nvpair id="node4-promoted-dependent-rsc" name="master-dependent-rsc" value="5"/>
++        </instance_attributes>
++      </transient_attributes>
++      <lrm id="node4-lrm">
++        <lrm_resources>
++          <lrm_resource id="primary-rsc" type="Stateful" class="ocf" provider="pacemaker">
++            <lrm_rsc_op id="primary-rsc_last_0" operation_key="primary-rsc_start_0" operation="start" crm-debug-origin="do_update_resource" transition-key="1:0:0:test" on_node="node4" call-id="10" rc-code="0" op-status="0" interval="0" last-rc-change="1609459200" exec-time="100" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++          </lrm_resource>
++          <lrm_resource id="dependent-rsc" type="Stateful" class="ocf" provider="pacemaker">
++            <lrm_rsc_op id="dependent-rsc_last_0" operation_key="dependent-rsc_start_0" operation="start" crm-debug-origin="do_update_resource" transition-key="1:0:0:test" on_node="node4" call-id="10" rc-code="0" op-status="0" interval="0" last-rc-change="1609459200" exec-time="100" queue-time="0" op-digest="f2317cad3d54cec5d7d7aa7d0bf35cf8"/>
++          </lrm_resource>
++        </lrm_resources>
++      </lrm>
++    </node_state>
++  </status>
++</cib>
+-- 
+2.47.1
+
+From 31d5785ffc68acb54af76bc55f732117f77ef4b9 Mon Sep 17 00:00:00 2001
+From: Klaus Wenninger <klaus.wenninger@aon.at>
+Date: Tue, 7 Oct 2025 05:11:44 +0200
+Subject: [PATCH 2/2] Fix: scheduler: promoted state with promoted state with
+ attribute
+
+Previously attribute based colocation didn't adhere
+the attribute with promoted state with promoted	state.
+---
+ lib/pacemaker/libpacemaker_private.h  |  5 +-
+ lib/pacemaker/pcmk_sched_bundle.c     |  2 +-
+ lib/pacemaker/pcmk_sched_clone.c      |  2 +-
+ lib/pacemaker/pcmk_sched_instances.c  | 76 ++++++++++++++++++---------
+ lib/pacemaker/pcmk_sched_probes.c     |  2 +-
+ lib/pacemaker/pcmk_sched_promotable.c |  3 +-
+ 6 files changed, 60 insertions(+), 30 deletions(-)
+
+diff --git a/lib/pacemaker/libpacemaker_private.h b/lib/pacemaker/libpacemaker_private.h
+index 58435a6..fadfc8b 100644
+--- a/lib/pacemaker/libpacemaker_private.h
++++ b/lib/pacemaker/libpacemaker_private.h
+@@ -941,13 +941,14 @@ void pcmk__create_instance_actions(pcmk_resource_t *rsc, GList *instances);
+ G_GNUC_INTERNAL
+ bool pcmk__instance_matches(const pcmk_resource_t *instance,
+                             const pcmk_node_t *node, enum rsc_role_e role,
+-                            bool current);
++                            bool current, const char *node_attribute);
+ 
+ G_GNUC_INTERNAL
+ pcmk_resource_t *pcmk__find_compatible_instance(const pcmk_resource_t *match_rsc,
+                                                 const pcmk_resource_t *rsc,
+                                                 enum rsc_role_e role,
+-                                                bool current);
++                                                bool current,
++                                                const char *node_attribute);
+ 
+ G_GNUC_INTERNAL
+ uint32_t pcmk__instance_update_ordered_actions(pcmk_action_t *first,
+diff --git a/lib/pacemaker/pcmk_sched_bundle.c b/lib/pacemaker/pcmk_sched_bundle.c
+index 14e7be5..2d7e879 100644
+--- a/lib/pacemaker/pcmk_sched_bundle.c
++++ b/lib/pacemaker/pcmk_sched_bundle.c
+@@ -383,7 +383,7 @@ match_replica_container(const pcmk__bundle_replica_t *replica, void *user_data)
+     struct match_data *match_data = user_data;
+ 
+     if (pcmk__instance_matches(replica->container, match_data->node,
+-                               pcmk_role_unknown, false)) {
++                               pcmk_role_unknown, false, NULL)) {
+         match_data->container = replica->container;
+         return false; // Match found, don't bother searching further replicas
+     }
+diff --git a/lib/pacemaker/pcmk_sched_clone.c b/lib/pacemaker/pcmk_sched_clone.c
+index 4f86621..99fa8b2 100644
+--- a/lib/pacemaker/pcmk_sched_clone.c
++++ b/lib/pacemaker/pcmk_sched_clone.c
+@@ -301,7 +301,7 @@ pcmk__clone_apply_coloc_score(pcmk_resource_t *dependent,
+ 
+         primary_instance = pcmk__find_compatible_instance(dependent, primary,
+                                                           pcmk_role_unknown,
+-                                                          false);
++                                                          false, NULL);
+         if (primary_instance != NULL) {
+             pcmk__rsc_debug(primary, "Interleaving %s with %s",
+                             dependent->id, primary_instance->id);
+diff --git a/lib/pacemaker/pcmk_sched_instances.c b/lib/pacemaker/pcmk_sched_instances.c
+index f2bc1a4..5344234 100644
+--- a/lib/pacemaker/pcmk_sched_instances.c
++++ b/lib/pacemaker/pcmk_sched_instances.c
+@@ -1073,18 +1073,22 @@ free_instance_list(const pcmk_resource_t *rsc, GList *list)
+  * \internal
+  * \brief Check whether an instance is compatible with a role and node
+  *
+- * \param[in] instance  Clone instance or bundle replica container
+- * \param[in] node      Instance must match this node
+- * \param[in] role      If not pcmk_role_unknown, instance must match this role
+- * \param[in] current   If true, compare instance's original node and role,
+- *                      otherwise compare assigned next node and role
++ * \param[in] instance       Clone instance or bundle replica container
++ * \param[in] node           Instance must match this node
++ * \param[in] role           If not pcmk_role_unknown, instance must match this role
++ * \param[in] current        If true, compare instance's original node and role,
++ *                           otherwise compare assigned next node and role
++ * \param[in] node_attribute If not NULL, instance's node must have the same value
++ *                           for this attribute as \p node (instead of requiring
++ *                           the exact same node)
+  *
+  * \return true if \p instance is compatible with \p node and \p role,
+  *         otherwise false
+  */
+ bool
+ pcmk__instance_matches(const pcmk_resource_t *instance, const pcmk_node_t *node,
+-                       enum rsc_role_e role, bool current)
++                       enum rsc_role_e role, bool current,
++                       const char *node_attribute)
+ {
+     pcmk_node_t *instance_node = NULL;
+ 
+@@ -1117,7 +1121,25 @@ pcmk__instance_matches(const pcmk_resource_t *instance, const pcmk_node_t *node,
+         return false;
+     }
+ 
+-    if (!pcmk__same_node(instance_node, node)) {
++    if (node_attribute != NULL) {
++        // Compare by node attribute value instead of node identity
++        const char *instance_value = pcmk__colocation_node_attr(instance_node,
++                                                                node_attribute,
++                                                                instance);
++        const char *target_value = pcmk__colocation_node_attr(node,
++                                                              node_attribute,
++                                                              instance);
++
++        if (!pcmk__str_eq(instance_value, target_value, pcmk__str_casei)) {
++            pcmk__rsc_trace(instance,
++                            "%s is not a compatible instance "
++                            "(instance has %s=%s, target node has %s=%s)",
++                            instance->id, node_attribute,
++                            pcmk__s(instance_value, "<none>"),
++                            node_attribute, pcmk__s(target_value, "<none>"));
++            return false;
++        }
++    } else if (!pcmk__same_node(instance_node, node)) {
+         pcmk__rsc_trace(instance,
+                         "%s is not a compatible instance "
+                         "(assigned to %s not %s)",
+@@ -1136,12 +1158,14 @@ pcmk__instance_matches(const pcmk_resource_t *instance, const pcmk_node_t *node,
+  * \internal
+  * \brief Find an instance that matches a given resource by node and role
+  *
+- * \param[in] match_rsc  Resource that instance must match (for logging only)
+- * \param[in] rsc        Clone or bundle resource to check for matching instance
+- * \param[in] node       Instance must match this node
+- * \param[in] role       If not pcmk_role_unknown, instance must match this role
+- * \param[in] current    If true, compare instance's original node and role,
+- *                       otherwise compare assigned next node and role
++ * \param[in] match_rsc      Resource that instance must match (for logging only)
++ * \param[in] rsc            Clone or bundle resource to check for matching instance
++ * \param[in] node           Instance must match this node
++ * \param[in] role           If not pcmk_role_unknown, instance must match this role
++ * \param[in] current        If true, compare instance's original node and role,
++ *                           otherwise compare assigned next node and role
++ * \param[in] node_attribute If not NULL, match instances by this node attribute
++ *                           instead of by node identity
+  *
+  * \return \p rsc instance matching \p node and \p role if any, otherwise NULL
+  */
+@@ -1149,7 +1173,7 @@ static pcmk_resource_t *
+ find_compatible_instance_on_node(const pcmk_resource_t *match_rsc,
+                                  const pcmk_resource_t *rsc,
+                                  const pcmk_node_t *node, enum rsc_role_e role,
+-                                 bool current)
++                                 bool current, const char *node_attribute)
+ {
+     GList *instances = NULL;
+ 
+@@ -1157,7 +1181,8 @@ find_compatible_instance_on_node(const pcmk_resource_t *match_rsc,
+     for (GList *iter = instances; iter != NULL; iter = iter->next) {
+         pcmk_resource_t *instance = (pcmk_resource_t *) iter->data;
+ 
+-        if (pcmk__instance_matches(instance, node, role, current)) {
++        if (pcmk__instance_matches(instance, node, role, current,
++                                   node_attribute)) {
+             pcmk__rsc_trace(match_rsc,
+                             "Found %s %s instance %s compatible with %s on %s",
+                             display_role(role), rsc->id, instance->id,
+@@ -1179,11 +1204,13 @@ find_compatible_instance_on_node(const pcmk_resource_t *match_rsc,
+  * \internal
+  * \brief Find a clone instance or bundle container compatible with a resource
+  *
+- * \param[in] match_rsc  Resource that instance must match
+- * \param[in] rsc        Clone or bundle resource to check for matching instance
+- * \param[in] role       If not pcmk_role_unknown, instance must match this role
+- * \param[in] current    If true, compare instance's original node and role,
+- *                       otherwise compare assigned next node and role
++ * \param[in] match_rsc      Resource that instance must match
++ * \param[in] rsc            Clone or bundle resource to check for matching instance
++ * \param[in] role           If not pcmk_role_unknown, instance must match this role
++ * \param[in] current        If true, compare instance's original node and role,
++ *                           otherwise compare assigned next node and role
++ * \param[in] node_attribute If not NULL, match instances by this node attribute
++ *                           instead of by node identity
+  *
+  * \return Compatible (by \p role and \p match_rsc location) instance of \p rsc
+  *         if any, otherwise NULL
+@@ -1191,7 +1218,7 @@ find_compatible_instance_on_node(const pcmk_resource_t *match_rsc,
+ pcmk_resource_t *
+ pcmk__find_compatible_instance(const pcmk_resource_t *match_rsc,
+                                const pcmk_resource_t *rsc, enum rsc_role_e role,
+-                               bool current)
++                               bool current, const char *node_attribute)
+ {
+     pcmk_resource_t *instance = NULL;
+     GList *nodes = NULL;
+@@ -1207,7 +1234,7 @@ pcmk__find_compatible_instance(const pcmk_resource_t *match_rsc,
+     node = match_rsc->priv->fns->location(match_rsc, NULL, target);
+     if (node != NULL) {
+         return find_compatible_instance_on_node(match_rsc, rsc, node, role,
+-                                                current);
++                                                current, node_attribute);
+     }
+ 
+     // Otherwise check for an instance matching any of match_rsc's allowed nodes
+@@ -1216,7 +1243,8 @@ pcmk__find_compatible_instance(const pcmk_resource_t *match_rsc,
+          iter = iter->next) {
+         instance = find_compatible_instance_on_node(match_rsc, rsc,
+                                                     (pcmk_node_t *) iter->data,
+-                                                    role, current);
++                                                    role, current,
++                                                    node_attribute);
+     }
+ 
+     if (instance == NULL) {
+@@ -1423,7 +1451,7 @@ update_interleaved_actions(pcmk_action_t *first, pcmk_action_t *then,
+         first_instance = pcmk__find_compatible_instance(then_instance,
+                                                         first->rsc,
+                                                         pcmk_role_unknown,
+-                                                        current);
++                                                        current, NULL);
+ 
+         if (first_instance == NULL) { // No instance can be interleaved
+             if (unassign_if_mandatory(first, then, then_instance, type,
+diff --git a/lib/pacemaker/pcmk_sched_probes.c b/lib/pacemaker/pcmk_sched_probes.c
+index bda90ce..a7d2364 100644
+--- a/lib/pacemaker/pcmk_sched_probes.c
++++ b/lib/pacemaker/pcmk_sched_probes.c
+@@ -614,7 +614,7 @@ add_restart_orderings_for_probe(pcmk_action_t *probe, pcmk_action_t *after)
+             compatible_rsc = pcmk__find_compatible_instance(probe->rsc,
+                                                             after->rsc,
+                                                             pcmk_role_unknown,
+-                                                            false);
++                                                            false, NULL);
+         }
+     }
+ 
+diff --git a/lib/pacemaker/pcmk_sched_promotable.c b/lib/pacemaker/pcmk_sched_promotable.c
+index cdf276f..0da0d8b 100644
+--- a/lib/pacemaker/pcmk_sched_promotable.c
++++ b/lib/pacemaker/pcmk_sched_promotable.c
+@@ -1333,7 +1333,8 @@ pcmk__update_promotable_dependent_priority(const pcmk_resource_t *primary,
+     // Look for a primary instance where dependent will be
+     primary_instance = pcmk__find_compatible_instance(dependent, primary,
+                                                       colocation->primary_role,
+-                                                      false);
++                                                      false,
++                                                      colocation->node_attribute);
+ 
+     if (primary_instance != NULL) {
+         // Add primary instance's priority to dependent's
+-- 
+2.47.1
+

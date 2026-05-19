@@ -1,5 +1,5 @@
 #
-# Copyright 2008-2026 the Pacemaker project contributors
+# Copyright 2008-2025 the Pacemaker project contributors
 #
 # The version control history for this file may have further details.
 #
@@ -41,7 +41,7 @@
 ## can be incremented to build packages reliably considered "newer"
 ## than previously built packages with the same pcmkversion)
 %global pcmkversion 3.0.1
-%global specversion 3
+%global specversion 5
 
 ## Upstream commit (full commit ID, abbreviated commit ID, or tag) to build
 %global commit 9a5e54bae85847c4bb6ed7c7fb06103ebebbc64a
@@ -184,7 +184,7 @@
 Name:          pacemaker
 Summary:       Scalable High-Availability cluster resource manager
 Version:       %{pcmkversion}
-Release:       %{pcmk_release}.1%{?dist}
+Release:       %{pcmk_release}%{?dist}
 License:       GPL-2.0-or-later AND LGPL-2.1-or-later
 Url:           https://www.clusterlabs.org/
 
@@ -201,7 +201,11 @@ Source1:       pacemaker.sysusers
 # upstream commits
 Patch001:      001-econnrefused.patch
 Patch002:      002-corosync.patch
-Patch003:      003-transient_attrs.patch
+Patch003:      003-promotable-follows.patch
+Patch004:      004-crm_resource_wait.patch
+Patch005:      005-ipc_evict.patch
+Patch006:      006-fewer_messages.patch
+Patch007:      007-transient_attrs.patch
 
 Requires:      resource-agents
 Requires:      %{pkgname_pcmk_libs}%{?_isa} = %{version}-%{release}
@@ -793,9 +797,18 @@ exit 0
 %{_datadir}/pkgconfig/pacemaker-schemas.pc
 
 %changelog
-* Mon Jan 19 2026 Chris Lumens <clumens@redhat.com> - 3.0.1-3.1
+* Mon Dec 8 2025 Chris Lumens <clumens@redhat.com> - 3.0.1-5
 - Fix a race condition between daemons when erasing transient attrs
-- Resolves: RHEL-135091
+- Resolves: RHEL-23082
+
+* Thu Nov 13 2025 Chris Lumens <clumens@redhat.com> - 3.0.1-4
+- Fix promoting instances of a cloned resource
+- Handle large timeouts correctly in crm_resource --wait
+- Don't evict IPC clients as long as they're still processing messages
+- Don't overwhelm the FSA queue with repeated CIB queries
+- Resolves: RHEL-120932
+- Resolves: RHEL-86148
+- Resolves: RHEL-114895
 
 * Wed Aug 13 2025 Reid Wahl <nwahl@redhat.com> - 3.0.1-3
 - CTS launches Corosync using systemd if available.
