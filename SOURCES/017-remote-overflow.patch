@@ -1,0 +1,386 @@
+From 2d9c031078a83796dcbe4faa0bad3579c4fcd1c3 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Thu, 14 May 2026 12:57:17 -0400
+Subject: [PATCH 1/5] Med: libcrmcommon: Add sanity checks to
+ localized_remote_header.
+
+These checks are present in the main and 3.0 branches, and they make
+sense here as well.
+---
+ lib/common/remote.c | 52 ++++++++++++++++++++++++++++++++++++++++-----
+ 1 file changed, 47 insertions(+), 5 deletions(-)
+
+diff --git a/lib/common/remote.c b/lib/common/remote.c
+index fe19296..f771f46 100644
+--- a/lib/common/remote.c
++++ b/lib/common/remote.c
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2008-2023 the Pacemaker project contributors
++ * Copyright 2008-2026 the Pacemaker project contributors
+  *
+  * The version control history for this file may have further details.
+  *
+@@ -23,7 +23,7 @@
+ #include <netdb.h>
+ #include <stdlib.h>
+ #include <errno.h>
+-#include <inttypes.h>   // PRIx32
++#include <inttypes.h>   // PRIu32, PRIx32
+ 
+ #include <glib.h>
+ #include <bzlib.h>
+@@ -97,11 +97,18 @@ struct remote_header_v0 {
+ static struct remote_header_v0 *
+ localized_remote_header(pcmk__remote_t *remote)
+ {
+-    struct remote_header_v0 *header = (struct remote_header_v0 *)remote->buffer;
+-    if(remote->buffer_offset < sizeof(struct remote_header_v0)) {
++    struct remote_header_v0 *header = NULL;
++    size_t expected_size = 0;
++
++    if ((remote == NULL) || (remote->buffer == NULL)
++        || (remote->buffer_offset < sizeof(struct remote_header_v0))) {
++
++        // Caller error or we haven't received the full header yet
+         return NULL;
++    }
+ 
+-    } else if(header->endian != ENDIAN_LOCAL) {
++    header = (struct remote_header_v0 *) remote->buffer;
++    if (header->endian != ENDIAN_LOCAL) {
+         uint32_t endian = __swab32(header->endian);
+ 
+         CRM_LOG_ASSERT(endian == ENDIAN_LOCAL);
+@@ -123,6 +130,41 @@ localized_remote_header(pcmk__remote_t *remote)
+         header->payload_uncompressed = __swab32(header->payload_uncompressed);
+     }
+ 
++    // Sanity checks
++    if (header->payload_offset != sizeof(struct remote_header_v0)) {
++        crm_err("Header payload offset %" PRIu32 " does not have expected "
++                "size %zu", header->payload_offset,
++                sizeof(struct remote_header_v0));
++        return NULL;
++    }
++
++    if (header->payload_compressed != 0) {
++        if (header->payload_compressed > (SIZE_MAX - header->payload_offset)) {
++            crm_err("Header compressed size %" PRIu32 " is too large",
++                    header->payload_compressed);
++            return NULL;
++        }
++
++        expected_size = (size_t) header->payload_offset
++                        + header->payload_compressed;
++
++    } else {
++        if (header->payload_uncompressed > (SIZE_MAX - header->payload_offset)) {
++            crm_err("Header uncompressed size %" PRIu32 " is too large",
++                    header->payload_uncompressed);
++            return NULL;
++        }
++
++        expected_size = (size_t) header->payload_offset
++                        + header->payload_uncompressed;
++    }
++
++    if (expected_size != header->size_total) {
++        crm_err("Header total size %" PRIu32 " does not match calculated "
++                "size %zu", header->size_total, expected_size);
++        return NULL;
++    }
++
+     return header;
+ }
+ 
+-- 
+2.53.0
+
+From 43cadbc4ce424a881ec0b3258d65e4f94bda3175 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Thu, 14 May 2026 13:06:57 -0400
+Subject: [PATCH 2/5] High: libcrmcommon: Fix integer overflow in remote
+ message code.
+
+It's possible for a client to send a specifically constructed header
+packet that will cause our size checks in pcmk__remote_message_xml to
+overflow, which could result in crashes (potentially leading to a node
+being fenced) or memory corruption problems.
+
+Such a header would have to indicate that the payload is compressed,
+which nothing in pacemaker is doing.  In fact, we haven't used any of
+the remote message compression code since it was introduced in 2013
+which explains why we haven't seen any problems with it.  Thus, it would
+require a malicious client to cause this to happen.
+
+It would also require remote CIB administration to be enabled via
+remote-clear-port or remote-tls-port, which we do not do by default.
+Additionally, if remote-tls-port is in use, it requires the client to
+complete the gnutls handshake procedure (pcmk__remote_message_xml is
+only called in cib_remote_msg after the handshake but before the client
+has authenticated).
+
+Co-Authored-By: Reid Wahl <nrwahl@protonmail.com>
+---
+ lib/common/remote.c | 50 +++++++++++++++++++++++++++++++++++++++------
+ 1 file changed, 44 insertions(+), 6 deletions(-)
+
+diff --git a/lib/common/remote.c b/lib/common/remote.c
+index f771f46..54620c2 100644
+--- a/lib/common/remote.c
++++ b/lib/common/remote.c
+@@ -593,15 +593,53 @@ pcmk__remote_message_xml(pcmk__remote_t *remote)
+     }
+ 
+     /* Support compression on the receiving end now, in case we ever want to add it later */
+-    if (header->payload_compressed) {
++    if (header->payload_compressed != 0) {
+         int rc = 0;
+-        unsigned int size_u = 1 + header->payload_uncompressed;
+-        char *uncompressed = calloc(1, header->payload_offset + size_u);
++        unsigned int size_u = 0;
++        char *uncompressed = NULL;
++
++#if (UINT32_MAX < UINT_MAX)
++        if (header->payload_uncompressed >= UINT_MAX) {
++            crm_err("Couldn't decompress message because uncompressed "
++                    "payload size (%" PRIu32 ") is greater than UINT_MAX "
++                    "(%u)", header->payload_uncompressed, UINT_MAX);
++            return NULL;
++        }
++#endif
+ 
+-        crm_trace("Decompressing message data %d bytes into %d bytes",
+-                 header->payload_compressed, size_u);
++        /* @TODO Is the extra byte for the null terminator?
++         * pcmk__remote_send_xml() also adds one byte to the iov length.
++         * (However, we do need to account for the possibility of receiving a
++         * message from an untrusted sender.)
++         */
++        size_u = 1 + header->payload_uncompressed;
++
++        /* Header and uncompressed payload must fit in the destination buffer.
++         * We do not need to separately check the header size here since
++         * localized_remote_header will return NULL if it's incorrect.
++         */
++#if (UINT_MAX >= SIZE_MAX)
++        if ((size_u >= SIZE_MAX)
++            || (header->payload_offset > (SIZE_MAX - size_u))) {
++#else
++        if (header->payload_offset > (SIZE_MAX - size_u)) {
++#endif
++            crm_err("Couldn't decompress message because the required buffer "
++                    "size (%" PRIu32 " + %u) is greater than SIZE_MAX (%zu)",
++                    header->payload_offset, size_u, SIZE_MAX);
++            return NULL;
++        }
++
++        crm_trace("Decompressing message data %" PRIu32 " bytes into %u "
++                  "bytes", header->payload_compressed, size_u);
++
++        uncompressed = calloc(1, header->payload_offset + size_u);
++        if (uncompressed == NULL) {
++            return NULL;
++        }
+ 
+-        rc = BZ2_bzBuffToBuffDecompress(uncompressed + header->payload_offset, &size_u,
++        rc = BZ2_bzBuffToBuffDecompress(uncompressed + header->payload_offset,
++                                        &size_u,
+                                         remote->buffer + header->payload_offset,
+                                         header->payload_compressed, 1, 0);
+         rc = pcmk__bzlib2rc(rc);
+-- 
+2.53.0
+
+From 07f44f9db114ea7f609029410712835c1256cd55 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Thu, 14 May 2026 13:26:07 -0400
+Subject: [PATCH 3/5] High: libcrmcommon: Limit the max size of a remote
+ message.
+
+Previously, we were just taking the sizes straight from the message
+header and allocating however much memory was asked for without
+checking.  It's possible for a malicious client to ask for a very large
+amount of memory (say, 4 GB since that'll fit in the uint32_t value for
+header->size_total).
+
+In that case, due to the use of calloc, we'll crash due to an out of
+memory error and the node could potentially be fenced.
+
+The fix is to simply check that the client isn't asking for too much
+memory.  This does unfortunately impose a size restriction on the
+message.  It's doubly unfortunate given how much work we've recently put
+into removing restrictions on IPC messages allowing for much larger
+clusters.
+
+I think the biggest thing these messages will ever contain is a CIB, so
+for now I'm going with a limit of 20 MB.  It is not my intention that
+this become a tuneable parameter that is exposed to the user.
+---
+ include/crm/common/remote_internal.h |  5 ++++-
+ lib/common/remote.c                  | 16 +++++++++++++++-
+ 2 files changed, 19 insertions(+), 2 deletions(-)
+
+diff --git a/include/crm/common/remote_internal.h b/include/crm/common/remote_internal.h
+index 030c7a4..c39fcef 100644
+--- a/include/crm/common/remote_internal.h
++++ b/include/crm/common/remote_internal.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2008-2023 the Pacemaker project contributors
++ * Copyright 2008-2026 the Pacemaker project contributors
+  *
+  * The version control history for this file may have further details.
+  *
+@@ -10,6 +10,9 @@
+ #ifndef PCMK__REMOTE_INTERNAL__H
+ #  define PCMK__REMOTE_INTERNAL__H
+ 
++// The maximum payload size for a remote message (in bytes)
++#define PCMK__REMOTE_MSG_MAX_SIZE (20 * 1024 * 1024)
++
+ // internal functions from remote.c
+ 
+ typedef struct pcmk__remote_s pcmk__remote_t;
+diff --git a/lib/common/remote.c b/lib/common/remote.c
+index 54620c2..256ff11 100644
+--- a/lib/common/remote.c
++++ b/lib/common/remote.c
+@@ -597,6 +597,7 @@ pcmk__remote_message_xml(pcmk__remote_t *remote)
+         int rc = 0;
+         unsigned int size_u = 0;
+         char *uncompressed = NULL;
++        size_t buffer_size = 0;
+ 
+ #if (UINT32_MAX < UINT_MAX)
+         if (header->payload_uncompressed >= UINT_MAX) {
+@@ -630,10 +631,17 @@ pcmk__remote_message_xml(pcmk__remote_t *remote)
+             return NULL;
+         }
+ 
++        buffer_size = (size_t) header->payload_offset + size_u;
++        if (buffer_size > PCMK__REMOTE_MSG_MAX_SIZE) {
++            crm_err("Message size %zu is larger than max allowed %u bytes",
++                    buffer_size, PCMK__REMOTE_MSG_MAX_SIZE);
++            return NULL;
++        }
++
+         crm_trace("Decompressing message data %" PRIu32 " bytes into %u "
+                   "bytes", header->payload_compressed, size_u);
+ 
+-        uncompressed = calloc(1, header->payload_offset + size_u);
++        uncompressed = calloc(1, buffer_size);
+         if (uncompressed == NULL) {
+             return NULL;
+         }
+@@ -780,6 +788,12 @@ read_available_remote_data(pcmk__remote_t *remote)
+         read_len = header->size_total;
+     }
+ 
++    if (read_len > PCMK__REMOTE_MSG_MAX_SIZE) {
++        crm_err("Message size %zu is larger than max allowed %u bytes",
++                read_len, PCMK__REMOTE_MSG_MAX_SIZE);
++        return EINVAL;
++    }
++
+     /* automatically grow the buffer when needed */
+     if(remote->buffer_size < read_len) {
+         remote->buffer_size = 2 * read_len;
+-- 
+2.53.0
+
+From 3d9bf582dc28b94d59037ac32a3b4ee6498a3e35 Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Fri, 15 May 2026 10:19:33 -0400
+Subject: [PATCH 4/5] High: libcrmcommon: Fix an integer overflow in
+ pcmk__remote_send_xml.
+
+iov[0].iov_len is a size_t.  iov[1].iov_len is also a size_t (which
+comes from the length of a string, which is a size_t).  We're adding
+those together and storing them in a uint32_t, so make sure the result
+will fit.
+
+Fixes RHEL-181155
+---
+ lib/common/remote.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/lib/common/remote.c b/lib/common/remote.c
+index 256ff11..26f1917 100644
+--- a/lib/common/remote.c
++++ b/lib/common/remote.c
+@@ -560,6 +560,13 @@ pcmk__remote_send_xml(pcmk__remote_t *remote, const xmlNode *msg)
+     header->version = REMOTE_MSG_VERSION;
+     header->payload_offset = iov[0].iov_len;
+     header->payload_uncompressed = iov[1].iov_len;
++
++    if ((UINT32_MAX - iov[0].iov_len) < iov[1].iov_len) {
++        crm_err("Remote message size %zu + %zu exceeds maximum of %" PRIu32,
++                iov[0].iov_len, iov[1].iov_len, UINT32_MAX);
++        goto done;
++    }
++
+     header->size_total = iov[0].iov_len + iov[1].iov_len;
+ 
+     rc = remote_send_iovs(remote, iov, 2);
+@@ -568,6 +575,7 @@ pcmk__remote_send_xml(pcmk__remote_t *remote, const xmlNode *msg)
+                 pcmk_rc_str(rc), rc);
+     }
+ 
++done:
+     free(iov[0].iov_base);
+     free(iov[1].iov_base);
+     return rc;
+-- 
+2.53.0
+
+From d022a58012629a5d4ecc84dc5d2f325f01738adc Mon Sep 17 00:00:00 2001
+From: Chris Lumens <clumens@redhat.com>
+Date: Wed, 17 Jun 2026 15:55:28 -0400
+Subject: [PATCH 5/5] Med: libcrmcommon: Add additional checks to
+ pcmk__remote_message_xml.
+
+coverity flags the existing code for using a tainted expression as an
+index to a pointer.  While we're fixing other range errors and overflows
+in this code, we should fix this one as well by porting the existing
+code from the main branch.
+---
+ lib/common/remote.c | 14 +++++++++++++-
+ 1 file changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/lib/common/remote.c b/lib/common/remote.c
+index 26f1917..fbcf0a0 100644
+--- a/lib/common/remote.c
++++ b/lib/common/remote.c
+@@ -594,6 +594,7 @@ xmlNode *
+ pcmk__remote_message_xml(pcmk__remote_t *remote)
+ {
+     xmlNode *xml = NULL;
++    size_t data_size = 0;
+     struct remote_header_v0 *header = localized_remote_header(remote);
+ 
+     if (header == NULL) {
+@@ -686,7 +687,18 @@ pcmk__remote_message_xml(pcmk__remote_t *remote)
+     /* take ownership of the buffer */
+     remote->buffer_offset = 0;
+ 
+-    CRM_LOG_ASSERT(remote->buffer[sizeof(struct remote_header_v0) + header->payload_uncompressed - 1] == 0);
++    data_size = (size_t) header->payload_offset + header->payload_uncompressed;
++
++    // Ensure the buffer is as big as it should be
++    CRM_CHECK(remote->buffer_size >= data_size, return NULL);
++
++    /* Ensure the buffer is null-terminated (see
++     * pcmk__read_available_remote_data()).
++     *
++     * Note that payload_uncompressed contains the payload size including the
++     * null byte (see pcmk__remote_send_xml()).
++     */
++    CRM_CHECK(remote->buffer[data_size] == '\0', return NULL);
+ 
+     xml = string2xml(remote->buffer + header->payload_offset);
+     if (xml == NULL && header->version > REMOTE_MSG_VERSION) {
+-- 
+2.53.0
+

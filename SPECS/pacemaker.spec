@@ -244,7 +244,7 @@
 Name:          pacemaker
 Summary:       Scalable High-Availability cluster resource manager
 Version:       %{pcmkversion}
-Release:       %{pcmk_release}.5%{?dist}
+Release:       %{pcmk_release}.6%{?dist}
 %if %{defined _unitdir}
 License:       GPL-2.0-or-later AND LGPL-2.1-or-later
 %else
@@ -281,6 +281,7 @@ Patch013:      013-crm_node-i-initialize.patch
 Patch014:      014-remote-fencing.patch
 Patch015:      015-ipc-disconnect.patch
 Patch016:      016-fewer-messages.patch
+Patch017:      017-remote-overflow.patch
 
 Requires:      resource-agents
 Requires:      %{pkgname_pcmk_libs}%{?_isa} = %{version}-%{release}
@@ -1032,6 +1033,10 @@ exit 0
 %license %{nagios_name}-%{nagios_hash}/COPYING
 
 %changelog
+* Tue Jun 30 2026 Chris Lumens <clumens@redhat.com> - 2.1.7-5.6
+- Fix integer overflows in remote message decompression code (CVE-2026-10649)
+- Resolves: RHEL-181157
+
 * Mon Nov 17 2025 Chris Lumens <clumens@redhat.com> - 2.1.7-5.5
 - Don't overwhelm the FSA queue with repeated CIB queries
 - Related: RHEL-76276
