@@ -184,7 +184,7 @@
 Name:          pacemaker
 Summary:       Scalable High-Availability cluster resource manager
 Version:       %{pcmkversion}
-Release:       %{pcmk_release}%{?dist}
+Release:       %{pcmk_release}%{?dist}.1
 License:       GPL-2.0-or-later AND LGPL-2.1-or-later
 Url:           https://www.clusterlabs.org/
 
@@ -206,6 +206,9 @@ Patch004:      004-crm_resource_wait.patch
 Patch005:      005-ipc_evict.patch
 Patch006:      006-fewer_messages.patch
 Patch007:      007-transient_attrs.patch
+# CVE-2026-10649
+# https://github.com/clusterLabs/pacemaker/pull/4129
+Patch008:      008-CVE-2026-10649.patch
 
 Requires:      resource-agents
 Requires:      %{pkgname_pcmk_libs}%{?_isa} = %{version}-%{release}
@@ -797,6 +800,11 @@ exit 0
 %{_datadir}/pkgconfig/pacemaker-schemas.pc
 
 %changelog
+* Fri Jul 10 2026 RHEL Packaging Agent <redhat-ymir-agent@redhat.com> - 3.0.1-5.1
+- Fix integer overflows and message size limits in remote message
+  handling code (CVE-2026-10649)
+- Resolves: RHEL-181149
+
 * Mon Dec 8 2025 Chris Lumens <clumens@redhat.com> - 3.0.1-5
 - Fix a race condition between daemons when erasing transient attrs
 - Resolves: RHEL-23082
